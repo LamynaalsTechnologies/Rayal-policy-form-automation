@@ -1,7 +1,31 @@
-const { By, until } = require('selenium-webdriver');
+const { By, until, Key } = require('selenium-webdriver');
 const { createFreshDriverFromBaseProfile } = require('./browser');
 const fs = require('fs');
 const path = require('path');
+
+async function waitForLoaderToDisappear(driver, locator = By.css('.k-loading-mask'), timeout = 20000) {
+  console.log(`Waiting for loader (${locator}) to disappear...`);
+  try {
+    await driver.wait(async () => {
+      const loaders = await driver.findElements(locator);
+      if (loaders.length === 0) {
+        return true; // Loader is gone
+      }
+      try {
+        const isDisplayed = await loaders[0].isDisplayed();
+        return !isDisplayed;
+      } catch (e) {
+        if (e.name === 'StaleElementReferenceError') {
+          return true;
+        }
+        throw e;
+      }
+    }, timeout);
+    console.log("Loader has disappeared.");
+  } catch (error) {
+    console.log("Loader did not disappear in time (which is ok).");
+  }
+}
 
 async function safeClick(driver, locator, timeout = 15000) {
   const el = await driver.wait(until.elementLocated(locator), timeout);
@@ -13,6 +37,109 @@ async function safeClick(driver, locator, timeout = 15000) {
     await driver.executeScript('arguments[0].click();', el);
   }
   return el;
+}
+
+async function forceSendKeys(driver, locator, text, timeout = 10000) {
+  try {
+    const element = await driver.wait(until.elementLocated(locator), timeout);
+    // No visibility check, just scroll and set value
+    await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", element);
+    await driver.sleep(500);
+    await driver.executeScript(`
+      arguments[0].value = '${text}';
+      var event = new Event('input', { bubbles: true });
+      arguments[0].dispatchEvent(event);
+    `, element);
+    console.log(`Forced sending keys to ${locator}`);
+    return element;
+  } catch (error) {
+    console.log(`Error in forceSendKeys for ${locator}:`, error.message);
+    throw error;
+  }
+}
+
+async function safeSendKeys(driver, locator, text, timeout = 10000) {
+  try {
+    const element = await driver.wait(until.elementLocated(locator), timeout);
+    await driver.wait(until.elementIsVisible(element), timeout);
+    await driver.wait(until.elementIsEnabled(element), timeout);
+    await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", element);
+    await driver.sleep(500);
+    
+    try {
+      await element.clear();
+      await element.sendKeys(text);
+    } catch {
+      await driver.executeScript(`
+        arguments[0].value = '';
+        arguments[0].value = '${text}';
+        var event = new Event('input', { bubbles: true });
+        arguments[0].dispatchEvent(event);
+      `, element);
+    }
+    return element;
+  } catch (error) {
+    console.log(`Error in safeSendKeys for ${locator}:`, error.message);
+    throw error;
+  }
+}
+
+async function safeSelectDropdown(driver, selectId, value, timeout = 10000) {
+  try {
+    const selectElement = await driver.wait(until.elementLocated(By.id(selectId)), timeout);
+    await driver.wait(until.elementIsVisible(selectElement), timeout);
+    await driver.wait(until.elementIsEnabled(selectElement), timeout);
+    await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", selectElement);
+    await driver.sleep(500);
+    
+    await driver.executeScript(`
+      var select = document.getElementById("${selectId}");
+      if (select) {
+        select.value = "${value}";
+        var event = new Event('change', { bubbles: true });
+        select.dispatchEvent(event);
+      }
+    `);
+    
+    await driver.sleep(2000);
+    return selectElement;
+  } catch (error) {
+    console.log(`Error in safeSelectDropdown for ${selectId}:`, error.message);
+    throw error;
+  }
+}
+
+
+async function waitForElementAndRetry(driver, locator, action, maxRetries = 3, timeout = 10000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`Attempt ${attempt} for ${locator}...`);
+      const element = await driver.wait(until.elementLocated(locator), timeout);
+      await driver.wait(until.elementIsVisible(element), timeout);
+      await driver.wait(until.elementIsEnabled(element), timeout);
+      await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", element);
+      await driver.sleep(500);
+      
+      if (action === 'click') {
+        try {
+          await element.click();
+        } catch {
+          await driver.executeScript("arguments[0].click();", element);
+        }
+      } else if (action === 'sendKeys') {
+        // This function will be handled by safeSendKeys
+        return element;
+      }
+      
+      return element;
+    } catch (error) {
+      console.log(`Attempt ${attempt} failed:`, error.message);
+      if (attempt === maxRetries) {
+        throw error;
+      }
+      await driver.sleep(2000);
+    }
+  }
 }
 
 async function deleteDirectoryRecursive(dirPath) {
@@ -42,7 +169,7 @@ async function fillRelianceForm(data = {}) {
     await driver.get('https://smartzone.reliancegeneral.co.in/Login/IMDLogin');
 
     // === STEP 1: wait for manual login ===
-    console.log("Waiting 20s for manual login...");
+    console.log("Waiting 30s for manual login...");
     await driver.sleep(30000);
 
     // === STEP 1.1: Close popup modal if present ===
@@ -70,9 +197,8 @@ async function fillRelianceForm(data = {}) {
     );
     console.log("Motors menu detected!");
 
-    // Hover on Motors menu to open submenu
     await driver.actions({ bridge: true }).move({ origin: motorsMenu }).perform();
-    await driver.sleep(1000); // allow submenu to render
+    await driver.sleep(3000);
     console.log("Hovered on Motors menu...");
 
     // === STEP 3: click Two Wheeler ===
@@ -89,102 +215,170 @@ async function fillRelianceForm(data = {}) {
       await driver.executeScript("arguments[0].click();", twoWheelerLink);
     }
     console.log("Clicked Two Wheeler link!");
-
+await driver.sleep(4000);
     // === STEP 4: select "Two Wheeler Package Bundled (Only New Veh.)" ===
     console.log("Selecting Sub Product...");
+    
+    // The old way of setting value via javascript might not trigger all events.
+    // We will simulate a user clicking the dropdown and selecting an option.
 
-    // Wait for dropdown to be ready
-    const productDropdown = await driver.wait(
-      until.elementLocated(By.id("ddlMotorProducts")),
+    // 1. Find and click the Kendo dropdown to make the options visible.
+    const dropdown = await driver.wait(
+      until.elementLocated(By.css("span[aria-owns='ddlMotorProducts_listbox']")),
       15000
     );
-    await driver.executeScript("arguments[0].scrollIntoView(true);", productDropdown);
+    await driver.executeScript("arguments[0].scrollIntoView(true);", dropdown);
     await driver.sleep(500);
+    await dropdown.click();
+    await driver.sleep(1000); // Wait for dropdown animation
 
-    // Use Kendo JS API to select by value (2375)
-    await driver.executeScript(`
-      var dropdown = $("#ddlMotorProducts").data("kendoDropDownList");
-      dropdown.value("2375"); // Two Wheeler Package Bundled (Only New Veh.)
-      dropdown.trigger("change");
-    `);
-    console.log("Selected: Two Wheeler Package Bundled (Only New Veh.) via Kendo API");
-await driver.sleep(2000);
+    // 2. Find the specific option in the popup list and click it.
+    const optionText = "Two Wheeler Package Bundled (Only New Veh.)";
+    // The options are in a popup, so we search the whole document.
+    const optionElement = await driver.wait(
+      until.elementLocated(By.xpath(`//li[normalize-space(.) = '${optionText}']`)),
+      10000
+    );
+    await driver.wait(until.elementIsVisible(optionElement), 5000);
+    await optionElement.click();
 
-console.log("Handling Skip page and checkbox...");
+    console.log("Selected product by simulating user click.");
+    await driver.sleep(2000); // Give time for the API call to be made.
 
-// === STEP 5: Click "Skip To Main Page" link if present ===
-try {
-  const skipLink = await driver.wait(
-    until.elementLocated(By.xpath("//a[contains(text(),'Skip To Main Page')]")),
-    5000
-  );
-  await driver.executeScript("arguments[0].click();", skipLink);
-  console.log("Clicked 'Skip To Main Page'");
-  await driver.sleep(2000); // wait 2 sec
-} catch (err) {
-  console.log("No skip link detected, continuing...");
-}
+    console.log("Handling Skip page and checkbox...");
 
-// === STEP 6: Click "ISPANNotAvailable" checkbox ===
-try {
-  const ispCheckbox = await driver.wait(
-    until.elementLocated(By.id("ISPANNotAvailable")),
-    5000
-  );
-  await driver.executeScript("arguments[0].click();", ispCheckbox);
-  console.log("Checked ISPANNotAvailable checkbox");
+    // === STEP 5: Skip link ===
+    try {
+      const skipLink = await driver.wait(
+        until.elementLocated(By.xpath("//a[contains(text(),'Skip To Main Page')]")),
+        5000
+      );
+      await driver.executeScript("arguments[0].click();", skipLink);
+      console.log("Clicked 'Skip To Main Page'");
+      await driver.sleep(2000);
+    } catch (err) {
+      console.log("No skip link detected, continuing...");
+    }
 
-  // === Wait for the iframe to appear inside modal ===
-  const iframeEl = await driver.wait(
-    until.elementLocated(By.css("#ClientForm60DetailsWindow iframe")),
-    10000
-  );
-  console.log("Modal iframe detected!");
+    // === STEP 6: Checkbox + iframe form ===
+    try {
+      const ispCheckbox = await driver.wait(
+        until.elementLocated(By.id("ISPANNotAvailable")),
+        5000
+      );
+      await driver.executeScript("arguments[0].click();", ispCheckbox);
+      console.log("Checked ISPANNotAvailable checkbox");
 
-  // Switch to iframe context
-  await driver.switchTo().frame(iframeEl);
-  console.log("Switched to modal iframe");
+      const iframeEl = await driver.wait(
+        until.elementLocated(By.css("#ClientForm60DetailsWindow iframe")),
+        10000
+      );
+      console.log("Modal iframe detected!");
 
-  // === Now fill the form inside iframe ===
-  const proposerTitle1 = await driver.wait(
-    until.elementLocated(By.id("proposerTitle1")),
-    10000
-  );
-  await proposerTitle1.sendKeys(data.proposerTitle || "Mr.");
+      await driver.switchTo().frame(iframeEl);
+      console.log("Switched to modal iframe");
 
-  await driver.findElement(By.id("FirstName")).sendKeys(data.firstName || "John");
-  await driver.findElement(By.id("MiddleName")).sendKeys(data.middleName || "M");
-  await driver.findElement(By.id("LastName")).sendKeys(data.lastName || "Doe");
-  await driver.findElement(By.id("dob")).sendKeys(data.dob || "01/01/1990");
-  await driver.findElement(By.id("proposerTitle2")).sendKeys(data.fatherTitle || "Mr.");
-  await driver.findElement(By.name("FatherFirstName")).sendKeys(data.fatherFirstName || "Robert");
-   await driver.findElement(By.id("flat")).sendKeys(data.flatNo || "101");
-  await driver.findElement(By.id("floor")).sendKeys(data.floorNo || "1");
-  await driver.findElement(By.id("Nameofpremises")).sendKeys(data.premisesName || "Sunshine Apartments");
-  await driver.findElement(By.id("block")).sendKeys(data.blockNo || "A");
-  await driver.findElement(By.id("road")).sendKeys(data.road || "MG Road");
-  await driver.findElement(By.id("state")).sendKeys(data.state || "KARNATAKA");
-  await driver.findElement(By.id("district")).sendKeys(data.district || "Bangalore");
-  await driver.findElement(By.id("town")).sendKeys(data.town || "Bangalore");
-  await driver.findElement(By.id("pincode")).sendKeys(data.pinCode || "560001");
-  await driver.findElement(By.id("area")).sendKeys(data.area || "MG Road");
+      // Wait for form to be fully loaded
+      await driver.sleep(5000);
 
-  await driver.findElement(By.id("mobileno")).sendKeys(data.mobile || "9876543210");
-  await driver.findElement(By.id("aadhar")).sendKeys(data.aadhar || "123412341234");
+      // === Fill mandatory fields with safe methods ===
+      console.log("Filling form fields...");
 
-  // ... fill other fields ...
+      // Proposer Title
+      await safeSelectDropdown(driver, "proposerTitle1", data.proposerTitle || "Mr.");
+      
+      // Name fields
+      await safeSendKeys(driver, By.id("FirstName"), data.firstName || "John");
+      await safeSendKeys(driver, By.id("MiddleName"), data.middleName || "M");
+      await safeSendKeys(driver, By.id("LastName"), data.lastName || "Doe");
 
-  console.log("Mandatory fields inside modal iframe filled successfully!");
+      // DOB - Special handling for date field
+      console.log("Filling DOB field...");
+      const dobField = await waitForElementAndRetry(driver, By.id("dob"), 'sendKeys');
+      await driver.executeScript(`
+        arguments[0].value = '';
+        arguments[0].value = '${data.dob || "06-10-2007"}';
+        var event = new Event('input', { bubbles: true });
+        arguments[0].dispatchEvent(event);
+      `, dobField);
 
-  // === Switch back to main content ===
-  await driver.switchTo().defaultContent();
+      // Father's details
+      await safeSelectDropdown(driver, "proposerTitle2", data.fatherTitle || "Mr.");
+      await safeSendKeys(driver, By.name("FatherFirstName"), data.fatherFirstName || "Robert");
 
-} catch (err) {
-  console.log("Error filling modal fields:", err.message);
-}
+      // Address fields
+      await safeSendKeys(driver, By.id("flat"), data.flatNo || "101");
+      await safeSendKeys(driver, By.id("floor"), data.floorNo || "1");
+      await safeSendKeys(driver, By.id("Nameofpremises"), data.premisesName || "Sunshine Apartments");
+      await safeSendKeys(driver, By.id("block"), data.blockNo || "A");
+      await safeSendKeys(driver, By.id("road"), data.road || "MG Road");
+       await safeSendKeys(driver, By.id("area"), data.road || "MG Road");
+      
+      // === ADDRESS DROPDOWNS - Simplified approach ===
+      console.log("Filling address dropdowns...");
+      
+      // 1. Select State only (skip dependent dropdowns)
+      await safeSelectDropdown(driver, "state", data.state || "30"); // KARNATAKA
+      console.log("Selected State");
+      await driver.sleep(2000);
+      
+      // 2. Use Pincode Search field and select first result
+      console.log("Using pincode search field...");
+      const pincodeInput = await safeSendKeys(driver, By.id("pincodesearch"), data.pinCode || "614630");
+      await driver.sleep(4000);
 
+      // Select the first item from the dropdown by pressing Arrow Down and then Enter.
+      console.log("Selecting first pincode result from dropdown...");
+      await pincodeInput.sendKeys(Key.ARROW_DOWN);
+      await driver.sleep(1000);
+      await pincodeInput.sendKeys(Key.ENTER);
+      
+      await waitForLoaderToDisappear(driver);
+      await driver.sleep(500);
+      
+  
+      
+      // Continue with other fields
+      // await safeSendKeys(driver, By.id("area"), data.area || "MG Road");
+      
+      // Phone fields
+      await safeSendKeys(driver, By.id("mobileno"), data.mobile || "9876543210");
+      
 
+      
+      console.log("Filled all main form mandatory fields!");
+      await driver.sleep(2000);
 
+      // === STEP 7: Submit Button ===
+      console.log("Looking for submit button...");
+      await waitForElementAndRetry(driver, By.id("btnSubmit"), 'click');
+      console.log("Clicked Submit button!");
+
+      // Wait for submission to process
+      await driver.sleep(5000);
+      console.log("Form submission attempted!");
+
+      // Back to main content
+      await driver.switchTo().defaultContent();
+
+    } catch (err) {
+      console.log("Error filling modal fields:", err.message);
+      // Take screenshot to debug the issue
+      try {
+        const screenshot = await driver.takeScreenshot();
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        fs.writeFileSync(`error-screenshot-${timestamp}.png`, screenshot, 'base64');
+        console.log(`Error screenshot saved as error-screenshot-${timestamp}.png`);
+        
+        // Also save page source for debugging
+        const pageSource = await driver.getPageSource();
+        fs.writeFileSync(`page-source-${timestamp}.html`, pageSource);
+        console.log(`Page source saved as page-source-${timestamp}.html`);
+      } catch (e) {
+        console.log("Could not take screenshot or save page source:", e.message);
+      }
+      throw err;
+    }
 
     await driver.sleep(2000);
 
@@ -203,5 +397,26 @@ try {
     }
   }
 }
+
+// Test data
+const testData = {
+  proposerTitle: "Mr.",
+  firstName: "John",
+  middleName: "M",
+  lastName: "Doe",
+  dob: "06-10-2007",
+  fatherTitle: "Mr.",
+  fatherFirstName: "Robert",
+  flatNo: "101",
+  floorNo: "1",
+  premisesName: "Sunshine Apartments",
+  blockNo: "A",
+  road: "MG Road",
+  state: "30", // KARNATAKA
+  pinCode: "614630",
+  area: "MG Road",
+  mobile: "9876543210",
+  aadhar: "123412341234"
+};
 
 module.exports = { fillRelianceForm };

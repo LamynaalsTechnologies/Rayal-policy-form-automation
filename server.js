@@ -64,7 +64,7 @@ async function main() {
   console.log('Connected successfully to MongoDB');
   const db = client.db(dbName);
   const collection = db.collection('data');
-  const portalLoginUrl = 'https://www.uiic.in/GCWebPortal/login/LoginAction.do?p=login';
+  const portalLoginUrl = 'https://uiic.in/GCWebPortal/login/LoginAction.do?p=login';
   const portalHomeUrl = 'https://www.uiic.in/GCWebPortal/login/HomeAction.do';
 
   // Job queue with unbounded parallel jobs using TABS on a single driver
