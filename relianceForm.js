@@ -417,12 +417,10 @@ async function fillRelianceForm(data = {}) {
       // await safeSendKeys(driver, By.id("area"), data.area || "MG Road");
 
       // Phone fields
-      await safeSendKeys(
-        driver,
-        By.id("mobileno"),
-        data.mobile || "9876543210"
-      );
+      await safeSendKeys(driver, By.id("mobileno"), data.mobile || "8838166045");
+      
 
+      
       console.log("Filled all main form mandatory fields!");
       await driver.sleep(2000);
 
@@ -437,6 +435,471 @@ async function fillRelianceForm(data = {}) {
 
       // Back to main content
       await driver.switchTo().defaultContent();
+
+      // === STEP 8: Handle post-submission elements ===
+      console.log("Looking for post-submission elements...");
+      
+      try {
+        // Wait for the Vertical Code dropdown
+        console.log("Waiting for Vertical Code dropdown...");
+        const verticalCodeDropdown = await driver.wait(
+          until.elementLocated(By.id("ddlobjBranchDetailAgentsHnin")),
+          15000
+        );
+        console.log("Vertical Code dropdown found!");
+        
+        // Click on the dropdown to open it
+        await driver.executeScript("arguments[0].click();", verticalCodeDropdown);
+        await driver.sleep(2000);
+        console.log("Vertical Code dropdown clicked!");
+        
+        // Select "GIRNAR FINSERV PRIVATE LIMITED_518898" option
+        console.log("Selecting GIRNAR FINSERV PRIVATE LIMITED_518898...");
+        const girnarOption = await driver.wait(
+          until.elementLocated(By.xpath("//li[contains(text(), 'GIRNAR FINSERV PRIVATE LIMITED_518898')]")),
+          10000
+        );
+        await driver.executeScript("arguments[0].click();", girnarOption);
+        console.log("Selected GIRNAR FINSERV PRIVATE LIMITED_518898!");
+        await driver.sleep(2000);
+        
+        // Wait for and click the "Validate Customer" button
+        console.log("Looking for Validate Customer button...");
+        const validateButton = await driver.wait(
+          until.elementLocated(By.id("BtnSaveClientDetails")),
+          10000
+        );
+        await driver.wait(until.elementIsVisible(validateButton), 5000);
+        await driver.wait(until.elementIsEnabled(validateButton), 5000);
+        
+        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", validateButton);
+        await driver.sleep(500);
+        
+        try {
+          await validateButton.click();
+        } catch {
+          await driver.executeScript("arguments[0].click();", validateButton);
+        }
+        console.log("Validate Customer button clicked!");
+        
+        // Wait for validation to process
+        await driver.sleep(3000);
+        console.log("Customer validation attempted!");
+
+        // === STEP 9: Fill Vehicle Details ===
+        console.log("Filling vehicle details...");
+        
+        // Vehicle Make/Model autocomplete
+        console.log("Filling vehicle make/model...");
+        const vehicleMakeInput = await driver.wait(
+          until.elementLocated(By.id("VehicleDetailsMakeModel")),
+          10000
+        );
+        await driver.wait(until.elementIsVisible(vehicleMakeInput), 5000);
+        await driver.wait(until.elementIsEnabled(vehicleMakeInput), 5000);
+        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", vehicleMakeInput);
+        await driver.sleep(500);
+        
+        // Clear the field first
+        await vehicleMakeInput.clear();
+        await driver.sleep(500);
+        
+        // Click on the input to focus it
+        await vehicleMakeInput.click();
+        await driver.sleep(500);
+        
+        // Type the search text and trigger events
+        await vehicleMakeInput.sendKeys("tvs scooty zest");
+        await driver.sleep(1000);
+        
+        // Trigger additional events to ensure autocomplete works
+        await driver.executeScript(`
+          var input = arguments[0];
+          var event = new Event('input', { bubbles: true });
+          input.dispatchEvent(event);
+          
+          var keyupEvent = new Event('keyup', { bubbles: true });
+          input.dispatchEvent(keyupEvent);
+          
+          var changeEvent = new Event('change', { bubbles: true });
+          input.dispatchEvent(changeEvent);
+        `, vehicleMakeInput);
+        
+        // Wait for API call to complete and dropdown to appear
+        await driver.sleep(4000);
+        console.log("Waiting for dropdown options to appear...");
+        
+        // Try multiple selectors for the dropdown items
+        let firstResult = null;
+        try {
+          // Try Kendo autocomplete listbox items
+          firstResult = await driver.wait(
+            until.elementLocated(By.xpath("//ul[@id='VehicleDetailsMakeModel_listbox']//li[1]")),
+            5000
+          );
+        } catch (e) {
+          try {
+            // Try general k-item class
+            firstResult = await driver.wait(
+              until.elementLocated(By.xpath("//li[contains(@class, 'k-item')][1]")),
+              5000
+            );
+          } catch (e2) {
+            try {
+              // Try any li element in autocomplete
+              firstResult = await driver.wait(
+                until.elementLocated(By.xpath("//li[contains(@class, 'k-list-item')][1]")),
+                5000
+              );
+            } catch (e3) {
+              console.log("Could not find dropdown options, trying alternative approach...");
+              // Try to press Enter to select if no dropdown appears
+              await vehicleMakeInput.sendKeys(Key.ENTER);
+              await driver.sleep(1000);
+              console.log("Pressed Enter to confirm selection");
+              return; // Exit this section
+            }
+          }
+        }
+        
+        if (firstResult) {
+          await driver.wait(until.elementIsVisible(firstResult), 5000);
+          await firstResult.click();
+          console.log("Selected first vehicle make/model result");
+          await driver.sleep(1000);
+        }
+
+        // Purchase Date - fill with today's date
+        console.log("Filling purchase date...");
+        const today = new Date().toLocaleDateString('en-GB'); // DD/MM/YYYY format
+        const purchaseDateInput = await driver.wait(
+          until.elementLocated(By.id("Date_PurchaseVehicle")),
+          10000
+        );
+        await driver.executeScript(`
+          arguments[0].value = '${today}';
+          var event = new Event('change', { bubbles: true });
+          arguments[0].dispatchEvent(event);
+        `, purchaseDateInput);
+        console.log("Filled purchase date with today's date");
+
+        // Registration Date - fill with today's date
+        console.log("Filling registration date...");
+        const registrationDateInput = await driver.wait(
+          until.elementLocated(By.id("Date_RegistrationVehicle")),
+          10000
+        );
+        await driver.executeScript(`
+          arguments[0].value = '${today}';
+          var event = new Event('change', { bubbles: true });
+          arguments[0].dispatchEvent(event);
+        `, registrationDateInput);
+        console.log("Filled registration date with today's date");
+
+        // Manufacturing Year and Month - Try a simpler approach
+        console.log("Attempting manufacturing year and month selection...");
+        try {
+          // Try to set values directly using JavaScript
+          await driver.executeScript(`
+            // Try to set manufacturing year
+            var yearDropdown = document.getElementById('Manufacturing_YearVehicle');
+            if (yearDropdown) {
+              var kendoYearWidget = $(yearDropdown).data('kendoDropDownList');
+              if (kendoYearWidget) {
+                // Try to select the first available year
+                var dataSource = kendoYearWidget.dataSource;
+                if (dataSource && dataSource.data().length > 0) {
+                  var firstYear = dataSource.data()[0];
+                  kendoYearWidget.value(firstYear.Value);
+                  kendoYearWidget.trigger('change');
+                  console.log('Set manufacturing year to:', firstYear.Text);
+                }
+              }
+            }
+            
+            // Wait a bit then try to set manufacturing month
+            setTimeout(function() {
+              var monthDropdown = document.getElementById('Manufacturing_MonthVehicle');
+              if (monthDropdown) {
+                var kendoMonthWidget = $(monthDropdown).data('kendoDropDownList');
+                if (kendoMonthWidget) {
+                  var dataSource = kendoMonthWidget.dataSource;
+                  if (dataSource && dataSource.data().length > 0) {
+                    var firstMonth = dataSource.data()[0];
+                    kendoMonthWidget.value(firstMonth.Value);
+                    kendoMonthWidget.trigger('change');
+                    console.log('Set manufacturing month to:', firstMonth.Text);
+                  }
+                }
+              }
+            }, 1000);
+          `);
+          
+          await driver.sleep(3000); // Wait for the JavaScript to execute
+          console.log("Attempted to set manufacturing year and month via JavaScript");
+          
+        } catch (err) {
+          console.log("Error setting manufacturing year/month:", err.message);
+        }
+
+        // Check "Is New Vehicle" checkbox
+        console.log("Checking 'Is New Vehicle' checkbox...");
+        const newVehicleCheckbox = await driver.wait(
+          until.elementLocated(By.id("IsNewVehicle")),
+          10000
+        );
+        await driver.executeScript("arguments[0].click();", newVehicleCheckbox);
+        console.log("Checked 'Is New Vehicle' checkbox");
+        await driver.sleep(1000);
+
+        // RTO City Location autocomplete
+        console.log("Filling RTO city location...");
+        const rtoCityInput = await driver.wait(
+          until.elementLocated(By.id("RTOCityLocation")),
+          10000
+        );
+        await driver.wait(until.elementIsVisible(rtoCityInput), 5000);
+        await driver.wait(until.elementIsEnabled(rtoCityInput), 5000);
+        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", rtoCityInput);
+        await driver.sleep(500);
+        
+        // Clear the field first
+        await rtoCityInput.clear();
+        await driver.sleep(500);
+        
+        // Click on the input to focus it
+        await rtoCityInput.click();
+        await driver.sleep(500);
+        
+        // Type the search text and trigger events
+        await rtoCityInput.sendKeys("coimbatore");
+        await driver.sleep(1000);
+        
+        // Trigger additional events to ensure autocomplete works
+        await driver.executeScript(`
+          var input = arguments[0];
+          var event = new Event('input', { bubbles: true });
+          input.dispatchEvent(event);
+          
+          var keyupEvent = new Event('keyup', { bubbles: true });
+          input.dispatchEvent(keyupEvent);
+          
+          var changeEvent = new Event('change', { bubbles: true });
+          input.dispatchEvent(changeEvent);
+        `, rtoCityInput);
+        
+        // Wait for API call to complete and dropdown to appear
+        await driver.sleep(4000);
+        console.log("Waiting for RTO city dropdown options to appear...");
+        
+        // Try multiple selectors for the dropdown items
+        let rtoCitySelected = false;
+        try {
+          // Try Kendo autocomplete listbox items
+          const firstRtoResult = await driver.wait(
+            until.elementLocated(By.xpath("//ul[@id='RTOCityLocation_listbox']//li[1]")),
+            5000
+          );
+          await driver.wait(until.elementIsVisible(firstRtoResult), 3000);
+          await firstRtoResult.click();
+          console.log("Selected first RTO city result from listbox");
+          rtoCitySelected = true;
+        } catch (e) {
+          try {
+            // Try general k-item class
+            const firstRtoResult = await driver.wait(
+              until.elementLocated(By.xpath("//li[contains(@class, 'k-item')][1]")),
+              5000
+            );
+            await driver.wait(until.elementIsVisible(firstRtoResult), 3000);
+            await firstRtoResult.click();
+            console.log("Selected first RTO city result from general items");
+            rtoCitySelected = true;
+          } catch (e2) {
+            try {
+              // Try any li element in autocomplete
+              const firstRtoResult = await driver.wait(
+                until.elementLocated(By.xpath("//li[contains(@class, 'k-list-item')][1]")),
+                5000
+              );
+              await driver.wait(until.elementIsVisible(firstRtoResult), 3000);
+              await firstRtoResult.click();
+              console.log("Selected first RTO city result from list items");
+              rtoCitySelected = true;
+            } catch (e3) {
+              console.log("Could not find RTO city dropdown options, trying alternative approach...");
+              // Try to press Enter to select if no dropdown appears
+              await rtoCityInput.sendKeys(Key.ENTER);
+              await driver.sleep(1000);
+              console.log("Pressed Enter to confirm RTO city selection");
+              rtoCitySelected = true;
+            }
+          }
+        }
+        
+        if (rtoCitySelected) {
+          await driver.sleep(1000);
+          console.log("RTO city selection completed");
+        } else {
+          console.log("RTO city selection failed, continuing with form...");
+        }
+
+        // Engine Number
+        console.log("Filling engine number...");
+        const engineNumberInput = await driver.wait(
+          until.elementLocated(By.id("EngineNumberVehicle")),
+          10000
+        );
+        await driver.executeScript(`
+          arguments[0].value = 'FG5HS2808584';
+          var event = new Event('input', { bubbles: true });
+          arguments[0].dispatchEvent(event);
+        `, engineNumberInput);
+        console.log("Filled engine number");
+
+        // Chassis Number
+        console.log("Filling chassis number...");
+        const chassisNumberInput = await driver.wait(
+          until.elementLocated(By.id("ChasisNumberVehicle")),
+          10000
+        );
+        await driver.executeScript(`
+          arguments[0].value = 'MD626DG56S2H08322';
+          var event = new Event('input', { bubbles: true });
+          arguments[0].dispatchEvent(event);
+        `, chassisNumberInput);
+        console.log("Filled chassis number");
+
+        // Set IDV value
+        console.log("Setting IDV value...");
+        await driver.executeScript(`
+          document.getElementById('ActualIDVVehicle').value = '75000';
+        `);
+        console.log("Set IDV value to 75000");
+
+        // Click "Get Coverage Details" button
+        console.log("Clicking 'Get Coverage Details' button...");
+        const getCoverageButton = await driver.wait(
+          until.elementLocated(By.id("btnFetchIDV")),
+          10000
+        );
+        await driver.wait(until.elementIsVisible(getCoverageButton), 5000);
+        await driver.wait(until.elementIsEnabled(getCoverageButton), 5000);
+        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", getCoverageButton);
+        await driver.sleep(1000);
+        
+        // Try multiple click methods to ensure the click is registered
+        try {
+          // First try regular click
+          await getCoverageButton.click();
+          console.log("Regular click attempted on 'Get Coverage Details' button");
+        } catch (e) {
+          console.log("Regular click failed, trying JavaScript click...");
+          await driver.executeScript("arguments[0].click();", getCoverageButton);
+        }
+        
+        // Also try triggering the onclick event directly
+        await driver.executeScript(`
+          var button = document.getElementById('btnFetchIDV');
+          if (button) {
+            button.click();
+            // Also try calling the onclick function directly
+            if (button.onclick) {
+              button.onclick();
+            }
+            // Trigger the FetchIDV function
+            if (typeof FetchIDV === 'function') {
+              FetchIDV(button, 'InsertMode    ');
+            }
+          }
+        `);
+        
+        console.log("Clicked 'Get Coverage Details' button with multiple methods");
+        await driver.sleep(5000); // Wait longer for the API call to complete
+
+        // Click PA to Owner Driver checkbox to open modal
+        console.log("Clicking PA to Owner Driver checkbox to open modal...");
+        const paOwnerDriverCheckbox = await driver.wait(
+          until.elementLocated(By.id("ChkBox24")),
+          10000
+        );
+        await driver.executeScript("arguments[0].click();", paOwnerDriverCheckbox);
+        console.log("Clicked PA to Owner Driver checkbox, modal should open");
+        await driver.sleep(2000);
+        
+        // Wait for modal to open and click "No" checkbox
+        console.log("Waiting for modal and clicking 'No' checkbox...");
+        try {
+          const noCheckbox = await driver.wait(
+            until.elementLocated(By.id("OnNoofDL")),
+            10000
+          );
+          await driver.wait(until.elementIsVisible(noCheckbox), 5000);
+          await driver.executeScript("arguments[0].click();", noCheckbox);
+          console.log("Clicked 'No' checkbox in PA to Owner Driver modal");
+          await driver.sleep(1000);
+        } catch (err) {
+          console.log("Error clicking 'No' checkbox in modal:", err.message);
+        }
+
+        // Uncheck Helmet Cover checkbox
+        console.log("Unchecking Helmet Cover checkbox...");
+        const helmetCoverCheckbox = await driver.wait(
+          until.elementLocated(By.id("ChkBox500")),
+          10000
+        );
+        await driver.executeScript("arguments[0].click();", helmetCoverCheckbox);
+        console.log("Unchecked Helmet Cover checkbox");
+        await driver.sleep(1000);
+
+        // Check "Is Registration Address Same" checkbox
+        console.log("Checking 'Is Registration Address Same' checkbox...");
+        const regAddressSameCheckbox = await driver.wait(
+          until.elementLocated(By.id("IsRegistrationAddresssame")),
+          10000
+        );
+        await driver.executeScript("arguments[0].click();", regAddressSameCheckbox);
+        console.log("Checked 'Is Registration Address Same' checkbox");
+        await driver.sleep(2000);
+
+        // Click "Calculate Premium" button
+        console.log("Clicking 'Calculate Premium' button...");
+        const calculatePremiumButton = await driver.wait(
+          until.elementLocated(By.id("btnCalculate")),
+          10000
+        );
+        await driver.wait(until.elementIsVisible(calculatePremiumButton), 5000);
+        await driver.wait(until.elementIsEnabled(calculatePremiumButton), 5000);
+        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", calculatePremiumButton);
+        await driver.sleep(500);
+        
+        try {
+          await calculatePremiumButton.click();
+        } catch {
+          await driver.executeScript("arguments[0].click();", calculatePremiumButton);
+        }
+        console.log("Clicked 'Calculate Premium' button!");
+        
+        // Wait for premium calculation to complete
+        await driver.sleep(3000);
+        console.log("Premium calculation completed!");
+
+        console.log("All vehicle details filled successfully!");
+        
+      } catch (err) {
+        console.log("Error handling post-submission elements:", err.message);
+        // Take screenshot for debugging
+        try {
+          const screenshot = await driver.takeScreenshot();
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          fs.writeFileSync(`post-submission-error-${timestamp}.png`, screenshot, 'base64');
+          console.log(`Post-submission error screenshot saved as post-submission-error-${timestamp}.png`);
+        } catch (e) {
+          console.log("Could not take post-submission screenshot:", e.message);
+        }
+        // Don't throw error here, just log it as the main form submission was successful
+      }
+
     } catch (err) {
       console.log("Error filling modal fields:", err.message);
       // Take screenshot to debug the issue
