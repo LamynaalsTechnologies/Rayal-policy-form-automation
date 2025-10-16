@@ -24,9 +24,243 @@ mongoose.connect(process.env.MONGODB_URI);
 
 const db = mongoose.connection;
 
+// Persistent Queue System using MongoDB
+let activeRelianceJobs = 0;
+const MAX_PARALLEL_JOBS = 3; // Control how many browsers can run at once
+let jobQueueCollection = null; // Will be initialized after DB connection
+
+// Job statuses
+const JOB_STATUS = {
+  PENDING: "pending", // Waiting in queue
+  PROCESSING: "processing", // Currently being processed
+  COMPLETED: "completed", // Successfully completed
+  FAILED: "failed", // Failed after processing
+};
+
+const enqueueRelianceJob = async (formData) => {
+  try {
+    // Save job to MongoDB with pending status
+    const job = {
+      formData,
+      status: JOB_STATUS.PENDING,
+      createdAt: new Date(),
+      attempts: 0,
+      maxAttempts: 3, // Retry up to 3 times on failure
+      lastError: null,
+    };
+
+    const result = await jobQueueCollection.insertOne(job);
+    console.log(
+      `[Reliance Queue] Enqueued job for ${formData.firstName} (ID: ${result.insertedId})`
+    );
+
+    // Try to process queue
+    void processRelianceQueue();
+
+    return result.insertedId;
+  } catch (error) {
+    console.error("[Reliance Queue] Failed to enqueue job:", error.message);
+    throw error;
+  }
+};
+
+const processRelianceQueue = async () => {
+  if (!jobQueueCollection) return;
+
+  try {
+    // Count how many jobs are currently processing
+    const processingCount = await jobQueueCollection.countDocuments({
+      status: JOB_STATUS.PROCESSING,
+    });
+
+    activeRelianceJobs = processingCount;
+
+    // Check if we can start more jobs
+    if (activeRelianceJobs >= MAX_PARALLEL_JOBS) {
+      return; // Already at max capacity
+    }
+
+    // Get pending jobs from database (oldest first)
+    const availableSlots = MAX_PARALLEL_JOBS - activeRelianceJobs;
+    const pendingJobs = await jobQueueCollection
+      .find({ status: JOB_STATUS.PENDING })
+      .sort({ createdAt: 1 })
+      .limit(availableSlots)
+      .toArray();
+
+    if (pendingJobs.length === 0) {
+      return; // No pending jobs
+    }
+
+    console.log(
+      `[Reliance Queue] Found ${pendingJobs.length} pending jobs, starting processing...`
+    );
+
+    // Start processing each job
+    for (const job of pendingJobs) {
+      // Mark job as processing
+      await jobQueueCollection.updateOne(
+        { _id: job._id },
+        {
+          $set: {
+            status: JOB_STATUS.PROCESSING,
+            startedAt: new Date(),
+          },
+        }
+      );
+
+      activeRelianceJobs++;
+      console.log(
+        `[Reliance Queue] Starting job for ${job.formData.firstName} (ID: ${job._id}); active=${activeRelianceJobs}`
+      );
+
+      // Run job in parallel (don't await)
+      runRelianceJob(job).finally(() => {
+        activeRelianceJobs--;
+        // Try to process more jobs
+        void processRelianceQueue();
+      });
+    }
+  } catch (error) {
+    console.error("[Reliance Queue] Error processing queue:", error.message);
+  }
+};
+
+const runRelianceJob = async (job) => {
+  try {
+    console.log(
+      `[Reliance Queue] Processing form for: ${job.formData.firstName} ${job.formData.lastName}`
+    );
+
+    const result = await fillRelianceForm({
+      username: "2WDHAB",
+      password: "ao533f@c",
+      ...job.formData,
+    });
+
+    if (result && result.success) {
+      // Mark as completed in database
+      await jobQueueCollection.updateOne(
+        { _id: job._id },
+        {
+          $set: {
+            status: JOB_STATUS.COMPLETED,
+            completedAt: new Date(),
+          },
+        }
+      );
+      console.log(
+        `[Reliance Queue] ✅ Success for ${job.formData.firstName} (ID: ${job._id})`
+      );
+    } else {
+      // Increment attempts and check if we should retry
+      const updatedJob = await jobQueueCollection.findOneAndUpdate(
+        { _id: job._id },
+        {
+          $inc: { attempts: 1 },
+          $set: {
+            lastError: result?.error || "Unknown error",
+            lastAttemptAt: new Date(),
+          },
+        },
+        { returnDocument: "after" }
+      );
+
+      if (updatedJob.attempts >= updatedJob.maxAttempts) {
+        // Max attempts reached, mark as failed
+        await jobQueueCollection.updateOne(
+          { _id: job._id },
+          { $set: { status: JOB_STATUS.FAILED, failedAt: new Date() } }
+        );
+        console.error(
+          `[Reliance Queue] ❌ Failed permanently for ${job.formData.firstName} after ${updatedJob.attempts} attempts`
+        );
+      } else {
+        // Retry: reset to pending
+        await jobQueueCollection.updateOne(
+          { _id: job._id },
+          { $set: { status: JOB_STATUS.PENDING } }
+        );
+        console.warn(
+          `[Reliance Queue] ⚠️ Failed for ${job.formData.firstName}, will retry (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
+        );
+      }
+    }
+  } catch (e) {
+    console.error(
+      `[Reliance Queue] ❌ Error for ${job.formData.firstName}:`,
+      e.message
+    );
+
+    // Handle error same as failure above
+    const updatedJob = await jobQueueCollection.findOneAndUpdate(
+      { _id: job._id },
+      {
+        $inc: { attempts: 1 },
+        $set: {
+          lastError: e.message,
+          lastAttemptAt: new Date(),
+        },
+      },
+      { returnDocument: "after" }
+    );
+
+    if (updatedJob.attempts >= updatedJob.maxAttempts) {
+      await jobQueueCollection.updateOne(
+        { _id: job._id },
+        { $set: { status: JOB_STATUS.FAILED, failedAt: new Date() } }
+      );
+    } else {
+      await jobQueueCollection.updateOne(
+        { _id: job._id },
+        { $set: { status: JOB_STATUS.PENDING } }
+      );
+    }
+  }
+};
+
 db.on("error", console.error.bind(console, "connection error:"));
-db.once("open", () => {
+db.once("open", async () => {
   console.log("Connected to MongoDB");
+
+  // Initialize job queue collection
+  jobQueueCollection = db.collection("RelianceJobQueue");
+
+  // Create indexes for better performance
+  await jobQueueCollection.createIndex({ status: 1, createdAt: 1 });
+  await jobQueueCollection.createIndex({ createdAt: 1 });
+
+  console.log("[Job Queue] Initialized persistent job queue");
+
+  // CRASH RECOVERY: Reset any jobs stuck in "processing" state back to "pending"
+  // This happens when server crashes while processing jobs
+  const stuckJobs = await jobQueueCollection.updateMany(
+    { status: JOB_STATUS.PROCESSING },
+    {
+      $set: {
+        status: JOB_STATUS.PENDING,
+        recoveredAt: new Date(),
+      },
+    }
+  );
+
+  if (stuckJobs.modifiedCount > 0) {
+    console.log(
+      `[Job Queue] 🔄 Recovered ${stuckJobs.modifiedCount} jobs that were stuck in processing state`
+    );
+  }
+
+  // Count pending jobs and start processing
+  const pendingCount = await jobQueueCollection.countDocuments({
+    status: JOB_STATUS.PENDING,
+  });
+
+  if (pendingCount > 0) {
+    console.log(
+      `[Job Queue] Found ${pendingCount} pending jobs, will start processing...`
+    );
+    void processRelianceQueue();
+  }
 
   const collection = db.collection("Captcha");
 
@@ -37,7 +271,7 @@ db.once("open", () => {
       },
     },
   ]);
-  changeStream.on("change", (change) => {
+  changeStream.on("change", async (change) => {
     // console.log(change);
     let data = change?.fullDocument;
     let formData = {
@@ -45,7 +279,9 @@ db.once("open", () => {
       firstName: data?.firstName,
       middleName: data?.middleName,
       lastName: data?.lastName,
-      dob: data?.dateOfBirth ? moment(data?.dateOfBirth).format("DD-MM-YYYY") : "",
+      dob: data?.dateOfBirth
+        ? moment(data?.dateOfBirth).format("DD-MM-YYYY")
+        : "",
       fatherTitle: data?.fatherTitle,
       fatherFirstName: data?.fatherFirstName,
       flatNo: data?.flatDoorNo,
@@ -59,8 +295,10 @@ db.once("open", () => {
       email: data?.email,
       aadhar: data?.aadhar,
     };
-    console.log(formData);
-    fillRelianceForm({ username: "2WDHAB", password: "ao533f@c", ...formData });
+    console.log("[MongoDB Watch] New customer data received:", formData);
+
+    // Instead of calling fillRelianceForm directly, add to queue
+    await enqueueRelianceJob(formData);
   });
 });
 
