@@ -5,7 +5,7 @@ module.exports.extractCaptchaText = async (imageUrl) => {
   try {
     // Initialize OpenAI model with vision capabilities
     const model = new ChatOpenAI({
-      modelName: "gpt-4o-mini",
+      modelName: "gpt-4o",
       temperature: 0,
       apiKey: process.env.OPENAI_API_KEY,
     });
