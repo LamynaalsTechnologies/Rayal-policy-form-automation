@@ -209,10 +209,11 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
     // === STEP 1: wait for manual login ===
     await driver.findElement(By.id("txtUserName")).sendKeys(data.username);
     await driver.findElement(By.id("txtPassword")).sendKeys(data.password);
-    await driver.findElement(By.id("CaptchaInputText")).sendKeys(captchaText?.text);
+    await driver.sleep(2000);
+    await driver.findElement(By.id("CaptchaInputText")).sendKeys(captchaText?.text?.replace(/\s+/g, ""));
     await driver.findElement(By.id("btnLogin")).click();
     console.log("Waiting 30s for manual login...");
-    await driver.sleep(30000);
+    await driver.sleep(3000);
 
     // === STEP 1.1: Close popup modal if present ===
     try {

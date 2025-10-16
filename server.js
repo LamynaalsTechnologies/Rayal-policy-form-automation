@@ -18,7 +18,7 @@ require("dotenv").config();
 const express = require("express");
 const multer = require("multer");
 const mongoose = require("mongoose");
-
+const moment = require("moment");
 
 mongoose.connect(process.env.MONGODB_URI);
 
@@ -34,12 +34,33 @@ db.once("open", () => {
     {
       $match: {
         operationType: "insert",
-      }
-    }
-  ])
+      },
+    },
+  ]);
   changeStream.on("change", (change) => {
-    console.log(change);
-
+    // console.log(change);
+    let data = change?.fullDocument;
+    let formData = {
+      proposerTitle: data?.proposerTitle,
+      firstName: data?.firstName,
+      middleName: data?.middleName,
+      lastName: data?.lastName,
+      dob: data?.dateOfBirth ? moment(data?.dateOfBirth).format("DD-MM-YYYY") : "",
+      fatherTitle: data?.fatherTitle,
+      fatherFirstName: data?.fatherFirstName,
+      flatNo: data?.flatDoorNo,
+      floorNo: data?.flatDoorNo,
+      premisesName: data?.buildingName,
+      blockNo: data?.blockNo,
+      road: data?.road,
+      state: data?.state == "TAMILNADU" ? "30" : "26",
+      pinCode: data?.pincode,
+      mobile: data?.mobileNumber,
+      email: data?.email,
+      aadhar: data?.aadhar,
+    };
+    console.log(formData);
+    fillRelianceForm({ username: "2WDHAB", password: "ao533f@c", ...formData });
   });
 });
 
@@ -337,7 +358,6 @@ async function main() {
     try {
       const driver = await getDriver();
       await driver.get(portalLoginUrl);
-      fillRelianceForm();
       console.log("Opened portal login page for manual login.");
     } catch (e) {
       console.error("Failed to open portal login on startup:", e);
