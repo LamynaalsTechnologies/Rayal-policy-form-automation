@@ -7,6 +7,7 @@ package-lock.json
 
 # Chrome profile and browser data
 chrome-profile/
+chrome-profile*
 *.log
 chrome_debug.log
 

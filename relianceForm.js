@@ -186,7 +186,7 @@ async function deleteDirectoryRecursive(dirPath) {
   } catch {}
 }
 
-async function fillRelianceForm(data = {}) {
+async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c"}) {
   const baseProfileDir = path.join(__dirname, "chrome-profile");
   let driver = null;
   let tempProfileDir = null;
@@ -207,6 +207,10 @@ async function fillRelianceForm(data = {}) {
     const captchaText = await extractCaptchaText(imageUrl);
     console.log("Captcha text:", captchaText);
     // === STEP 1: wait for manual login ===
+    await driver.findElement(By.id("txtUserName")).sendKeys(data.username);
+    await driver.findElement(By.id("txtPassword")).sendKeys(data.password);
+    await driver.findElement(By.id("CaptchaInputText")).sendKeys(captchaText?.text);
+    await driver.findElement(By.id("btnLogin")).click();
     console.log("Waiting 30s for manual login...");
     await driver.sleep(30000);
 

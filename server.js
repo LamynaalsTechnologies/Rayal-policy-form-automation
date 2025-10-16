@@ -149,7 +149,7 @@ async function main() {
   const db = client.db(dbName);
   const collection = db.collection("data");
   const portalLoginUrl =
-    "https://uiic.in/GCWebPortal/login/LoginAction.do?p=login";
+    "https://smartzone.reliancegeneral.co.in/Login/IMDLogin";
   const portalHomeUrl = "https://www.uiic.in/GCWebPortal/login/HomeAction.do";
 
   // Job queue with unbounded parallel jobs using TABS on a single driver
@@ -337,6 +337,7 @@ async function main() {
     try {
       const driver = await getDriver();
       await driver.get(portalLoginUrl);
+      fillRelianceForm();
       console.log("Opened portal login page for manual login.");
     } catch (e) {
       console.error("Failed to open portal login on startup:", e);
