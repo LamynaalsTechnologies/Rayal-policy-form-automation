@@ -168,6 +168,8 @@ async function fillRelianceForm(data = {}) {
     console.log("Navigating to Reliance form...");
     await driver.get('https://smartzone.reliancegeneral.co.in/Login/IMDLogin');
 
+    await getCaptchaScreenShot(driver);
+
     // === STEP 1: wait for manual login ===
     console.log("Waiting 30s for manual login...");
     await driver.sleep(30000);
@@ -396,6 +398,16 @@ await driver.sleep(4000);
       } catch {}
     }
   }
+}
+
+async function getCaptchaScreenShot(driver) {
+  const imgElement = await driver.findElement(By.id("CaptchaImage"));
+
+  const imageBase64 = await imgElement.takeScreenshot(true);
+
+  fs.writeFileSync("image_screenshot.png", imageBase64, "base64");
+  console.log("Screenshot saved as image_screenshot.png");
+
 }
 
 // Test data

@@ -17,6 +17,31 @@ const { extractCaptchaText } = require("./Captcha");
 require("dotenv").config();
 const express = require("express");
 const multer = require("multer");
+const mongoose = require("mongoose");
+
+
+mongoose.connect(process.env.MONGODB_URI);
+
+const db = mongoose.connection;
+
+db.on("error", console.error.bind(console, "connection error:"));
+db.once("open", () => {
+  console.log("Connected to MongoDB");
+
+  const collection = db.collection("Captcha");
+
+  const changeStream = collection.watch([
+    {
+      $match: {
+        operationType: "insert",
+      }
+    }
+  ])
+  changeStream.on("change", (change) => {
+    console.log(change);
+
+  });
+});
 
 // Setup Express app for API routes
 const app = express();

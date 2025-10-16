@@ -16,6 +16,7 @@
     "express": "^5.1.0",
     "langchain": "^0.3.36",
     "mongodb": "^6.20.0",
+    "mongoose": "^8.19.1",
     "multer": "^2.0.2",
     "openai": "^6.3.0",
     "selenium-webdriver": "^4.35.0",
