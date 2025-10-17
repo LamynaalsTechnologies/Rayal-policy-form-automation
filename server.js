@@ -18,6 +18,7 @@ const {
   checkSession,
   reLoginIfNeeded,
 } = require("./sessionManager");
+const { captureAndLogError } = require("./errorLogger");
 const { runFormFlow } = require("./formFlow");
 const { fillRelianceForm } = require("./relianceForm");
 const { extractCaptchaText } = require("./Captcha");
@@ -134,6 +135,8 @@ const processRelianceQueue = async () => {
 };
 
 const runRelianceJob = async (job) => {
+  const jobIdentifier = `${job.formData.firstName}_${job._id}`;
+
   try {
     console.log(
       `[Reliance Queue] Processing form for: ${job.formData.firstName} ${job.formData.lastName}`
@@ -143,6 +146,10 @@ const runRelianceJob = async (job) => {
       username: "2WDHAB",
       password: "ao533f@c",
       ...job.formData,
+      _jobId: job._id, // Pass job ID for error logging
+      _jobIdentifier: jobIdentifier,
+      _attemptNumber: job.attempts + 1, // Current attempt number
+      _jobQueueCollection: jobQueueCollection, // Pass collection for logging
     });
 
     if (result && result.success) {
@@ -153,6 +160,7 @@ const runRelianceJob = async (job) => {
           $set: {
             status: JOB_STATUS.COMPLETED,
             completedAt: new Date(),
+            completedAttempt: job.attempts + 1,
           },
         }
       );
@@ -160,37 +168,71 @@ const runRelianceJob = async (job) => {
         `[Reliance Queue] ✅ Success for ${job.formData.firstName} (ID: ${job._id})`
       );
     } else {
-      // Increment attempts and check if we should retry
-      const updatedJob = await jobQueueCollection.findOneAndUpdate(
+      // Job failed - capture detailed error with screenshot
+      const newAttemptCount = job.attempts + 1;
+
+      // Create error log with screenshot (if driver available in result)
+      const errorLog = {
+        timestamp: new Date(),
+        attemptNumber: newAttemptCount,
+        errorMessage: result?.error || "Unknown error",
+        errorType: "FormFillError",
+        screenshotUrl: result?.screenshotUrl || null,
+        screenshotKey: result?.screenshotKey || null,
+      };
+
+      // Add error to errorLogs array
+      await jobQueueCollection.updateOne(
         { _id: job._id },
         {
           $inc: { attempts: 1 },
+          $push: { errorLogs: errorLog },
           $set: {
-            lastError: result?.error || "Unknown error",
+            lastError: errorLog.errorMessage,
+            lastErrorTimestamp: errorLog.timestamp,
             lastAttemptAt: new Date(),
           },
-        },
-        { returnDocument: "after" }
+        }
       );
+
+      const updatedJob = await jobQueueCollection.findOne({ _id: job._id });
 
       if (updatedJob.attempts >= updatedJob.maxAttempts) {
         // Max attempts reached, mark as failed
         await jobQueueCollection.updateOne(
           { _id: job._id },
-          { $set: { status: JOB_STATUS.FAILED, failedAt: new Date() } }
+          {
+            $set: {
+              status: JOB_STATUS.FAILED,
+              failedAt: new Date(),
+              finalError: errorLog,
+            },
+          }
         );
         console.error(
           `[Reliance Queue] ❌ Failed permanently for ${job.formData.firstName} after ${updatedJob.attempts} attempts`
         );
+        console.error(`   Last error: ${errorLog.errorMessage}`);
+        if (errorLog.screenshotUrl) {
+          console.error(`   Screenshot: ${errorLog.screenshotUrl}`);
+        }
       } else {
         // Retry: reset to pending
         await jobQueueCollection.updateOne(
           { _id: job._id },
-          { $set: { status: JOB_STATUS.PENDING } }
+          {
+            $set: {
+              status: JOB_STATUS.PENDING,
+              nextRetryAt: new Date(Date.now() + 60000),
+            },
+          }
         );
         console.warn(
           `[Reliance Queue] ⚠️ Failed for ${job.formData.firstName}, will retry (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
         );
+        if (errorLog.screenshotUrl) {
+          console.warn(`   Screenshot: ${errorLog.screenshotUrl}`);
+        }
       }
     }
   } catch (e) {
@@ -199,28 +241,59 @@ const runRelianceJob = async (job) => {
       e.message
     );
 
-    // Handle error same as failure above
-    const updatedJob = await jobQueueCollection.findOneAndUpdate(
+    // Increment attempt and create error log
+    const newAttemptCount = job.attempts + 1;
+
+    const errorLog = {
+      timestamp: new Date(),
+      attemptNumber: newAttemptCount,
+      errorMessage: e.message,
+      errorStack: e.stack || null,
+      errorType: e.name || "Error",
+    };
+
+    // Add error to errorLogs array
+    await jobQueueCollection.updateOne(
       { _id: job._id },
       {
         $inc: { attempts: 1 },
+        $push: { errorLogs: errorLog },
         $set: {
           lastError: e.message,
+          lastErrorTimestamp: errorLog.timestamp,
           lastAttemptAt: new Date(),
         },
-      },
-      { returnDocument: "after" }
+      }
     );
+
+    const updatedJob = await jobQueueCollection.findOne({ _id: job._id });
 
     if (updatedJob.attempts >= updatedJob.maxAttempts) {
       await jobQueueCollection.updateOne(
         { _id: job._id },
-        { $set: { status: JOB_STATUS.FAILED, failedAt: new Date() } }
+        {
+          $set: {
+            status: JOB_STATUS.FAILED,
+            failedAt: new Date(),
+            finalError: errorLog,
+          },
+        }
+      );
+      console.error(
+        `[Reliance Queue] ❌ Failed permanently after ${updatedJob.attempts} attempts`
       );
     } else {
       await jobQueueCollection.updateOne(
         { _id: job._id },
-        { $set: { status: JOB_STATUS.PENDING } }
+        {
+          $set: {
+            status: JOB_STATUS.PENDING,
+            nextRetryAt: new Date(Date.now() + 60000),
+          },
+        }
+      );
+      console.warn(
+        `[Reliance Queue] ⚠️ Will retry (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
       );
     }
   }

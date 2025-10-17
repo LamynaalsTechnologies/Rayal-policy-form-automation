@@ -12,6 +12,7 @@
   "dependencies": {
     "@langchain/core": "^0.3.78",
     "@langchain/openai": "^0.6.16",
+    "aws-sdk": "^2.1692.0",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "fs-extra": "^11.3.2",

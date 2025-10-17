@@ -4,6 +4,7 @@ const { createJobBrowser, cleanupJobBrowser } = require("./sessionManager");
 const fs = require("fs");
 const path = require("path");
 const { extractCaptchaText } = require("./Captcha");
+const { uploadScreenshotToS3, generateScreenshotKey } = require("./s3Uploader");
 
 async function waitForLoaderToDisappear(
   driver,
@@ -980,47 +981,127 @@ async function fillRelianceForm(
         console.log("All vehicle details filled successfully!");
       } catch (err) {
         console.log("Error handling post-submission elements:", err.message);
-        // Take screenshot for debugging
+        // Take screenshot and upload to S3
         try {
           const screenshot = await driver.takeScreenshot();
-          const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-          fs.writeFileSync(
-            `post-submission-error-${timestamp}.png`,
+          const jobIdentifier = data._jobIdentifier || `job_${Date.now()}`;
+          const attemptNumber = data._attemptNumber || 1;
+
+          // Upload to S3
+          const screenshotKey = generateScreenshotKey(
+            jobIdentifier,
+            attemptNumber,
+            "post-submission-error"
+          );
+          const screenshotUrl = await uploadScreenshotToS3(
             screenshot,
-            "base64"
+            screenshotKey
           );
+
           console.log(
-            `Post-submission error screenshot saved as post-submission-error-${timestamp}.png`
+            `📸 Post-submission error screenshot uploaded to S3: ${screenshotUrl}`
           );
+
+          // Store in MongoDB for this specific error
+          if (data._jobId && data._jobQueueCollection) {
+            const postSubmissionError = {
+              timestamp: new Date(),
+              attemptNumber: attemptNumber,
+              errorMessage: err.message,
+              errorType: "PostSubmissionError",
+              errorStack: err.stack || null,
+              screenshotUrl: screenshotUrl,
+              screenshotKey: screenshotKey,
+              stage: "post-submission",
+            };
+
+            await data._jobQueueCollection.updateOne(
+              { _id: data._jobId },
+              {
+                $push: { errorLogs: postSubmissionError },
+                $set: { lastPostSubmissionError: postSubmissionError },
+              }
+            );
+
+            console.log(`✅ Post-submission error logged to job queue`);
+          }
         } catch (e) {
-          console.log("Could not take post-submission screenshot:", e.message);
+          console.log(
+            "Could not capture/upload post-submission screenshot:",
+            e.message
+          );
         }
         // Don't throw error here, just log it as the main form submission was successful
       }
     } catch (err) {
       console.log("Error filling modal fields:", err.message);
-      // Take screenshot to debug the issue
+      // Take screenshot and upload to S3
       try {
         const screenshot = await driver.takeScreenshot();
-        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-        fs.writeFileSync(
-          `error-screenshot-${timestamp}.png`,
-          screenshot,
-          "base64"
+        const jobIdentifier = data._jobIdentifier || `job_${Date.now()}`;
+        const attemptNumber = data._attemptNumber || 1;
+
+        // Upload screenshot to S3
+        const screenshotKey = generateScreenshotKey(
+          jobIdentifier,
+          attemptNumber,
+          "modal-error"
         );
-        console.log(
-          `Error screenshot saved as error-screenshot-${timestamp}.png`
+        const screenshotUrl = await uploadScreenshotToS3(
+          screenshot,
+          screenshotKey
         );
 
-        // Also save page source for debugging
-        const pageSource = await driver.getPageSource();
-        fs.writeFileSync(`page-source-${timestamp}.html`, pageSource);
-        console.log(`Page source saved as page-source-${timestamp}.html`);
-      } catch (e) {
         console.log(
-          "Could not take screenshot or save page source:",
-          e.message
+          `📸 Modal error screenshot uploaded to S3: ${screenshotUrl}`
         );
+
+        // Also save and upload page source for debugging
+        try {
+          const pageSource = await driver.getPageSource();
+          const pageSourceKey = screenshotKey.replace(".png", ".html");
+          const tempHtmlPath = path.join(
+            __dirname,
+            `temp-page-source-${Date.now()}.html`
+          );
+          fs.writeFileSync(tempHtmlPath, pageSource);
+
+          const { uploadToS3 } = require("./s3Uploader");
+          const pageSourceUrl = await uploadToS3(tempHtmlPath, pageSourceKey);
+
+          fs.unlinkSync(tempHtmlPath); // Delete temp file
+          console.log(`📄 Page source uploaded to S3: ${pageSourceUrl}`);
+
+          // Store in MongoDB
+          if (data._jobId && data._jobQueueCollection) {
+            const modalError = {
+              timestamp: new Date(),
+              attemptNumber: attemptNumber,
+              errorMessage: err.message,
+              errorType: "ModalError",
+              errorStack: err.stack || null,
+              screenshotUrl: screenshotUrl,
+              screenshotKey: screenshotKey,
+              pageSourceUrl: pageSourceUrl,
+              pageSourceKey: pageSourceKey,
+              stage: "modal-filling",
+            };
+
+            await data._jobQueueCollection.updateOne(
+              { _id: data._jobId },
+              {
+                $push: { errorLogs: modalError },
+                $set: { lastModalError: modalError },
+              }
+            );
+
+            console.log(`✅ Modal error logged to job queue`);
+          }
+        } catch (sourceErr) {
+          console.log("Could not save/upload page source:", sourceErr.message);
+        }
+      } catch (e) {
+        console.log("Could not take screenshot or upload to S3:", e.message);
       }
       throw err;
     }
@@ -1030,14 +1111,50 @@ async function fillRelianceForm(
     return { success: true };
   } catch (e) {
     console.error("[relianceForm] Error:", e.message || e);
-    return { success: false, error: String(e.message || e) };
-  } finally {
-    // Cleanup: Close browser and delete cloned profile
-    if (jobBrowser) {
-      jobBrowser.driver.sleep(100000); // sleep for 100 seconds
-      await cleanupJobBrowser(jobBrowser);
+
+    // Capture screenshot and upload to S3
+    let screenshotUrl = null;
+    let screenshotKey = null;
+
+    try {
+      if (driver) {
+        const screenshot = await driver.takeScreenshot();
+        const jobIdentifier = data._jobIdentifier || `job_${Date.now()}`;
+        const attemptNumber = data._attemptNumber || 1;
+
+        // Generate S3 key and upload
+        screenshotKey = generateScreenshotKey(
+          jobIdentifier,
+          attemptNumber,
+          "form-error"
+        );
+        screenshotUrl = await uploadScreenshotToS3(screenshot, screenshotKey);
+
+        console.log(`📸 Error screenshot uploaded to S3: ${screenshotUrl}`);
+      }
+    } catch (screenshotErr) {
+      console.error(
+        `⚠️  Failed to upload error screenshot:`,
+        screenshotErr.message
+      );
     }
+
+    return {
+      success: false,
+      error: String(e.message || e),
+      errorStack: e.stack,
+      screenshotUrl: screenshotUrl,
+      screenshotKey: screenshotKey,
+      timestamp: new Date(),
+    };
   }
+  //  finally {
+  //   // Cleanup: Close browser and delete cloned profile
+  //   if (jobBrowser) {
+
+  //     await cleanupJobBrowser(jobBrowser);
+  //   }
+  // }
 }
 
 async function getCaptchaScreenShot(driver, filename = "image_screenshot") {
