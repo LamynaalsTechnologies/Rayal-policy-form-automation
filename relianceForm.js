@@ -1,5 +1,6 @@
 const { By, until, Key } = require("selenium-webdriver");
 const { createFreshDriverFromBaseProfile } = require("./browser");
+const { createJobBrowser, cleanupJobBrowser } = require("./sessionManager");
 const fs = require("fs");
 const path = require("path");
 const { extractCaptchaText } = require("./Captcha");
@@ -186,34 +187,43 @@ async function deleteDirectoryRecursive(dirPath) {
   } catch {}
 }
 
-async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c"}) {
-  const baseProfileDir = path.join(__dirname, "chrome-profile");
+async function fillRelianceForm(
+  data = { username: "2WDHAB", password: "ao533f@c" }
+) {
+  const jobId = `${data.firstName || "Job"}_${Date.now()}`;
+  let jobBrowser = null;
   let driver = null;
-  let tempProfileDir = null;
 
   try {
-    const created = await createFreshDriverFromBaseProfile(baseProfileDir);
-    driver = created.driver;
-    tempProfileDir = created.profileDir;
+    // === STEP 0: Create cloned browser (already logged in!) ===
+    console.log(`\n🚀 [${jobId}] Starting job...`);
+    jobBrowser = await createJobBrowser(jobId);
+    driver = jobBrowser.driver;
 
-    console.log("Navigating to Reliance form...");
+    console.log(`✅ [${jobId}] Browser ready with active session!`);
+    console.log(`🌐 [${jobId}] Navigating to form...`);
+
+    // Navigate to the form page (already logged in from cloned profile!)
     await driver.get("https://smartzone.reliancegeneral.co.in/Login/IMDLogin");
+    await driver.sleep(3000);
 
     // === STEP 0: get captcha text ===
-    await getCaptchaScreenShot(driver, "reliance_captcha");
-    const filePath = path.join(__dirname, "reliance_captcha.png");
-    const fileData = fs.readFileSync(filePath, "base64");
-    const imageUrl = `data:image/jpeg;base64,${fileData}`;
-    const captchaText = await extractCaptchaText(imageUrl);
-    console.log("Captcha text:", captchaText);
-    // === STEP 1: wait for manual login ===
-    await driver.findElement(By.id("txtUserName")).sendKeys(data.username);
-    await driver.findElement(By.id("txtPassword")).sendKeys(data.password);
-    await driver.sleep(2000);
-    await driver.findElement(By.id("CaptchaInputText")).sendKeys(captchaText?.text?.replace(/\s+/g, ""));
-    await driver.findElement(By.id("btnLogin")).click();
-    console.log("Waiting 30s for manual login...");
-    await driver.sleep(3000);
+    // await getCaptchaScreenShot(driver, "reliance_captcha");
+    // const filePath = path.join(__dirname, "reliance_captcha.png");
+    // const fileData = fs.readFileSync(filePath, "base64");
+    // const imageUrl = `data:image/jpeg;base64,${fileData}`;
+    // const captchaText = await extractCaptchaText(imageUrl);
+    // console.log("Captcha text:", captchaText);
+    // // === STEP 1: wait for manual login ===
+    // await driver.findElement(By.id("txtUserName")).sendKeys(data.username);
+    // await driver.findElement(By.id("txtPassword")).sendKeys(data.password);
+    // await driver.sleep(2000);
+    // await driver
+    //   .findElement(By.id("CaptchaInputText"))
+    //   .sendKeys(captchaText?.text?.replace(/\s+/g, ""));
+    // await driver.findElement(By.id("btnLogin")).click();
+    // console.log("Waiting 30s for manual login...");
+    // await driver.sleep(3000);
 
     // === STEP 1.1: Close popup modal if present ===
     try {
@@ -422,10 +432,12 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
       // await safeSendKeys(driver, By.id("area"), data.area || "MG Road");
 
       // Phone fields
-      await safeSendKeys(driver, By.id("mobileno"), data.mobile || "8838166045");
-      
+      await safeSendKeys(
+        driver,
+        By.id("mobileno"),
+        data.mobile || "8838166045"
+      );
 
-      
       console.log("Filled all main form mandatory fields!");
       await driver.sleep(2000);
 
@@ -443,7 +455,7 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
 
       // === STEP 8: Handle post-submission elements ===
       console.log("Looking for post-submission elements...");
-      
+
       try {
         // Wait for the Vertical Code dropdown
         console.log("Waiting for Vertical Code dropdown...");
@@ -452,22 +464,29 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
           15000
         );
         console.log("Vertical Code dropdown found!");
-        
+
         // Click on the dropdown to open it
-        await driver.executeScript("arguments[0].click();", verticalCodeDropdown);
+        await driver.executeScript(
+          "arguments[0].click();",
+          verticalCodeDropdown
+        );
         await driver.sleep(2000);
         console.log("Vertical Code dropdown clicked!");
-        
+
         // Select "GIRNAR FINSERV PRIVATE LIMITED_518898" option
         console.log("Selecting GIRNAR FINSERV PRIVATE LIMITED_518898...");
         const girnarOption = await driver.wait(
-          until.elementLocated(By.xpath("//li[contains(text(), 'GIRNAR FINSERV PRIVATE LIMITED_518898')]")),
+          until.elementLocated(
+            By.xpath(
+              "//li[contains(text(), 'GIRNAR FINSERV PRIVATE LIMITED_518898')]"
+            )
+          ),
           10000
         );
         await driver.executeScript("arguments[0].click();", girnarOption);
         console.log("Selected GIRNAR FINSERV PRIVATE LIMITED_518898!");
         await driver.sleep(2000);
-        
+
         // Wait for and click the "Validate Customer" button
         console.log("Looking for Validate Customer button...");
         const validateButton = await driver.wait(
@@ -476,24 +495,27 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
         );
         await driver.wait(until.elementIsVisible(validateButton), 5000);
         await driver.wait(until.elementIsEnabled(validateButton), 5000);
-        
-        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", validateButton);
+
+        await driver.executeScript(
+          "arguments[0].scrollIntoView({block: 'center'});",
+          validateButton
+        );
         await driver.sleep(500);
-        
+
         try {
           await validateButton.click();
         } catch {
           await driver.executeScript("arguments[0].click();", validateButton);
         }
         console.log("Validate Customer button clicked!");
-        
+
         // Wait for validation to process
         await driver.sleep(3000);
         console.log("Customer validation attempted!");
 
         // === STEP 9: Fill Vehicle Details ===
         console.log("Filling vehicle details...");
-        
+
         // Vehicle Make/Model autocomplete
         console.log("Filling vehicle make/model...");
         const vehicleMakeInput = await driver.wait(
@@ -502,23 +524,27 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
         );
         await driver.wait(until.elementIsVisible(vehicleMakeInput), 5000);
         await driver.wait(until.elementIsEnabled(vehicleMakeInput), 5000);
-        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", vehicleMakeInput);
+        await driver.executeScript(
+          "arguments[0].scrollIntoView({block: 'center'});",
+          vehicleMakeInput
+        );
         await driver.sleep(500);
-        
+
         // Clear the field first
         await vehicleMakeInput.clear();
         await driver.sleep(500);
-        
+
         // Click on the input to focus it
         await vehicleMakeInput.click();
         await driver.sleep(500);
-        
+
         // Type the search text and trigger events
         await vehicleMakeInput.sendKeys("tvs scooty zest");
         await driver.sleep(1000);
-        
+
         // Trigger additional events to ensure autocomplete works
-        await driver.executeScript(`
+        await driver.executeScript(
+          `
           var input = arguments[0];
           var event = new Event('input', { bubbles: true });
           input.dispatchEvent(event);
@@ -528,36 +554,46 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
           
           var changeEvent = new Event('change', { bubbles: true });
           input.dispatchEvent(changeEvent);
-        `, vehicleMakeInput);
-        
+        `,
+          vehicleMakeInput
+        );
+
         // Wait for API call to complete and dropdown to appear
         await driver.sleep(4000);
         console.log("Waiting for dropdown options to appear...");
-        
+
         // Try multiple selectors for the dropdown items
         let firstResult = null;
         try {
           // Try Kendo autocomplete listbox items
           firstResult = await driver.wait(
-            until.elementLocated(By.xpath("//ul[@id='VehicleDetailsMakeModel_listbox']//li[1]")),
+            until.elementLocated(
+              By.xpath("//ul[@id='VehicleDetailsMakeModel_listbox']//li[1]")
+            ),
             5000
           );
         } catch (e) {
           try {
             // Try general k-item class
             firstResult = await driver.wait(
-              until.elementLocated(By.xpath("//li[contains(@class, 'k-item')][1]")),
+              until.elementLocated(
+                By.xpath("//li[contains(@class, 'k-item')][1]")
+              ),
               5000
             );
           } catch (e2) {
             try {
               // Try any li element in autocomplete
               firstResult = await driver.wait(
-                until.elementLocated(By.xpath("//li[contains(@class, 'k-list-item')][1]")),
+                until.elementLocated(
+                  By.xpath("//li[contains(@class, 'k-list-item')][1]")
+                ),
                 5000
               );
             } catch (e3) {
-              console.log("Could not find dropdown options, trying alternative approach...");
+              console.log(
+                "Could not find dropdown options, trying alternative approach..."
+              );
               // Try to press Enter to select if no dropdown appears
               await vehicleMakeInput.sendKeys(Key.ENTER);
               await driver.sleep(1000);
@@ -566,7 +602,7 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
             }
           }
         }
-        
+
         if (firstResult) {
           await driver.wait(until.elementIsVisible(firstResult), 5000);
           await firstResult.click();
@@ -576,16 +612,19 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
 
         // Purchase Date - fill with today's date
         console.log("Filling purchase date...");
-        const today = new Date().toLocaleDateString('en-GB'); // DD/MM/YYYY format
+        const today = new Date().toLocaleDateString("en-GB"); // DD/MM/YYYY format
         const purchaseDateInput = await driver.wait(
           until.elementLocated(By.id("Date_PurchaseVehicle")),
           10000
         );
-        await driver.executeScript(`
+        await driver.executeScript(
+          `
           arguments[0].value = '${today}';
           var event = new Event('change', { bubbles: true });
           arguments[0].dispatchEvent(event);
-        `, purchaseDateInput);
+        `,
+          purchaseDateInput
+        );
         console.log("Filled purchase date with today's date");
 
         // Registration Date - fill with today's date
@@ -594,11 +633,14 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
           until.elementLocated(By.id("Date_RegistrationVehicle")),
           10000
         );
-        await driver.executeScript(`
+        await driver.executeScript(
+          `
           arguments[0].value = '${today}';
           var event = new Event('change', { bubbles: true });
           arguments[0].dispatchEvent(event);
-        `, registrationDateInput);
+        `,
+          registrationDateInput
+        );
         console.log("Filled registration date with today's date");
 
         // Manufacturing Year and Month - Try a simpler approach
@@ -639,10 +681,11 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
               }
             }, 1000);
           `);
-          
+
           await driver.sleep(3000); // Wait for the JavaScript to execute
-          console.log("Attempted to set manufacturing year and month via JavaScript");
-          
+          console.log(
+            "Attempted to set manufacturing year and month via JavaScript"
+          );
         } catch (err) {
           console.log("Error setting manufacturing year/month:", err.message);
         }
@@ -665,23 +708,27 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
         );
         await driver.wait(until.elementIsVisible(rtoCityInput), 5000);
         await driver.wait(until.elementIsEnabled(rtoCityInput), 5000);
-        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", rtoCityInput);
+        await driver.executeScript(
+          "arguments[0].scrollIntoView({block: 'center'});",
+          rtoCityInput
+        );
         await driver.sleep(500);
-        
+
         // Clear the field first
         await rtoCityInput.clear();
         await driver.sleep(500);
-        
+
         // Click on the input to focus it
         await rtoCityInput.click();
         await driver.sleep(500);
-        
+
         // Type the search text and trigger events
         await rtoCityInput.sendKeys("coimbatore");
         await driver.sleep(1000);
-        
+
         // Trigger additional events to ensure autocomplete works
-        await driver.executeScript(`
+        await driver.executeScript(
+          `
           var input = arguments[0];
           var event = new Event('input', { bubbles: true });
           input.dispatchEvent(event);
@@ -691,18 +738,22 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
           
           var changeEvent = new Event('change', { bubbles: true });
           input.dispatchEvent(changeEvent);
-        `, rtoCityInput);
-        
+        `,
+          rtoCityInput
+        );
+
         // Wait for API call to complete and dropdown to appear
         await driver.sleep(4000);
         console.log("Waiting for RTO city dropdown options to appear...");
-        
+
         // Try multiple selectors for the dropdown items
         let rtoCitySelected = false;
         try {
           // Try Kendo autocomplete listbox items
           const firstRtoResult = await driver.wait(
-            until.elementLocated(By.xpath("//ul[@id='RTOCityLocation_listbox']//li[1]")),
+            until.elementLocated(
+              By.xpath("//ul[@id='RTOCityLocation_listbox']//li[1]")
+            ),
             5000
           );
           await driver.wait(until.elementIsVisible(firstRtoResult), 3000);
@@ -713,7 +764,9 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
           try {
             // Try general k-item class
             const firstRtoResult = await driver.wait(
-              until.elementLocated(By.xpath("//li[contains(@class, 'k-item')][1]")),
+              until.elementLocated(
+                By.xpath("//li[contains(@class, 'k-item')][1]")
+              ),
               5000
             );
             await driver.wait(until.elementIsVisible(firstRtoResult), 3000);
@@ -724,7 +777,9 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
             try {
               // Try any li element in autocomplete
               const firstRtoResult = await driver.wait(
-                until.elementLocated(By.xpath("//li[contains(@class, 'k-list-item')][1]")),
+                until.elementLocated(
+                  By.xpath("//li[contains(@class, 'k-list-item')][1]")
+                ),
                 5000
               );
               await driver.wait(until.elementIsVisible(firstRtoResult), 3000);
@@ -732,7 +787,9 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
               console.log("Selected first RTO city result from list items");
               rtoCitySelected = true;
             } catch (e3) {
-              console.log("Could not find RTO city dropdown options, trying alternative approach...");
+              console.log(
+                "Could not find RTO city dropdown options, trying alternative approach..."
+              );
               // Try to press Enter to select if no dropdown appears
               await rtoCityInput.sendKeys(Key.ENTER);
               await driver.sleep(1000);
@@ -741,7 +798,7 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
             }
           }
         }
-        
+
         if (rtoCitySelected) {
           await driver.sleep(1000);
           console.log("RTO city selection completed");
@@ -755,11 +812,14 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
           until.elementLocated(By.id("EngineNumberVehicle")),
           10000
         );
-        await driver.executeScript(`
+        await driver.executeScript(
+          `
           arguments[0].value = 'FG5HS2808584';
           var event = new Event('input', { bubbles: true });
           arguments[0].dispatchEvent(event);
-        `, engineNumberInput);
+        `,
+          engineNumberInput
+        );
         console.log("Filled engine number");
 
         // Chassis Number
@@ -768,11 +828,14 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
           until.elementLocated(By.id("ChasisNumberVehicle")),
           10000
         );
-        await driver.executeScript(`
+        await driver.executeScript(
+          `
           arguments[0].value = 'MD626DG56S2H08322';
           var event = new Event('input', { bubbles: true });
           arguments[0].dispatchEvent(event);
-        `, chassisNumberInput);
+        `,
+          chassisNumberInput
+        );
         console.log("Filled chassis number");
 
         // Set IDV value
@@ -790,19 +853,27 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
         );
         await driver.wait(until.elementIsVisible(getCoverageButton), 5000);
         await driver.wait(until.elementIsEnabled(getCoverageButton), 5000);
-        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", getCoverageButton);
+        await driver.executeScript(
+          "arguments[0].scrollIntoView({block: 'center'});",
+          getCoverageButton
+        );
         await driver.sleep(1000);
-        
+
         // Try multiple click methods to ensure the click is registered
         try {
           // First try regular click
           await getCoverageButton.click();
-          console.log("Regular click attempted on 'Get Coverage Details' button");
+          console.log(
+            "Regular click attempted on 'Get Coverage Details' button"
+          );
         } catch (e) {
           console.log("Regular click failed, trying JavaScript click...");
-          await driver.executeScript("arguments[0].click();", getCoverageButton);
+          await driver.executeScript(
+            "arguments[0].click();",
+            getCoverageButton
+          );
         }
-        
+
         // Also try triggering the onclick event directly
         await driver.executeScript(`
           var button = document.getElementById('btnFetchIDV');
@@ -818,8 +889,10 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
             }
           }
         `);
-        
-        console.log("Clicked 'Get Coverage Details' button with multiple methods");
+
+        console.log(
+          "Clicked 'Get Coverage Details' button with multiple methods"
+        );
         await driver.sleep(5000); // Wait longer for the API call to complete
 
         // Click PA to Owner Driver checkbox to open modal
@@ -828,10 +901,13 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
           until.elementLocated(By.id("ChkBox24")),
           10000
         );
-        await driver.executeScript("arguments[0].click();", paOwnerDriverCheckbox);
+        await driver.executeScript(
+          "arguments[0].click();",
+          paOwnerDriverCheckbox
+        );
         console.log("Clicked PA to Owner Driver checkbox, modal should open");
         await driver.sleep(2000);
-        
+
         // Wait for modal to open and click "No" checkbox
         console.log("Waiting for modal and clicking 'No' checkbox...");
         try {
@@ -853,7 +929,10 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
           until.elementLocated(By.id("ChkBox500")),
           10000
         );
-        await driver.executeScript("arguments[0].click();", helmetCoverCheckbox);
+        await driver.executeScript(
+          "arguments[0].click();",
+          helmetCoverCheckbox
+        );
         console.log("Unchecked Helmet Cover checkbox");
         await driver.sleep(1000);
 
@@ -863,7 +942,10 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
           until.elementLocated(By.id("IsRegistrationAddresssame")),
           10000
         );
-        await driver.executeScript("arguments[0].click();", regAddressSameCheckbox);
+        await driver.executeScript(
+          "arguments[0].click();",
+          regAddressSameCheckbox
+        );
         console.log("Checked 'Is Registration Address Same' checkbox");
         await driver.sleep(2000);
 
@@ -875,36 +957,46 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
         );
         await driver.wait(until.elementIsVisible(calculatePremiumButton), 5000);
         await driver.wait(until.elementIsEnabled(calculatePremiumButton), 5000);
-        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", calculatePremiumButton);
+        await driver.executeScript(
+          "arguments[0].scrollIntoView({block: 'center'});",
+          calculatePremiumButton
+        );
         await driver.sleep(500);
-        
+
         try {
           await calculatePremiumButton.click();
         } catch {
-          await driver.executeScript("arguments[0].click();", calculatePremiumButton);
+          await driver.executeScript(
+            "arguments[0].click();",
+            calculatePremiumButton
+          );
         }
         console.log("Clicked 'Calculate Premium' button!");
-        
+
         // Wait for premium calculation to complete
         await driver.sleep(3000);
         console.log("Premium calculation completed!");
 
         console.log("All vehicle details filled successfully!");
-        
       } catch (err) {
         console.log("Error handling post-submission elements:", err.message);
         // Take screenshot for debugging
         try {
           const screenshot = await driver.takeScreenshot();
-          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-          fs.writeFileSync(`post-submission-error-${timestamp}.png`, screenshot, 'base64');
-          console.log(`Post-submission error screenshot saved as post-submission-error-${timestamp}.png`);
+          const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+          fs.writeFileSync(
+            `post-submission-error-${timestamp}.png`,
+            screenshot,
+            "base64"
+          );
+          console.log(
+            `Post-submission error screenshot saved as post-submission-error-${timestamp}.png`
+          );
         } catch (e) {
           console.log("Could not take post-submission screenshot:", e.message);
         }
         // Don't throw error here, just log it as the main form submission was successful
       }
-
     } catch (err) {
       console.log("Error filling modal fields:", err.message);
       // Take screenshot to debug the issue
@@ -940,13 +1032,10 @@ async function fillRelianceForm(data = { username: "2WDHAB", password: "ao533f@c
     console.error("[relianceForm] Error:", e.message || e);
     return { success: false, error: String(e.message || e) };
   } finally {
-    try {
-      // if (driver) await driver.quit();
-    } catch {}
-    if (tempProfileDir) {
-      try {
-        await deleteDirectoryRecursive(tempProfileDir);
-      } catch {}
+    // Cleanup: Close browser and delete cloned profile
+    if (jobBrowser) {
+      jobBrowser.driver.sleep(100000); // sleep for 100 seconds
+      await cleanupJobBrowser(jobBrowser);
     }
   }
 }
@@ -981,4 +1070,4 @@ const testData = {
   aadhar: "123412341234",
 };
 
-module.exports = { fillRelianceForm };
+module.exports = { fillRelianceForm, getCaptchaScreenShot };

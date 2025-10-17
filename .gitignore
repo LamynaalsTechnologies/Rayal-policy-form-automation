@@ -11,6 +11,9 @@ chrome-profile*
 *.log
 chrome_debug.log
 
+# Saved login cookies
+reliance-cookies.json
+cloned_profiles
 # Environment variables
 .env
 .env.local

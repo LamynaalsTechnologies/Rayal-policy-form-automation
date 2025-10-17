@@ -10,7 +10,14 @@ const {
   closeCurrentTab,
   ensureCleanState,
   createFreshDriverFromBaseProfile,
+  createChromeDriver,
 } = require("./browser");
+const {
+  initializeMasterSession,
+  getSessionStatus,
+  checkSession,
+  reLoginIfNeeded,
+} = require("./sessionManager");
 const { runFormFlow } = require("./formFlow");
 const { fillRelianceForm } = require("./relianceForm");
 const { extractCaptchaText } = require("./Captcha");
@@ -26,7 +33,7 @@ const db = mongoose.connection;
 
 // Persistent Queue System using MongoDB
 let activeRelianceJobs = 0;
-const MAX_PARALLEL_JOBS = 3; // Control how many browsers can run at once
+const MAX_PARALLEL_JOBS = 3; // Process 3 jobs in parallel using multiple tabs in same browser
 let jobQueueCollection = null; // Will be initialized after DB connection
 
 // Job statuses
@@ -275,6 +282,8 @@ db.once("open", async () => {
     // console.log(change);
     let data = change?.fullDocument;
     let formData = {
+      username: "2WDHAB",
+      password: "ao533f@c",
       proposerTitle: data?.proposerTitle,
       firstName: data?.firstName,
       middleName: data?.middleName,
@@ -592,13 +601,28 @@ async function main() {
 
   server.listen(8800, async () => {
     console.log("Server started on http://localhost:8800");
-    // On first start, open the portal login for manual authentication
+
+    // ============================================
+    // INITIALIZE MASTER SESSION
+    // ============================================
     try {
-      const driver = await getDriver();
-      await driver.get(portalLoginUrl);
-      console.log("Opened portal login page for manual login.");
+      console.log("\n" + "=".repeat(60));
+      console.log("  🚀 INITIALIZING RELIANCE AUTOMATION");
+      console.log("=".repeat(60) + "\n");
+
+      await initializeMasterSession();
+
+      console.log("\n" + "=".repeat(60));
+      console.log("  ✅ READY TO PROCESS JOBS");
+      console.log("=".repeat(60));
+      console.log(
+        "📊 Session Status:",
+        JSON.stringify(getSessionStatus(), null, 2)
+      );
+      console.log("=".repeat(60) + "\n");
     } catch (e) {
-      console.error("Failed to open portal login on startup:", e);
+      console.error("\n❌ Failed to initialize master session:", e.message);
+      console.error("⚠️  Jobs may require manual login\n");
     }
   });
 }

@@ -1,0 +1,135 @@
+[
+  {
+    "domain": "smartzone.reliancegeneral.co.in",
+    "expiry": 1760670999,
+    "httpOnly": false,
+    "name": "ADRUM_BTa",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "R:97|g:794ade02-b41c-4318-8f01-6bbdfb759384|n:customer1_00845a7e-f23d-4fba-9378-528d0fd4a18b"
+  },
+  {
+    "domain": "smartzone.reliancegeneral.co.in",
+    "httpOnly": true,
+    "name": "UserToken",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "ed0244d1-4c30-47bf-aa78-fbda8fd416b1"
+  },
+  {
+    "domain": "smartzone.reliancegeneral.co.in",
+    "httpOnly": true,
+    "name": ".IMD",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "0D9185C2305DEBA4E4101D6E8DDA001ADB4BF2858FC6E337AE3D27F6BE3524E4C6C843A4CF915820E68E99FF9F9624BC0B40A4E9A109237D0D0EF5E26076FFB188C97DA925E9660B47864A9DA456F10AE9FE19D5B8BB61DEED29168AB2256D97F27AC17F4B274364F3648102182925528501BD43"
+  },
+  {
+    "domain": ".smartzone.reliancegeneral.co.in",
+    "expiry": 1761071171,
+    "httpOnly": true,
+    "name": "User",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": true,
+    "value": "2AyHtvBUcVM18%2fshm6j7PnHsVCjcPZhAyCjcaRuN4gppY6%2b6IQX%2f2x2f1x0xkoyb"
+  },
+  {
+    "domain": "smartzone.reliancegeneral.co.in",
+    "httpOnly": true,
+    "name": "AuthToken",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "83f04737-5477-4833-96d3-3012f599a2ad"
+  },
+  {
+    "domain": "smartzone.reliancegeneral.co.in",
+    "expiry": 1760670999,
+    "httpOnly": false,
+    "name": "SameSite",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "None"
+  },
+  {
+    "domain": "smartzone.reliancegeneral.co.in",
+    "httpOnly": true,
+    "name": "ASP.NET_SessionId",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "ine4ykifity1ync4ld2hj2lt"
+  },
+  {
+    "domain": "smartzone.reliancegeneral.co.in",
+    "expiry": 1761102956,
+    "httpOnly": false,
+    "name": "AppName",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "c9OTdmEPlacj6DPok9h1BQ%3d%3d"
+  },
+  {
+    "domain": "smartzone.reliancegeneral.co.in",
+    "httpOnly": false,
+    "name": "ApplicationGatewayAffinity",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "56017363e83a6b77712d25a76d451f7f"
+  },
+  {
+    "domain": "smartzone.reliancegeneral.co.in",
+    "httpOnly": false,
+    "name": "ApplicationGatewayAffinityCORS",
+    "path": "/",
+    "sameSite": "None",
+    "secure": true,
+    "value": "56017363e83a6b77712d25a76d451f7f"
+  },
+  {
+    "domain": "smartzone.reliancegeneral.co.in",
+    "expiry": 1761102964,
+    "httpOnly": true,
+    "name": "User",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "2AyHtvBUcVM18%2fshm6j7PnHsVCjcPZhAyCjcaRuN4gppY6%2b6IQX%2f2x2f1x0xkoyb"
+  },
+  {
+    "domain": ".smartzone.reliancegeneral.co.in",
+    "expiry": 1761070597,
+    "httpOnly": false,
+    "name": "AppName",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": true,
+    "value": "c9OTdmEPlacj6DPok9h1BQ%3d%3d"
+  },
+  {
+    "domain": "smartzone.reliancegeneral.co.in",
+    "httpOnly": true,
+    "name": "__RequestVerificationToken",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "oBGxtP9p7V9QuswO9QItbNnR_AXMyhB7Os3KxkdyU58jwM5OWr24jmnk323TTAVTi5blorT2LUa9QK5KQINyUt0h_0KFE9VJ3Sg7p1IHxVVklVzPUCWIcL4b2GKfL3D5ELTFng2"
+  },
+  {
+    "domain": "smartzone.reliancegeneral.co.in",
+    "expiry": 1760672169,
+    "httpOnly": true,
+    "name": "NSC_TNBSUAPOF_8202",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "ffffffff0936a0ac45525d5f4f58455e445a4a423660"
+  }
+]
