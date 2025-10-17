@@ -145,8 +145,8 @@ const runRelianceJob = async (job) => {
     );
 
     const result = await fillRelianceForm({
-      username: "2WDHAB",
-      password: "ao533f@c",
+      username: "rfcpolicy",
+      password: "Pass@123",
       ...job.formData,
       _jobId: job._id, // Pass job ID for error logging
       _jobIdentifier: jobIdentifier,

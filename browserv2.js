@@ -11,8 +11,8 @@ const { getCaptchaScreenShot, getCaptchaText } = require("./captchaUtils");
 const CONFIG = {
   LOGIN_URL: "https://smartzone.reliancegeneral.co.in/Login/IMDLogin",
   DASHBOARD_URL: "https://smartzone.reliancegeneral.co.in/",
-  USERNAME: "2WDHAB",
-  PASSWORD: "ao533f@c",
+  USERNAME: "rfcpolicy",
+  PASSWORD: "Pass@123",
   LOGIN_TIMEOUT: 30000, // 30 seconds for manual login
   CHECK_TIMEOUT: 5000,
 };
