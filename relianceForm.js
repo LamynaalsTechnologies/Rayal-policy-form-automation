@@ -194,6 +194,8 @@ async function fillRelianceForm(
   const jobId = `${data.firstName || "Job"}_${Date.now()}`;
   let jobBrowser = null;
   let driver = null;
+  let postSubmissionFailed = false;
+  let postSubmissionError = null;
 
   try {
     // === STEP 0: Create cloned browser (already logged in!) ===
@@ -981,6 +983,11 @@ async function fillRelianceForm(
         console.log("All vehicle details filled successfully!");
       } catch (err) {
         console.log("Error handling post-submission elements:", err.message);
+
+        // Mark post-submission as failed
+        postSubmissionFailed = true;
+        postSubmissionError = err.message;
+
         // Take screenshot and upload to S3
         try {
           const screenshot = await driver.takeScreenshot();
@@ -1004,7 +1011,7 @@ async function fillRelianceForm(
 
           // Store in MongoDB for this specific error
           if (data._jobId && data._jobQueueCollection) {
-            const postSubmissionError = {
+            const postSubmissionErrorLog = {
               timestamp: new Date(),
               attemptNumber: attemptNumber,
               errorMessage: err.message,
@@ -1018,8 +1025,8 @@ async function fillRelianceForm(
             await data._jobQueueCollection.updateOne(
               { _id: data._jobId },
               {
-                $push: { errorLogs: postSubmissionError },
-                $set: { lastPostSubmissionError: postSubmissionError },
+                $push: { errorLogs: postSubmissionErrorLog },
+                $set: { lastPostSubmissionError: postSubmissionErrorLog },
               }
             );
 
@@ -1031,7 +1038,7 @@ async function fillRelianceForm(
             e.message
           );
         }
-        // Don't throw error here, just log it as the main form submission was successful
+        // Don't throw error here, just set flag to mark job as failed
       }
     } catch (err) {
       console.log("Error filling modal fields:", err.message);
@@ -1107,6 +1114,16 @@ async function fillRelianceForm(
     }
 
     await driver.sleep(2000);
+
+    // Return failure if post-submission failed (even if modal submission succeeded)
+    if (postSubmissionFailed) {
+      return {
+        success: false,
+        error: postSubmissionError || "Post-submission stage failed",
+        postSubmissionFailed: true,
+        stage: "post-submission",
+      };
+    }
 
     return { success: true };
   } catch (e) {

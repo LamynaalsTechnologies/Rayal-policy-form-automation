@@ -45,21 +45,23 @@ const JOB_STATUS = {
   FAILED: "failed", // Failed after processing
 };
 
-const enqueueRelianceJob = async (formData) => {
+const enqueueRelianceJob = async (formData, captchaId = null) => {
   try {
     // Save job to MongoDB with pending status
     const job = {
+      captchaId: captchaId, // Reference to original Captcha collection document
       formData,
       status: JOB_STATUS.PENDING,
       createdAt: new Date(),
       attempts: 0,
       maxAttempts: 3, // Retry up to 3 times on failure
       lastError: null,
+      errorLogs: [], // Initialize empty error logs array
     };
 
     const result = await jobQueueCollection.insertOne(job);
     console.log(
-      `[Reliance Queue] Enqueued job for ${formData.firstName} (ID: ${result.insertedId})`
+      `[Reliance Queue] Enqueued job for ${formData.firstName} (Job ID: ${result.insertedId}, Captcha ID: ${captchaId})`
     );
 
     // Try to process queue
@@ -309,8 +311,10 @@ db.once("open", async () => {
   // Create indexes for better performance
   await jobQueueCollection.createIndex({ status: 1, createdAt: 1 });
   await jobQueueCollection.createIndex({ createdAt: 1 });
+  await jobQueueCollection.createIndex({ captchaId: 1 }); // For job-status API lookups
+  await jobQueueCollection.createIndex({ "errorLogs.timestamp": 1 }); // For error history queries
 
-  console.log("[Job Queue] Initialized persistent job queue");
+  console.log("[Job Queue] Initialized persistent job queue with indexes");
 
   // CRASH RECOVERY: Reset any jobs stuck in "processing" state back to "pending"
   // This happens when server crashes while processing jobs
@@ -354,6 +358,10 @@ db.once("open", async () => {
   changeStream.on("change", async (change) => {
     // console.log(change);
     let data = change?.fullDocument;
+
+    // Get the Captcha document _id for reference
+    const captchaId = data?._id;
+
     let formData = {
       username: "2WDHAB",
       password: "ao533f@c",
@@ -377,10 +385,13 @@ db.once("open", async () => {
       email: data?.email,
       aadhar: data?.aadhar,
     };
-    console.log("[MongoDB Watch] New customer data received:", formData);
 
-    // Instead of calling fillRelianceForm directly, add to queue
-    await enqueueRelianceJob(formData);
+    console.log(
+      `[MongoDB Watch] New customer data received: ${formData.firstName} (Captcha ID: ${captchaId})`
+    );
+
+    // Add to queue with captchaId reference
+    await enqueueRelianceJob(formData, captchaId);
   });
 });
 
@@ -410,6 +421,279 @@ app.post("/api/extract-captcha", upload.single("image"), async (req, res) => {
     res.status(500).json({
       success: false,
       message: error.message,
+    });
+  }
+});
+
+// ============================================
+// JOB STATUS API ENDPOINTS
+// ============================================
+
+/**
+ * GET /api/job-status/:captchaId
+ * Get job status and details by Captcha ID
+ *
+ * Returns:
+ * - Job status (pending/processing/completed/failed)
+ * - Attempt count
+ * - Error logs with screenshots
+ * - Timestamps
+ */
+app.get("/api/job-status/:captchaId", async (req, res) => {
+  try {
+    const { captchaId } = req.params;
+
+    // Validate captchaId format
+    if (!captchaId || captchaId.length !== 24) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid captcha ID format",
+      });
+    }
+
+    // Convert to MongoDB ObjectId
+    const ObjectId = require("mongodb").ObjectId;
+    const captchaObjectId = new ObjectId(captchaId);
+
+    // Find job by captchaId reference
+    const job = await jobQueueCollection.findOne({
+      captchaId: captchaObjectId,
+    });
+
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        message: "Job not found for this captcha ID",
+        captchaId: captchaId,
+      });
+    }
+
+    // Prepare response data
+    const responseData = {
+      // IDs
+      captchaId: captchaId,
+      jobId: job._id.toString(),
+
+      // Status
+      status: job.status,
+
+      // Progress
+      attempts: job.attempts,
+      maxAttempts: job.maxAttempts,
+      currentAttempt: job.attempts,
+      retriesLeft: Math.max(0, job.maxAttempts - job.attempts),
+
+      // Error information
+      hasErrors: (job.errorLogs && job.errorLogs.length > 0) || false,
+      errorCount: job.errorLogs ? job.errorLogs.length : 0,
+      errorLogs: job.errorLogs || [],
+      lastError: job.lastError || null,
+      lastErrorTimestamp: job.lastErrorTimestamp || null,
+      finalError: job.finalError || null,
+
+      // Special errors
+      lastPostSubmissionError: job.lastPostSubmissionError || null,
+      lastModalError: job.lastModalError || null,
+
+      // Screenshots
+      screenshotUrls: job.errorLogs
+        ? job.errorLogs.map((e) => e.screenshotUrl).filter(Boolean)
+        : [],
+
+      // Timestamps
+      createdAt: job.createdAt,
+      startedAt: job.startedAt || null,
+      completedAt: job.completedAt || null,
+      failedAt: job.failedAt || null,
+      lastAttemptAt: job.lastAttemptAt || null,
+      nextRetryAt: job.nextRetryAt || null,
+
+      // Form data (customer info)
+      customerData: {
+        firstName: job.formData?.firstName,
+        lastName: job.formData?.lastName,
+        mobile: job.formData?.mobile,
+        email: job.formData?.email,
+      },
+    };
+
+    return res.json({
+      success: true,
+      data: responseData,
+    });
+  } catch (error) {
+    console.error("[API] Error fetching job status:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/jobs
+ * Get list of jobs with optional filtering
+ *
+ * Query parameters:
+ * - status: Filter by status (pending/processing/completed/failed)
+ * - limit: Number of results (default: 50, max: 100)
+ * - skip: Number to skip for pagination (default: 0)
+ * - sortBy: Sort field (default: createdAt)
+ * - sortOrder: asc or desc (default: desc)
+ *
+ * Examples:
+ * - GET /api/jobs?status=failed
+ * - GET /api/jobs?status=completed&limit=20
+ * - GET /api/jobs?limit=10&skip=10
+ */
+app.get("/api/jobs", async (req, res) => {
+  try {
+    const {
+      status,
+      limit = 50,
+      skip = 0,
+      sortBy = "createdAt",
+      sortOrder = "desc",
+    } = req.query;
+
+    // Build filter
+    const filter = {};
+    if (status) {
+      // Validate status
+      const validStatuses = ["pending", "processing", "completed", "failed"];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid status. Must be one of: ${validStatuses.join(
+            ", "
+          )}`,
+        });
+      }
+      filter.status = status;
+    }
+
+    // Validate and sanitize pagination
+    const limitNum = Math.min(parseInt(limit) || 50, 100); // Max 100
+    const skipNum = Math.max(parseInt(skip) || 0, 0); // Min 0
+
+    // Build sort
+    const sortField = sortBy || "createdAt";
+    const sortDirection = sortOrder === "asc" ? 1 : -1;
+    const sort = { [sortField]: sortDirection };
+
+    // Query jobs
+    const jobs = await jobQueueCollection
+      .find(filter)
+      .sort(sort)
+      .limit(limitNum)
+      .skip(skipNum)
+      .toArray();
+
+    // Get total count for pagination
+    const totalCount = await jobQueueCollection.countDocuments(filter);
+
+    // Format response
+    const formattedJobs = jobs.map((job) => ({
+      jobId: job._id.toString(),
+      captchaId: job.captchaId ? job.captchaId.toString() : null,
+      status: job.status,
+      attempts: job.attempts,
+      customerName: `${job.formData?.firstName || ""} ${
+        job.formData?.lastName || ""
+      }`.trim(),
+      mobile: job.formData?.mobile,
+      hasErrors: job.errorLogs && job.errorLogs.length > 0,
+      errorCount: job.errorLogs ? job.errorLogs.length : 0,
+      lastError: job.lastError,
+      createdAt: job.createdAt,
+      completedAt: job.completedAt,
+      failedAt: job.failedAt,
+    }));
+
+    return res.json({
+      success: true,
+      data: formattedJobs,
+      pagination: {
+        total: totalCount,
+        limit: limitNum,
+        skip: skipNum,
+        returned: formattedJobs.length,
+        hasMore: skipNum + limitNum < totalCount,
+        nextSkip: skipNum + limitNum < totalCount ? skipNum + limitNum : null,
+      },
+      filter: filter,
+    });
+  } catch (error) {
+    console.error("[API] Error fetching jobs:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/jobs/stats
+ * Get job statistics
+ *
+ * Returns:
+ * - Total jobs by status
+ * - Success rate
+ * - Average attempts
+ * - Recent failures
+ */
+app.get("/api/jobs/stats", async (req, res) => {
+  try {
+    const stats = await jobQueueCollection
+      .aggregate([
+        {
+          $group: {
+            _id: "$status",
+            count: { $sum: 1 },
+            avgAttempts: { $avg: "$attempts" },
+          },
+        },
+      ])
+      .toArray();
+
+    // Format statistics
+    const statusCounts = {};
+    stats.forEach((stat) => {
+      statusCounts[stat._id] = {
+        count: stat.count,
+        avgAttempts: Math.round(stat.avgAttempts * 100) / 100,
+      };
+    });
+
+    // Calculate totals
+    const totalJobs = stats.reduce((sum, stat) => sum + stat.count, 0);
+    const completedCount = statusCounts.completed?.count || 0;
+    const failedCount = statusCounts.failed?.count || 0;
+    const successRate =
+      totalJobs > 0 ? Math.round((completedCount / totalJobs) * 100) : 0;
+
+    return res.json({
+      success: true,
+      data: {
+        total: totalJobs,
+        byStatus: statusCounts,
+        successRate: `${successRate}%`,
+        metrics: {
+          completed: completedCount,
+          failed: failedCount,
+          pending: statusCounts.pending?.count || 0,
+          processing: statusCounts.processing?.count || 0,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("[API] Error fetching stats:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message,
     });
   }
 });
