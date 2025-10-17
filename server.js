@@ -384,6 +384,7 @@ db.once("open", async () => {
       mobile: data?.mobileNumber,
       email: data?.email,
       aadhar: data?.aadhar,
+      rtoCityLocation:data?.rtoCityLocation
     };
 
     console.log(

@@ -189,7 +189,7 @@ async function deleteDirectoryRecursive(dirPath) {
 }
 
 async function fillRelianceForm(
-  data = { username: "2WDHAB", password: "ao533f@c" }
+  data = { username: "rfcpolicy", password: "Pass@123" }
 ) {
   const jobId = `${data.firstName || "Job"}_${Date.now()}`;
   let jobBrowser = null;
@@ -477,18 +477,18 @@ async function fillRelianceForm(
         console.log("Vertical Code dropdown clicked!");
 
         // Select "GIRNAR FINSERV PRIVATE LIMITED_518898" option
-        console.log("Selecting GIRNAR FINSERV PRIVATE LIMITED_518898...");
-        const girnarOption = await driver.wait(
-          until.elementLocated(
-            By.xpath(
-              "//li[contains(text(), 'GIRNAR FINSERV PRIVATE LIMITED_518898')]"
-            )
-          ),
-          10000
-        );
-        await driver.executeScript("arguments[0].click();", girnarOption);
-        console.log("Selected GIRNAR FINSERV PRIVATE LIMITED_518898!");
-        await driver.sleep(2000);
+        // console.log("Selecting GIRNAR FINSERV PRIVATE LIMITED_518898...");
+        // const girnarOption = await driver.wait(
+        //   until.elementLocated(
+        //     By.xpath(
+        //       "//li[contains(text(), 'GIRNAR FINSERV PRIVATE LIMITED_518898')]"
+        //     )
+        //   ),
+        //   10000
+        // );
+        // await driver.executeScript("arguments[0].click();", girnarOption);
+        // console.log("Selected GIRNAR FINSERV PRIVATE LIMITED_518898!");
+        // await driver.sleep(2000);
 
         // Wait for and click the "Validate Customer" button
         console.log("Looking for Validate Customer button...");
@@ -726,7 +726,7 @@ async function fillRelianceForm(
         await driver.sleep(500);
 
         // Type the search text and trigger events
-        await rtoCityInput.sendKeys("coimbatore");
+        await rtoCityInput.sendKeys(data.rtoCityLocation||"coimbatore");
         await driver.sleep(1000);
 
         // Trigger additional events to ensure autocomplete works
@@ -980,6 +980,222 @@ async function fillRelianceForm(
         await driver.sleep(3000);
         console.log("Premium calculation completed!");
 
+        // === STEP 10: Handle post-calculation elements ===
+        console.log("Handling post-calculation elements...");
+
+        try {
+          // Click Save button
+          console.log("Looking for Save button...");
+          const saveButton = await driver.wait(
+            until.elementLocated(By.id("btnSave")),
+            10000
+          );
+          await driver.wait(until.elementIsVisible(saveButton), 5000);
+          await driver.wait(until.elementIsEnabled(saveButton), 5000);
+          await driver.executeScript(
+            "arguments[0].scrollIntoView({block: 'center'});",
+            saveButton
+          );
+          await driver.sleep(500);
+
+          try {
+            await saveButton.click();
+          } catch {
+            await driver.executeScript("arguments[0].click();", saveButton);
+          }
+          console.log("Clicked Save button!");
+          await driver.sleep(3000);
+
+          // Click Make Payment button
+          console.log("Looking for Make Payment button...");
+          const makePaymentButton = await driver.wait(
+            until.elementLocated(By.id("BtnmakeLive")),
+            10000
+          );
+          await driver.wait(until.elementIsVisible(makePaymentButton), 5000);
+          await driver.wait(until.elementIsEnabled(makePaymentButton), 5000);
+          await driver.executeScript(
+            "arguments[0].scrollIntoView({block: 'center'});",
+            makePaymentButton
+          );
+          await driver.sleep(500);
+
+          try {
+            await makePaymentButton.click();
+          } catch {
+            await driver.executeScript("arguments[0].click();", makePaymentButton);
+          }
+          console.log("Clicked Make Payment button!");
+          await driver.sleep(3000);
+
+          // Check the policy checkbox (using dynamic ID pattern)
+          console.log("Looking for policy checkbox...");
+          try {
+            // Try to find checkbox with pattern chkR followed by numbers
+            const policyCheckbox = await driver.wait(
+              until.elementLocated(By.css("input[id^='chkR'][type='checkbox']")),
+              10000
+            );
+            await driver.wait(until.elementIsVisible(policyCheckbox), 5000);
+            await driver.executeScript("arguments[0].click();", policyCheckbox);
+            console.log("Checked policy checkbox!");
+            await driver.sleep(1000);
+          } catch (err) {
+            console.log("Could not find policy checkbox:", err.message);
+          }
+
+          // Check TP Declaration checkbox
+          console.log("Looking for TP Declaration checkbox...");
+          try {
+            const tpDeclarationCheckbox = await driver.wait(
+              until.elementLocated(By.id("TPDeclaration1")),
+              10000
+            );
+            await driver.wait(until.elementIsVisible(tpDeclarationCheckbox), 5000);
+            await driver.executeScript("arguments[0].click();", tpDeclarationCheckbox);
+            console.log("Checked TP Declaration checkbox!");
+            await driver.sleep(1000);
+          } catch (err) {
+            console.log("Could not find TP Declaration checkbox:", err.message);
+          }
+
+          // Click Pay button
+          console.log("Looking for Pay button...");
+          const payButton = await driver.wait(
+            until.elementLocated(By.id("Paymentbtn")),
+            10000
+          );
+          await driver.wait(until.elementIsVisible(payButton), 5000);
+          await driver.wait(until.elementIsEnabled(payButton), 5000);
+          await driver.executeScript(
+            "arguments[0].scrollIntoView({block: 'center'});",
+            payButton
+          );
+          await driver.sleep(500);
+
+          try {
+            await payButton.click();
+          } catch {
+            await driver.executeScript("arguments[0].click();", payButton);
+          }
+          console.log("Clicked Pay button!");
+          await driver.sleep(3000);
+
+          // Handle Payment Type dropdown
+          console.log("Handling Payment Type dropdown...");
+          try {
+            const paymentTypeDropdown = await driver.wait(
+              until.elementLocated(By.css("span[aria-owns='ddlPaymentType_listbox']")),
+              10000
+            );
+            await driver.executeScript("arguments[0].click();", paymentTypeDropdown);
+            await driver.sleep(1000);
+
+            // Select "Send Payment Link" option
+            const sendPaymentLinkOption = await driver.wait(
+              until.elementLocated(
+                By.xpath("//li[contains(text(), 'Send Payment Link')]")
+              ),
+              5000
+            );
+            await driver.executeScript("arguments[0].click();", sendPaymentLinkOption);
+            console.log("Selected 'Send Payment Link' from dropdown!");
+            await driver.sleep(2000);
+          } catch (err) {
+            console.log("Could not handle Payment Type dropdown:", err.message);
+          }
+
+          // Click Add button
+          console.log("Looking for Add button...");
+          try {
+            const addButton = await driver.wait(
+              until.elementLocated(By.css("input[onclick*='AddRowToPaymentDetailsGrid']")),
+              10000
+            );
+            await driver.wait(until.elementIsVisible(addButton), 5000);
+            await driver.wait(until.elementIsEnabled(addButton), 5000);
+            await driver.executeScript(
+              "arguments[0].scrollIntoView({block: 'center'});",
+              addButton
+            );
+            await driver.sleep(500);
+
+            try {
+              await addButton.click();
+            } catch {
+              await driver.executeScript("arguments[0].click();", addButton);
+            }
+            console.log("Clicked Add button!");
+            await driver.sleep(2000);
+
+            // Click OK button in modal
+            console.log("Looking for OK button in modal...");
+            const okButton = await driver.wait(
+              until.elementLocated(By.id("btnAddRowToGrid")),
+              10000
+            );
+            await driver.wait(until.elementIsVisible(okButton), 5000);
+            await driver.wait(until.elementIsEnabled(okButton), 5000);
+            await driver.executeScript("arguments[0].click();", okButton);
+            console.log("Clicked OK button in modal!");
+            await driver.sleep(2000);
+          } catch (err) {
+            console.log("Could not handle Add button flow:", err.message);
+          }
+
+          // Click Yes button
+          console.log("Looking for Yes button...");
+          try {
+            const yesButton = await driver.wait(
+              until.elementLocated(By.css("input[onclick*='SendMail'][value='Yes']")),
+              10000
+            );
+            await driver.wait(until.elementIsVisible(yesButton), 5000);
+            await driver.wait(until.elementIsEnabled(yesButton), 5000);
+            await driver.executeScript(
+              "arguments[0].scrollIntoView({block: 'center'});",
+              yesButton
+            );
+            await driver.sleep(500);
+
+            try {
+              await yesButton.click();
+            } catch {
+              await driver.executeScript("arguments[0].click();", yesButton);
+            }
+            console.log("Clicked Yes button!");
+            await driver.sleep(3000);
+          } catch (err) {
+            console.log("Could not find Yes button:", err.message);
+          }
+
+          console.log("All post-calculation elements handled successfully!");
+        } catch (err) {
+          console.log("Error handling post-calculation elements:", err.message);
+          // Take screenshot for debugging
+          try {
+            const screenshot = await driver.takeScreenshot();
+            const jobIdentifier = data._jobIdentifier || `job_${Date.now()}`;
+            const attemptNumber = data._attemptNumber || 1;
+
+            const screenshotKey = generateScreenshotKey(
+              jobIdentifier,
+              attemptNumber,
+              "post-calculation-error"
+            );
+            const screenshotUrl = await uploadScreenshotToS3(
+              screenshot,
+              screenshotKey
+            );
+
+            console.log(
+              `📸 Post-calculation error screenshot uploaded to S3: ${screenshotUrl}`
+            );
+          } catch (e) {
+            console.log("Could not capture post-calculation screenshot:", e.message);
+          }
+        }
+
         console.log("All vehicle details filled successfully!");
       } catch (err) {
         console.log("Error handling post-submission elements:", err.message);
@@ -1201,7 +1417,6 @@ const testData = {
   pinCode: "614630",
   area: "MG Road",
   mobile: "9876543210",
-  aadhar: "123412341234",
 };
 
 module.exports = { fillRelianceForm, getCaptchaScreenShot };
