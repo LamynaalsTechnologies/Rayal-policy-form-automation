@@ -42,7 +42,8 @@ const JOB_STATUS = {
   PENDING: "pending", // Waiting in queue
   PROCESSING: "processing", // Currently being processed
   COMPLETED: "completed", // Successfully completed
-  FAILED: "failed", // Failed after processing
+  FAILED_LOGIN_FORM: "failed_login_form", // Failed during login page form filling
+  FAILED_POST_SUBMISSION: "failed_post_submission", // Failed after form submission
 };
 
 const enqueueRelianceJob = async (formData, captchaId = null) => {
@@ -125,11 +126,37 @@ const processRelianceQueue = async () => {
       );
 
       // Run job in parallel (don't await)
-      runRelianceJob(job).finally(() => {
-        activeRelianceJobs--;
-        // Try to process more jobs
-        void processRelianceQueue();
-      });
+      runRelianceJob(job)
+        .catch((unexpectedError) => {
+          // Safety net: Catch any unhandled errors
+          console.error(
+            `[Reliance Queue] 💥 UNEXPECTED ERROR for ${job.formData.firstName}:`,
+            unexpectedError.message
+          );
+          console.error("Stack trace:", unexpectedError.stack);
+
+          // Ensure job is not left in "processing" state
+          jobQueueCollection
+            .updateOne(
+              { _id: job._id },
+              {
+                $set: {
+                  status: JOB_STATUS.PENDING, // Reset to pending for retry
+                  lastError: `Unexpected error: ${unexpectedError.message}`,
+                  lastErrorTimestamp: new Date(),
+                },
+                $inc: { attempts: 1 },
+              }
+            )
+            .catch((err) =>
+              console.error("Failed to update job after unexpected error:", err)
+            );
+        })
+        .finally(() => {
+          activeRelianceJobs--;
+          // Try to process more jobs
+          void processRelianceQueue();
+        });
     }
   } catch (error) {
     console.error("[Reliance Queue] Error processing queue:", error.message);
@@ -138,13 +165,15 @@ const processRelianceQueue = async () => {
 
 const runRelianceJob = async (job) => {
   const jobIdentifier = `${job.formData.firstName}_${job._id}`;
+  const JOB_TIMEOUT = 300000; // 5 minutes timeout per job
 
   try {
     console.log(
       `[Reliance Queue] Processing form for: ${job.formData.firstName} ${job.formData.lastName}`
     );
 
-    const result = await fillRelianceForm({
+    // Wrap fillRelianceForm with timeout protection
+    const fillFormPromise = fillRelianceForm({
       username: "rfcpolicy",
       password: "Pass@123",
       ...job.formData,
@@ -153,6 +182,17 @@ const runRelianceJob = async (job) => {
       _attemptNumber: job.attempts + 1, // Current attempt number
       _jobQueueCollection: jobQueueCollection, // Pass collection for logging
     });
+
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(
+        () =>
+          reject(new Error(`Job timeout after ${JOB_TIMEOUT / 1000} seconds`)),
+        JOB_TIMEOUT
+      )
+    );
+
+    // Race between job completion and timeout
+    const result = await Promise.race([fillFormPromise, timeoutPromise]);
 
     if (result && result.success) {
       // Mark as completed in database
@@ -170,15 +210,25 @@ const runRelianceJob = async (job) => {
         `[Reliance Queue] ✅ Success for ${job.formData.firstName} (ID: ${job._id})`
       );
     } else {
-      // Job failed - capture detailed error with screenshot
+      // Job failed - determine failure type
       const newAttemptCount = job.attempts + 1;
+
+      // Determine failure type based on result
+      const isPostSubmissionFailure =
+        result?.postSubmissionFailed || result?.stage === "post-submission";
+      const failureType = isPostSubmissionFailure
+        ? "PostSubmissionError"
+        : "LoginFormError";
 
       // Create error log with screenshot (if driver available in result)
       const errorLog = {
         timestamp: new Date(),
         attemptNumber: newAttemptCount,
         errorMessage: result?.error || "Unknown error",
-        errorType: "FormFillError",
+        errorType: failureType,
+        stage:
+          result?.stage ||
+          (isPostSubmissionFailure ? "post-submission" : "login-form"),
         screenshotUrl: result?.screenshotUrl || null,
         screenshotKey: result?.screenshotKey || null,
       };
@@ -193,33 +243,55 @@ const runRelianceJob = async (job) => {
             lastError: errorLog.errorMessage,
             lastErrorTimestamp: errorLog.timestamp,
             lastAttemptAt: new Date(),
+            failureType: failureType, // Store failure type
           },
         }
       );
 
       const updatedJob = await jobQueueCollection.findOne({ _id: job._id });
 
-      if (updatedJob.attempts >= updatedJob.maxAttempts) {
-        // Max attempts reached, mark as failed
+      // Post-submission failures: Mark as failed immediately (no retry)
+      if (isPostSubmissionFailure) {
         await jobQueueCollection.updateOne(
           { _id: job._id },
           {
             $set: {
-              status: JOB_STATUS.FAILED,
+              status: JOB_STATUS.FAILED_POST_SUBMISSION,
               failedAt: new Date(),
               finalError: errorLog,
             },
           }
         );
         console.error(
-          `[Reliance Queue] ❌ Failed permanently for ${job.formData.firstName} after ${updatedJob.attempts} attempts`
+          `[Reliance Queue] ❌ Failed permanently (POST-SUBMISSION) for ${job.formData.firstName} - NO RETRY (form already submitted)`
+        );
+        console.error(`   Error: ${errorLog.errorMessage}`);
+        if (errorLog.screenshotUrl) {
+          console.error(`   Screenshot: ${errorLog.screenshotUrl}`);
+        }
+      }
+      // Login form failures: Retry logic
+      else if (updatedJob.attempts >= updatedJob.maxAttempts) {
+        // Max attempts reached for login form failures
+        await jobQueueCollection.updateOne(
+          { _id: job._id },
+          {
+            $set: {
+              status: JOB_STATUS.FAILED_LOGIN_FORM,
+              failedAt: new Date(),
+              finalError: errorLog,
+            },
+          }
+        );
+        console.error(
+          `[Reliance Queue] ❌ Failed permanently (LOGIN FORM) for ${job.formData.firstName} after ${updatedJob.attempts} attempts`
         );
         console.error(`   Last error: ${errorLog.errorMessage}`);
         if (errorLog.screenshotUrl) {
           console.error(`   Screenshot: ${errorLog.screenshotUrl}`);
         }
       } else {
-        // Retry: reset to pending
+        // Retry login form failures: reset to pending
         await jobQueueCollection.updateOne(
           { _id: job._id },
           {
@@ -230,7 +302,7 @@ const runRelianceJob = async (job) => {
           }
         );
         console.warn(
-          `[Reliance Queue] ⚠️ Failed for ${job.formData.firstName}, will retry (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
+          `[Reliance Queue] ⚠️ Failed (LOGIN FORM) for ${job.formData.firstName}, will retry (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
         );
         if (errorLog.screenshotUrl) {
           console.warn(`   Screenshot: ${errorLog.screenshotUrl}`);
@@ -246,12 +318,14 @@ const runRelianceJob = async (job) => {
     // Increment attempt and create error log
     const newAttemptCount = job.attempts + 1;
 
+    // For exceptions, we assume it's a login form error since post-submission errors are caught earlier
     const errorLog = {
       timestamp: new Date(),
       attemptNumber: newAttemptCount,
       errorMessage: e.message,
       errorStack: e.stack || null,
-      errorType: e.name || "Error",
+      errorType: "LoginFormError",
+      stage: "login-form",
     };
 
     // Add error to errorLogs array
@@ -264,6 +338,7 @@ const runRelianceJob = async (job) => {
           lastError: e.message,
           lastErrorTimestamp: errorLog.timestamp,
           lastAttemptAt: new Date(),
+          failureType: "LoginFormError",
         },
       }
     );
@@ -275,14 +350,14 @@ const runRelianceJob = async (job) => {
         { _id: job._id },
         {
           $set: {
-            status: JOB_STATUS.FAILED,
+            status: JOB_STATUS.FAILED_LOGIN_FORM,
             failedAt: new Date(),
             finalError: errorLog,
           },
         }
       );
       console.error(
-        `[Reliance Queue] ❌ Failed permanently after ${updatedJob.attempts} attempts`
+        `[Reliance Queue] ❌ Failed permanently (LOGIN FORM) after ${updatedJob.attempts} attempts`
       );
     } else {
       await jobQueueCollection.updateOne(
@@ -295,7 +370,7 @@ const runRelianceJob = async (job) => {
         }
       );
       console.warn(
-        `[Reliance Queue] ⚠️ Will retry (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
+        `[Reliance Queue] ⚠️ Will retry (LOGIN FORM error) (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
       );
     }
   }
@@ -346,7 +421,7 @@ db.once("open", async () => {
     void processRelianceQueue();
   }
 
-  const collection = db.collection("Captcha");
+  const collection = db.collection("onlinePolicy");
 
   const changeStream = collection.watch([
     {
@@ -373,7 +448,7 @@ db.once("open", async () => {
         ? moment(data?.dateOfBirth).format("DD-MM-YYYY")
         : "",
       fatherTitle: data?.fatherTitle,
-      fatherFirstName: data?.fatherFirstName,
+      fatherFirstName: data?.fatherName,
       flatNo: data?.flatDoorNo,
       floorNo: data?.flatDoorNo,
       premisesName: data?.buildingName,
@@ -384,9 +459,9 @@ db.once("open", async () => {
       mobile: data?.mobileNumber,
       email: data?.email,
       aadhar: data?.aadhar,
-      rtoCityLocation:data?.rtoCityLocation
+      rtoCityLocation: data?.rtoCityLocation,
     };
-
+    console.log("formData: ******* ******* ******* ******* ******* ******* ", formData);
     console.log(
       `[MongoDB Watch] New customer data received: ${formData.firstName} (Captcha ID: ${captchaId})`
     );
@@ -435,7 +510,8 @@ app.post("/api/extract-captcha", upload.single("image"), async (req, res) => {
  * Get job status and details by Captcha ID
  *
  * Returns:
- * - Job status (pending/processing/completed/failed)
+ * - Job status (pending/processing/completed/failed_login_form/failed_post_submission)
+ * - Failure type (LoginFormError/PostSubmissionError)
  * - Attempt count
  * - Error logs with screenshots
  * - Timestamps
@@ -477,6 +553,7 @@ app.get("/api/job-status/:captchaId", async (req, res) => {
 
       // Status
       status: job.status,
+      failureType: job.failureType || null, // "LoginFormError" or "PostSubmissionError"
 
       // Progress
       attempts: job.attempts,
@@ -537,14 +614,15 @@ app.get("/api/job-status/:captchaId", async (req, res) => {
  * Get list of jobs with optional filtering
  *
  * Query parameters:
- * - status: Filter by status (pending/processing/completed/failed)
+ * - status: Filter by status (pending/processing/completed/failed_login_form/failed_post_submission)
  * - limit: Number of results (default: 50, max: 100)
  * - skip: Number to skip for pagination (default: 0)
  * - sortBy: Sort field (default: createdAt)
  * - sortOrder: asc or desc (default: desc)
  *
  * Examples:
- * - GET /api/jobs?status=failed
+ * - GET /api/jobs?status=failed_login_form
+ * - GET /api/jobs?status=failed_post_submission
  * - GET /api/jobs?status=completed&limit=20
  * - GET /api/jobs?limit=10&skip=10
  */
@@ -562,7 +640,13 @@ app.get("/api/jobs", async (req, res) => {
     const filter = {};
     if (status) {
       // Validate status
-      const validStatuses = ["pending", "processing", "completed", "failed"];
+      const validStatuses = [
+        "pending",
+        "processing",
+        "completed",
+        "failed_login_form",
+        "failed_post_submission",
+      ];
       if (!validStatuses.includes(status)) {
         return res.status(400).json({
           success: false,
@@ -599,6 +683,7 @@ app.get("/api/jobs", async (req, res) => {
       jobId: job._id.toString(),
       captchaId: job.captchaId ? job.captchaId.toString() : null,
       status: job.status,
+      failureType: job.failureType || null, // "LoginFormError" or "PostSubmissionError"
       attempts: job.attempts,
       customerName: `${job.formData?.firstName || ""} ${
         job.formData?.lastName || ""

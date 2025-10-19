@@ -1,6 +1,11 @@
 const { By, until, Key } = require("selenium-webdriver");
 const { createFreshDriverFromBaseProfile } = require("./browser");
-const { createJobBrowser, cleanupJobBrowser } = require("./sessionManager");
+const {
+  createJobBrowser,
+  cleanupJobBrowser,
+  reLoginIfNeeded,
+  recoveryManager,
+} = require("./sessionManager");
 const fs = require("fs");
 const path = require("path");
 const { extractCaptchaText } = require("./Captcha");
@@ -188,6 +193,268 @@ async function deleteDirectoryRecursive(dirPath) {
   } catch {}
 }
 
+/**
+ * Login on cloned browser when session is expired
+ * @param {WebDriver} driver - Selenium WebDriver instance
+ * @param {string} jobId - Job identifier for logging
+ * @param {Object} credentials - { username, password }
+ * @returns {Promise<boolean>} - true if login successful
+ */
+async function loginOnClonedBrowser(driver, jobId, credentials) {
+  try {
+    console.log(`🔐 [${jobId}] Attempting login on cloned browser...`);
+
+    // Capture captcha
+    console.log(`📸 [${jobId}] Capturing captcha...`);
+    await getCaptchaScreenShot(driver, `reliance_captcha_${jobId}`);
+    const filePath = path.join(__dirname, `reliance_captcha_${jobId}.png`);
+
+    if (!fs.existsSync(filePath)) {
+      console.error(`❌ [${jobId}] Captcha screenshot not found`);
+      return false;
+    }
+
+    const fileData = fs.readFileSync(filePath, "base64");
+    const imageUrl = `data:image/jpeg;base64,${fileData}`;
+    const captchaResult = await extractCaptchaText(imageUrl);
+    const captchaText = captchaResult?.text?.replace(/\s+/g, "");
+
+    // Clean up captcha file
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {}
+
+    if (!captchaText) {
+      console.error(`❌ [${jobId}] Failed to extract captcha text`);
+      return false;
+    }
+
+    console.log(`🔑 [${jobId}] Captcha extracted: ${captchaText}`);
+
+    // Fill login form
+    console.log(`📝 [${jobId}] Filling login credentials...`);
+    await driver.findElement(By.id("txtUserName")).clear();
+    await driver
+      .findElement(By.id("txtUserName"))
+      .sendKeys(credentials.username);
+    await driver.sleep(500);
+
+    await driver.findElement(By.id("txtPassword")).clear();
+    await driver
+      .findElement(By.id("txtPassword"))
+      .sendKeys(credentials.password);
+    await driver.sleep(500);
+
+    await driver.findElement(By.id("CaptchaInputText")).clear();
+    await driver.findElement(By.id("CaptchaInputText")).sendKeys(captchaText);
+    await driver.sleep(1000);
+
+    // Click login button
+    console.log(`🚀 [${jobId}] Clicking login button...`);
+    await driver.findElement(By.id("btnLogin")).click();
+
+    // Wait for login to complete
+    console.log(`⏳ [${jobId}] Waiting for login to complete...`);
+    await driver.sleep(5000);
+
+    // Verify login successful by checking for dashboard elements
+    const motorsElements = await driver.findElements(By.id("divMainMotors"));
+    const logoutElements = await driver.findElements(By.id("divLogout"));
+
+    if (motorsElements.length > 0 || logoutElements.length > 0) {
+      console.log(`✅ [${jobId}] Login successful on cloned browser!`);
+      return true;
+    } else {
+      console.error(
+        `❌ [${jobId}] Login verification failed - dashboard elements not found`
+      );
+      return false;
+    }
+  } catch (error) {
+    console.error(
+      `❌ [${jobId}] Error during cloned browser login:`,
+      error.message
+    );
+    return false;
+  }
+}
+
+/**
+ * Detect if cloned session is expired and login if needed
+ * @param {WebDriver} driver - Selenium WebDriver instance
+ * @param {string} jobId - Job identifier for logging
+ * @param {Object} credentials - { username, password }
+ * @returns {Promise<boolean>} - true if session is valid, false if unrecoverable
+ */
+async function checkAndRecoverClonedSession(driver, jobId, credentials) {
+  try {
+    console.log(`\n🔍 [${jobId}] Verifying cloned session status...`);
+
+    // Check 1: Are we on the login page? (txtUserName field exists)
+    const loginElements = await driver.findElements(By.id("txtUserName"));
+
+    if (loginElements.length > 0) {
+      console.error(`\n⚠️  [${jobId}] CLONED SESSION EXPIRED - On login page!`);
+      console.log(
+        `🔐 [${jobId}] Will attempt to login on this cloned browser...\n`
+      );
+
+      // Try to login directly on this cloned browser (max 3 attempts)
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        console.log(
+          `🔄 [${jobId}] Login attempt ${attempt}/3 on cloned browser...`
+        );
+
+        const loginSuccess = await loginOnClonedBrowser(
+          driver,
+          jobId,
+          credentials
+        );
+
+        if (loginSuccess) {
+          console.log(
+            `✅ [${jobId}] Successfully logged in on cloned browser!`
+          );
+          console.log(
+            `✅ [${jobId}] Session is now valid, continuing with form filling...\n`
+          );
+          return true; // Login succeeded, session now valid
+        }
+
+        console.warn(`⚠️  [${jobId}] Login attempt ${attempt}/3 failed`);
+
+        if (attempt < 3) {
+          console.log(`⏳ [${jobId}] Waiting 3 seconds before retry...`);
+          await driver.sleep(3000);
+
+          // Refresh page for new captcha
+          await driver.get(
+            "https://smartzone.reliancegeneral.co.in/Login/IMDLogin"
+          );
+          await driver.sleep(2000);
+        }
+      }
+
+      // All login attempts on clone failed
+      console.error(
+        `\n❌ [${jobId}] All 3 login attempts failed on cloned browser!`
+      );
+      console.log(
+        `🔄 [${jobId}] Triggering master session recovery as backup...`
+      );
+
+      // Check if another job is already recovering the master session
+      if (recoveryManager.isRecovering) {
+        console.log(`⏳ [${jobId}] Waiting for ongoing master recovery...`);
+      }
+
+      // Trigger master session recovery as backup
+      const masterRecovered = await reLoginIfNeeded();
+
+      if (masterRecovered) {
+        console.log(`✅ [${jobId}] Master session recovered!`);
+        console.error(
+          `❌ [${jobId}] Will retry job with fresh clone from recovered master\n`
+        );
+      }
+
+      // Return false to force job retry
+      return false;
+    }
+
+    // Check 2: Look for dashboard elements (divMainMotors or divLogout)
+    const dashboardElements = await driver.findElements(By.id("divMainMotors"));
+    const logoutElements = await driver.findElements(By.id("divLogout"));
+
+    if (dashboardElements.length > 0 || logoutElements.length > 0) {
+      console.log(
+        `✅ [${jobId}] Cloned session is ACTIVE - Dashboard detected\n`
+      );
+      return true;
+    }
+
+    // Check 3: Check current URL
+    const currentUrl = await driver.getCurrentUrl();
+    if (currentUrl.includes("/Login/IMDLogin") && !currentUrl.includes("?")) {
+      console.error(
+        `\n⚠️  [${jobId}] CLONED SESSION EXPIRED - Login URL detected!`
+      );
+
+      // Check if recovery already in progress
+      if (recoveryManager.isRecovering) {
+        console.log(
+          `⏳ [${jobId}] Waiting for ongoing master session recovery...`
+        );
+      } else {
+        console.log(`🔄 [${jobId}] Triggering master session recovery...`);
+      }
+
+      const masterRecovered = await reLoginIfNeeded();
+
+      if (masterRecovered) {
+        console.log(`✅ [${jobId}] Master session recovered!`);
+        console.error(`❌ [${jobId}] Current cloned session is STALE\n`);
+      }
+
+      return false;
+    }
+
+    // Uncertain state - wait and recheck
+    console.log(
+      `⏳ [${jobId}] Uncertain state, waiting 3s for page to load...`
+    );
+    await driver.sleep(3000);
+
+    const finalCheck = await driver.findElements(By.id("divMainMotors"));
+    if (finalCheck.length > 0) {
+      console.log(
+        `✅ [${jobId}] Cloned session is ACTIVE - Dashboard found after wait\n`
+      );
+      return true;
+    }
+
+    console.error(
+      `\n⚠️  [${jobId}] CLONED SESSION likely EXPIRED - No dashboard elements\n`
+    );
+
+    // Trigger recovery as a precaution (will wait if already in progress)
+    if (!recoveryManager.isRecovering) {
+      console.log(
+        `🔄 [${jobId}] Triggering master session recovery as precaution...`
+      );
+    } else {
+      console.log(`⏳ [${jobId}] Waiting for ongoing recovery...`);
+    }
+
+    await reLoginIfNeeded();
+
+    return false;
+  } catch (error) {
+    console.error(
+      `❌ [${jobId}] Error checking cloned session:`,
+      error.message
+    );
+
+    // On error, trigger recovery as a precaution (will wait if already in progress)
+    try {
+      if (!recoveryManager.isRecovering) {
+        console.log(`🔄 [${jobId}] Triggering recovery due to check error...`);
+      } else {
+        console.log(`⏳ [${jobId}] Waiting for ongoing recovery...`);
+      }
+
+      await reLoginIfNeeded();
+    } catch (recoveryError) {
+      console.error(
+        `❌ [${jobId}] Recovery also failed:`,
+        recoveryError.message
+      );
+    }
+
+    return false;
+  }
+}
+
 async function fillRelianceForm(
   data = { username: "rfcpolicy", password: "Pass@123" }
 ) {
@@ -210,23 +477,26 @@ async function fillRelianceForm(
     await driver.get("https://smartzone.reliancegeneral.co.in/Login/IMDLogin");
     await driver.sleep(3000);
 
-    // === STEP 0: get captcha text ===
-    // await getCaptchaScreenShot(driver, "reliance_captcha");
-    // const filePath = path.join(__dirname, "reliance_captcha.png");
-    // const fileData = fs.readFileSync(filePath, "base64");
-    // const imageUrl = `data:image/jpeg;base64,${fileData}`;
-    // const captchaText = await extractCaptchaText(imageUrl);
-    // console.log("Captcha text:", captchaText);
-    // // === STEP 1: wait for manual login ===
-    // await driver.findElement(By.id("txtUserName")).sendKeys(data.username);
-    // await driver.findElement(By.id("txtPassword")).sendKeys(data.password);
-    // await driver.sleep(2000);
-    // await driver
-    //   .findElement(By.id("CaptchaInputText"))
-    //   .sendKeys(captchaText?.text?.replace(/\s+/g, ""));
-    // await driver.findElement(By.id("btnLogin")).click();
-    // console.log("Waiting 30s for manual login...");
-    // await driver.sleep(3000);
+    // === STEP 1: Check if cloned session is expired ===
+    // This detects if we cloned an expired session and attempts to login on cloned browser
+    const credentials = {
+      username: data.username || "rfcpolicy",
+      password: data.password || "Pass@123",
+    };
+
+    const sessionValid = await checkAndRecoverClonedSession(
+      driver,
+      jobId,
+      credentials
+    );
+
+    if (!sessionValid) {
+      // Session could not be established on cloned browser
+      // All login attempts failed, job will retry
+      throw new Error(
+        "Cloned session login failed after all attempts. Job will retry."
+      );
+    }
 
     // === STEP 1.1: Close popup modal if present ===
     try {
@@ -326,6 +596,31 @@ async function fillRelianceForm(
       await driver.sleep(2000);
     } catch (err) {
       console.log("No skip link detected, continuing...");
+    }
+
+    // ==  vertical code dropdown ===
+
+    try {
+      const dropdownInput = await driver.findElement(By.id("ddlobjBranchDetailAgentsHnin"));
+    
+      // Get current value
+      const currentValue = await dropdownInput.getAttribute("value");
+      console.log("Current value: ******* ******* ******* ******* ******* ******* ", currentValue);
+      if (!currentValue) {
+        await driver.executeScript(`
+          var dropdown = $("#ddlobjBranchDetailAgentsHnin").data("kendoDropDownList");
+          if (dropdown && dropdown.value() === "") {
+            dropdown.select(0); // Select first option
+            dropdown.trigger("change");
+          }
+        `);
+        console.log("✅ Selected first option in Kendo dropdown");
+      } else {
+        console.log("☑️ Dropdown already has a value");
+      }
+    
+    } catch (err) {
+      console.error("❌ Could not select Kendo dropdown option:", err.message);
     }
 
     // === STEP 6: Checkbox + iframe form ===
@@ -511,6 +806,30 @@ async function fillRelianceForm(
           await driver.executeScript("arguments[0].click();", validateButton);
         }
         console.log("Validate Customer button clicked!");
+
+        try {
+          const dialog = await driver.wait(
+            until.elementLocated(
+              By.css(
+                'div.ui-dialog[aria-describedby="divCustomerAlreadyExist"]'
+              )
+            ),
+            3000 // wait up to 3 seconds for the popup to appear
+          );
+
+          if (await dialog.isDisplayed()) {
+            console.log("⚠️ 'Customer Already Exists' dialog detected.");
+
+            // Click the "Cancel" button inside the dialog
+            const cancelButton = await dialog.findElement(
+              By.xpath(".//button/span[text()='Cancel']")
+            );
+            await cancelButton.click();
+            console.log("🚫 Pop-up closed by clicking 'Cancel'.");
+          }
+        } catch (e) {
+          console.log("No pop-up detected, continuing...");
+        }
 
         // Wait for validation to process
         await driver.sleep(3000);
@@ -726,7 +1045,7 @@ async function fillRelianceForm(
         await driver.sleep(500);
 
         // Type the search text and trigger events
-        await rtoCityInput.sendKeys(data.rtoCityLocation||"coimbatore");
+        await rtoCityInput.sendKeys(data.rtoCityLocation || "coimbatore");
         await driver.sleep(1000);
 
         // Trigger additional events to ensure autocomplete works
@@ -1023,7 +1342,10 @@ async function fillRelianceForm(
           try {
             await makePaymentButton.click();
           } catch {
-            await driver.executeScript("arguments[0].click();", makePaymentButton);
+            await driver.executeScript(
+              "arguments[0].click();",
+              makePaymentButton
+            );
           }
           console.log("Clicked Make Payment button!");
           await driver.sleep(3000);
@@ -1033,7 +1355,9 @@ async function fillRelianceForm(
           try {
             // Try to find checkbox with pattern chkR followed by numbers
             const policyCheckbox = await driver.wait(
-              until.elementLocated(By.css("input[id^='chkR'][type='checkbox']")),
+              until.elementLocated(
+                By.css("input[id^='chkR'][type='checkbox']")
+              ),
               10000
             );
             await driver.wait(until.elementIsVisible(policyCheckbox), 5000);
@@ -1048,11 +1372,28 @@ async function fillRelianceForm(
           console.log("Looking for TP Declaration checkbox...");
           try {
             const tpDeclarationCheckbox = await driver.wait(
-              until.elementLocated(By.id("TPDeclaration1")),
+              until.elementLocated(By.id("TPDeclaration")),
               10000
             );
-            await driver.wait(until.elementIsVisible(tpDeclarationCheckbox), 5000);
-            await driver.executeScript("arguments[0].click();", tpDeclarationCheckbox);
+            await driver.wait(
+              until.elementIsVisible(tpDeclarationCheckbox),
+              5000
+            );
+            // await driver.executeScript(
+            //   "arguments[0].click();",
+            //   tpDeclarationCheckbox
+            // );
+
+            const checkbox = await driver.findElement(By.id("TPDeclaration"));
+            const isChecked = await checkbox.isSelected();
+
+            if (!isChecked) {
+              await checkbox.click();
+              console.log("✅ TP Declaration checkbox checked");
+            } else {
+              console.log("☑️ Already checked");
+            }
+
             console.log("Checked TP Declaration checkbox!");
             await driver.sleep(1000);
           } catch (err) {
@@ -1085,10 +1426,15 @@ async function fillRelianceForm(
           console.log("Handling Payment Type dropdown...");
           try {
             const paymentTypeDropdown = await driver.wait(
-              until.elementLocated(By.css("span[aria-owns='ddlPaymentType_listbox']")),
+              until.elementLocated(
+                By.css("span[aria-owns='ddlPaymentType_listbox']")
+              ),
               10000
             );
-            await driver.executeScript("arguments[0].click();", paymentTypeDropdown);
+            await driver.executeScript(
+              "arguments[0].click();",
+              paymentTypeDropdown
+            );
             await driver.sleep(1000);
 
             // Select "Send Payment Link" option
@@ -1098,7 +1444,10 @@ async function fillRelianceForm(
               ),
               5000
             );
-            await driver.executeScript("arguments[0].click();", sendPaymentLinkOption);
+            await driver.executeScript(
+              "arguments[0].click();",
+              sendPaymentLinkOption
+            );
             console.log("Selected 'Send Payment Link' from dropdown!");
             await driver.sleep(2000);
           } catch (err) {
@@ -1109,7 +1458,9 @@ async function fillRelianceForm(
           console.log("Looking for Add button...");
           try {
             const addButton = await driver.wait(
-              until.elementLocated(By.css("input[onclick*='AddRowToPaymentDetailsGrid']")),
+              until.elementLocated(
+                By.css("input[onclick*='AddRowToPaymentDetailsGrid']")
+              ),
               10000
             );
             await driver.wait(until.elementIsVisible(addButton), 5000);
@@ -1146,17 +1497,27 @@ async function fillRelianceForm(
           // Click Yes button
           console.log("Looking for Yes button...");
           try {
-            const yesButton = await driver.wait(
-              until.elementLocated(By.css("input[onclick*='SendMail'][value='Yes']")),
-              10000
+            // const yesButton = await driver.wait(
+            //   until.elementLocated(
+            //     By.css("input[onclick*='SendMail'][value='Yes']")
+            //   ),
+            //   10000
+            // );
+            // await driver.wait(until.elementIsVisible(yesButton), 5000);
+            // await driver.wait(until.elementIsEnabled(yesButton), 5000);
+            // await driver.executeScript(
+            //   "arguments[0].scrollIntoView({block: 'center'});",
+            //   yesButton
+            // );
+            // await driver.sleep(500);
+
+            const okButton = await driver.findElement(
+              By.css(
+                ".ui-dialog-buttonpane .ui-dialog-buttonset button:first-child"
+              )
             );
-            await driver.wait(until.elementIsVisible(yesButton), 5000);
-            await driver.wait(until.elementIsEnabled(yesButton), 5000);
-            await driver.executeScript(
-              "arguments[0].scrollIntoView({block: 'center'});",
-              yesButton
-            );
-            await driver.sleep(500);
+            await okButton.click();
+            console.log("✅ Clicked OK button");
 
             try {
               await yesButton.click();
@@ -1192,7 +1553,10 @@ async function fillRelianceForm(
               `📸 Post-calculation error screenshot uploaded to S3: ${screenshotUrl}`
             );
           } catch (e) {
-            console.log("Could not capture post-calculation screenshot:", e.message);
+            console.log(
+              "Could not capture post-calculation screenshot:",
+              e.message
+            );
           }
         }
 
@@ -1379,15 +1743,16 @@ async function fillRelianceForm(
       screenshotUrl: screenshotUrl,
       screenshotKey: screenshotKey,
       timestamp: new Date(),
+      stage: "login-form", // Indicate this is a login form error
+      postSubmissionFailed: false,
     };
+  } finally {
+    // Cleanup: Close browser and delete cloned profile
+    if (jobBrowser) {
+      // await jobBrowser.driver.sleep(10000); // sleep for 1 minute
+      await cleanupJobBrowser(jobBrowser);
+    }
   }
-  //  finally {
-  //   // Cleanup: Close browser and delete cloned profile
-  //   if (jobBrowser) {
-
-  //     await cleanupJobBrowser(jobBrowser);
-  //   }
-  // }
 }
 
 async function getCaptchaScreenShot(driver, filename = "image_screenshot") {
