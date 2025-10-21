@@ -215,7 +215,9 @@ const runRelianceJob = async (job) => {
 
       // Determine failure type based on result
       const isPostSubmissionFailure =
-        result?.postSubmissionFailed || result?.stage === "post-submission";
+        result?.postSubmissionFailed ||
+        result?.stage === "post-submission" ||
+        result?.stage === "post-calculation";
       const failureType = isPostSubmissionFailure
         ? "PostSubmissionError"
         : "LoginFormError";
@@ -433,7 +435,7 @@ db.once("open", async () => {
   changeStream.on("change", async (change) => {
     // console.log(change);
     let data = change?.fullDocument;
-
+    console.log("data: ******* ******* ******* ******* ******* ******* ", data);
     // Get the Captcha document _id for reference
     const captchaId = data?._id;
 
@@ -448,7 +450,7 @@ db.once("open", async () => {
         ? moment(data?.dateOfBirth).format("DD-MM-YYYY")
         : "",
       fatherTitle: data?.fatherTitle,
-      fatherFirstName: data?.fatherName,
+      fatherFirstName: data?.lastName,
       flatNo: data?.flatDoorNo,
       floorNo: data?.flatDoorNo,
       premisesName: data?.buildingName,
@@ -461,7 +463,10 @@ db.once("open", async () => {
       aadhar: data?.aadhar,
       rtoCityLocation: data?.rtoCityLocation,
     };
-    console.log("formData: ******* ******* ******* ******* ******* ******* ", formData);
+    console.log(
+      "formData: ******* ******* ******* ******* ******* ******* ",
+      formData
+    );
     console.log(
       `[MongoDB Watch] New customer data received: ${formData.firstName} (Captcha ID: ${captchaId})`
     );

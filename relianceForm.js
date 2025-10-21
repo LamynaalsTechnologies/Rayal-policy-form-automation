@@ -194,6 +194,100 @@ async function deleteDirectoryRecursive(dirPath) {
 }
 
 /**
+ * Centralized error screenshot handler
+ * Captures screenshot and uploads to S3 for any error
+ * @param {WebDriver} driver - Selenium WebDriver instance
+ * @param {Error} error - The error object
+ * @param {Object} data - Job data containing identifiers
+ * @param {string} errorStage - Stage where error occurred (e.g., "modal-filling", "vehicle-details")
+ * @returns {Promise<Object>} - Returns error details with screenshot URL
+ */
+async function captureErrorScreenshot(
+  driver,
+  error,
+  data,
+  errorStage = "unknown"
+) {
+  let screenshotUrl = null;
+  let screenshotKey = null;
+  let pageSourceUrl = null;
+  let pageSourceKey = null;
+
+  try {
+    if (!driver) {
+      console.log("⚠️  No driver available for screenshot");
+      return { screenshotUrl, screenshotKey, pageSourceUrl, pageSourceKey };
+    }
+
+    const screenshot = await driver.takeScreenshot();
+    const jobIdentifier = data._jobIdentifier || `job_${Date.now()}`;
+    const attemptNumber = data._attemptNumber || 1;
+
+    // Generate S3 key and upload screenshot
+    screenshotKey = generateScreenshotKey(
+      jobIdentifier,
+      attemptNumber,
+      errorStage
+    );
+    screenshotUrl = await uploadScreenshotToS3(screenshot, screenshotKey);
+
+    console.log(`📸 Error screenshot uploaded to S3: ${screenshotUrl}`);
+
+    // Also capture page source for debugging (optional)
+    try {
+      const pageSource = await driver.getPageSource();
+      pageSourceKey = screenshotKey.replace(".png", ".html");
+      const tempHtmlPath = path.join(
+        __dirname,
+        `temp-page-source-${Date.now()}.html`
+      );
+      fs.writeFileSync(tempHtmlPath, pageSource);
+
+      const { uploadToS3 } = require("./s3Uploader");
+      pageSourceUrl = await uploadToS3(tempHtmlPath, pageSourceKey);
+
+      fs.unlinkSync(tempHtmlPath); // Delete temp file
+      console.log(`📄 Page source uploaded to S3: ${pageSourceUrl}`);
+    } catch (sourceErr) {
+      console.log("⚠️  Could not capture page source:", sourceErr.message);
+    }
+
+    // Log to MongoDB if available
+    if (data._jobId && data._jobQueueCollection) {
+      const errorLog = {
+        timestamp: new Date(),
+        attemptNumber: attemptNumber,
+        errorMessage: error.message || String(error),
+        errorType: error.name || "UnknownError",
+        errorStack: error.stack || null,
+        screenshotUrl: screenshotUrl,
+        screenshotKey: screenshotKey,
+        pageSourceUrl: pageSourceUrl,
+        pageSourceKey: pageSourceKey,
+        stage: errorStage,
+      };
+
+      await data._jobQueueCollection.updateOne(
+        { _id: data._jobId },
+        {
+          $push: { errorLogs: errorLog },
+          $set: { [`last_${errorStage}_error`]: errorLog },
+        }
+      );
+
+      console.log(`✅ Error logged to job queue (stage: ${errorStage})`);
+    }
+  } catch (captureErr) {
+    console.error(
+      `❌ Failed to capture/upload error screenshot:`,
+      captureErr.message
+    );
+  }
+
+  return { screenshotUrl, screenshotKey, pageSourceUrl, pageSourceKey };
+}
+
+/**
  * Login on cloned browser when session is expired
  * @param {WebDriver} driver - Selenium WebDriver instance
  * @param {string} jobId - Job identifier for logging
@@ -463,6 +557,8 @@ async function fillRelianceForm(
   let driver = null;
   let postSubmissionFailed = false;
   let postSubmissionError = null;
+  let postCalculationFailed = false;
+  let postCalculationError = null;
 
   try {
     // === STEP 0: Create cloned browser (already logged in!) ===
@@ -601,24 +697,37 @@ async function fillRelianceForm(
     // ==  vertical code dropdown ===
 
     try {
-      const dropdownInput = await driver.findElement(By.id("ddlobjBranchDetailAgentsHnin"));
-    
-      // Get current value
-      const currentValue = await dropdownInput.getAttribute("value");
-      console.log("Current value: ******* ******* ******* ******* ******* ******* ", currentValue);
-      if (!currentValue) {
+      const dropdownInput = await driver.findElement(
+        By.id("ddlobjBranchDetailAgentsHnin")
+      );
+
+      // Wait until Kendo is initialized
+      await driver.wait(async () => {
+        return await driver.executeScript(`
+          return !!$("#ddlobjBranchDetailAgentsHnin").data("kendoDropDownList");
+        `);
+      }, 10000);
+
+      // Check current text/value
+      const currentValue = await driver.executeScript(`
+        var dropdown = $("#ddlobjBranchDetailAgentsHnin").data("kendoDropDownList");
+        return dropdown ? dropdown.text() : null;
+      `);
+
+      console.log("Current dropdown value:", currentValue);
+
+      if (!currentValue || currentValue.trim() === "Select") {
         await driver.executeScript(`
           var dropdown = $("#ddlobjBranchDetailAgentsHnin").data("kendoDropDownList");
-          if (dropdown && dropdown.value() === "") {
-            dropdown.select(0); // Select first option
+          if (dropdown) {
+            dropdown.select(1); // Select first valid option (index 1)
             dropdown.trigger("change");
           }
         `);
         console.log("✅ Selected first option in Kendo dropdown");
       } else {
-        console.log("☑️ Dropdown already has a value");
+        console.log("☑️ Dropdown already has a selected value:", currentValue);
       }
-    
     } catch (err) {
       console.error("❌ Could not select Kendo dropdown option:", err.message);
     }
@@ -752,24 +861,28 @@ async function fillRelianceForm(
       await driver.switchTo().defaultContent();
 
       // === STEP 8: Handle post-submission elements ===
+
       console.log("Looking for post-submission elements...");
 
       try {
-        // Wait for the Vertical Code dropdown
-        console.log("Waiting for Vertical Code dropdown...");
-        const verticalCodeDropdown = await driver.wait(
-          until.elementLocated(By.id("ddlobjBranchDetailAgentsHnin")),
-          15000
-        );
-        console.log("Vertical Code dropdown found!");
+        // // Wait for the Vertical Code dropdown
+        // console.log("Waiting for Vertical Code dropdown...");
+        // const verticalCodeDropdown = await driver.wait(
+        //   until.elementLocated(By.id("ddlobjBranchDetailAgentsHnin")),
+        //   15000
+        // );
+        // console.log("Vertical Code dropdown found!");
 
-        // Click on the dropdown to open it
-        await driver.executeScript(
-          "arguments[0].click();",
-          verticalCodeDropdown
-        );
-        await driver.sleep(2000);
-        console.log("Vertical Code dropdown clicked!");
+        const emailInput = await driver.findElement(By.id("txtEmailID"));
+        await emailInput.sendKeys(data?.email);
+
+        // // Click on the dropdown to open it
+        // await driver.executeScript(
+        //   "arguments[0].click();",
+        //   verticalCodeDropdown
+        // );
+        // await driver.sleep(2000);
+        // console.log("Vertical Code dropdown clicked!");
 
         // Select "GIRNAR FINSERV PRIVATE LIMITED_518898" option
         // console.log("Selecting GIRNAR FINSERV PRIVATE LIMITED_518898...");
@@ -1510,7 +1623,10 @@ async function fillRelianceForm(
             //   yesButton
             // );
             // await driver.sleep(500);
-
+            // console.log("Filling email...");
+            // const emailInput = await driver.findElement(By.id("txtEmailID"));
+            // await emailInput.sendKeys(data?.email);
+            // await driver.sleep(1000);
             const okButton = await driver.findElement(
               By.css(
                 ".ui-dialog-buttonpane .ui-dialog-buttonset button:first-child"
@@ -1530,34 +1646,46 @@ async function fillRelianceForm(
             console.log("Could not find Yes button:", err.message);
           }
 
+          // try {
+          //   // Wait for the popup container to be visible
+          //   const popup = await driver.wait(
+          //     until.elementLocated(By.css(".k-window")),
+          //     10000
+          //   );
+
+          //   // Wait until it’s displayed
+          //   await driver.wait(async () => {
+          //     return await popup.isDisplayed();
+          //   }, 5000);
+
+          //   // Find the "Yes" button inside the popup
+          //   const yesButton = await popup.findElement(
+          //     By.css('input[value="Yes"]')
+          //   );
+
+          //   // Click it
+          //   await yesButton.click();
+
+          //   console.log("✅ Clicked 'Yes' on Contact Details popup");
+          // } catch (err) {
+          //   console.error("❌ Failed to click 'Yes':", err.message);
+          // }
+
           console.log("All post-calculation elements handled successfully!");
         } catch (err) {
           console.log("Error handling post-calculation elements:", err.message);
-          // Take screenshot for debugging
-          try {
-            const screenshot = await driver.takeScreenshot();
-            const jobIdentifier = data._jobIdentifier || `job_${Date.now()}`;
-            const attemptNumber = data._attemptNumber || 1;
 
-            const screenshotKey = generateScreenshotKey(
-              jobIdentifier,
-              attemptNumber,
-              "post-calculation-error"
-            );
-            const screenshotUrl = await uploadScreenshotToS3(
-              screenshot,
-              screenshotKey
-            );
+          // Mark post-calculation as failed
+          postCalculationFailed = true;
+          postCalculationError = err.message;
 
-            console.log(
-              `📸 Post-calculation error screenshot uploaded to S3: ${screenshotUrl}`
-            );
-          } catch (e) {
-            console.log(
-              "Could not capture post-calculation screenshot:",
-              e.message
-            );
-          }
+          // Capture error screenshot using centralized handler
+          await captureErrorScreenshot(
+            driver,
+            err,
+            data,
+            "post-calculation-error"
+          );
         }
 
         console.log("All vehicle details filled successfully!");
@@ -1568,132 +1696,34 @@ async function fillRelianceForm(
         postSubmissionFailed = true;
         postSubmissionError = err.message;
 
-        // Take screenshot and upload to S3
-        try {
-          const screenshot = await driver.takeScreenshot();
-          const jobIdentifier = data._jobIdentifier || `job_${Date.now()}`;
-          const attemptNumber = data._attemptNumber || 1;
+        // Capture error screenshot using centralized handler
+        await captureErrorScreenshot(
+          driver,
+          err,
+          data,
+          "post-submission-error"
+        );
 
-          // Upload to S3
-          const screenshotKey = generateScreenshotKey(
-            jobIdentifier,
-            attemptNumber,
-            "post-submission-error"
-          );
-          const screenshotUrl = await uploadScreenshotToS3(
-            screenshot,
-            screenshotKey
-          );
-
-          console.log(
-            `📸 Post-submission error screenshot uploaded to S3: ${screenshotUrl}`
-          );
-
-          // Store in MongoDB for this specific error
-          if (data._jobId && data._jobQueueCollection) {
-            const postSubmissionErrorLog = {
-              timestamp: new Date(),
-              attemptNumber: attemptNumber,
-              errorMessage: err.message,
-              errorType: "PostSubmissionError",
-              errorStack: err.stack || null,
-              screenshotUrl: screenshotUrl,
-              screenshotKey: screenshotKey,
-              stage: "post-submission",
-            };
-
-            await data._jobQueueCollection.updateOne(
-              { _id: data._jobId },
-              {
-                $push: { errorLogs: postSubmissionErrorLog },
-                $set: { lastPostSubmissionError: postSubmissionErrorLog },
-              }
-            );
-
-            console.log(`✅ Post-submission error logged to job queue`);
-          }
-        } catch (e) {
-          console.log(
-            "Could not capture/upload post-submission screenshot:",
-            e.message
-          );
-        }
         // Don't throw error here, just set flag to mark job as failed
       }
     } catch (err) {
       console.log("Error filling modal fields:", err.message);
-      // Take screenshot and upload to S3
-      try {
-        const screenshot = await driver.takeScreenshot();
-        const jobIdentifier = data._jobIdentifier || `job_${Date.now()}`;
-        const attemptNumber = data._attemptNumber || 1;
-
-        // Upload screenshot to S3
-        const screenshotKey = generateScreenshotKey(
-          jobIdentifier,
-          attemptNumber,
-          "modal-error"
-        );
-        const screenshotUrl = await uploadScreenshotToS3(
-          screenshot,
-          screenshotKey
-        );
-
-        console.log(
-          `📸 Modal error screenshot uploaded to S3: ${screenshotUrl}`
-        );
-
-        // Also save and upload page source for debugging
-        try {
-          const pageSource = await driver.getPageSource();
-          const pageSourceKey = screenshotKey.replace(".png", ".html");
-          const tempHtmlPath = path.join(
-            __dirname,
-            `temp-page-source-${Date.now()}.html`
-          );
-          fs.writeFileSync(tempHtmlPath, pageSource);
-
-          const { uploadToS3 } = require("./s3Uploader");
-          const pageSourceUrl = await uploadToS3(tempHtmlPath, pageSourceKey);
-
-          fs.unlinkSync(tempHtmlPath); // Delete temp file
-          console.log(`📄 Page source uploaded to S3: ${pageSourceUrl}`);
-
-          // Store in MongoDB
-          if (data._jobId && data._jobQueueCollection) {
-            const modalError = {
-              timestamp: new Date(),
-              attemptNumber: attemptNumber,
-              errorMessage: err.message,
-              errorType: "ModalError",
-              errorStack: err.stack || null,
-              screenshotUrl: screenshotUrl,
-              screenshotKey: screenshotKey,
-              pageSourceUrl: pageSourceUrl,
-              pageSourceKey: pageSourceKey,
-              stage: "modal-filling",
-            };
-
-            await data._jobQueueCollection.updateOne(
-              { _id: data._jobId },
-              {
-                $push: { errorLogs: modalError },
-                $set: { lastModalError: modalError },
-              }
-            );
-
-            console.log(`✅ Modal error logged to job queue`);
-          }
-        } catch (sourceErr) {
-          console.log("Could not save/upload page source:", sourceErr.message);
-        }
-      } catch (e) {
-        console.log("Could not take screenshot or upload to S3:", e.message);
-      }
+      // Capture error screenshot using centralized handler
+      await captureErrorScreenshot(driver, err, data, "modal-error");
       throw err;
     }
 
     await driver.sleep(2000);
+
+    // Return failure if post-calculation failed
+    if (postCalculationFailed) {
+      return {
+        success: false,
+        error: postCalculationError || "Post-calculation stage failed",
+        postSubmissionFailed: true, // Treat as post-submission failure
+        stage: "post-calculation",
+      };
+    }
 
     // Return failure if post-submission failed (even if modal submission succeeded)
     if (postSubmissionFailed) {
@@ -1709,47 +1739,31 @@ async function fillRelianceForm(
   } catch (e) {
     console.error("[relianceForm] Error:", e.message || e);
 
-    // Capture screenshot and upload to S3
-    let screenshotUrl = null;
-    let screenshotKey = null;
-
-    try {
-      if (driver) {
-        const screenshot = await driver.takeScreenshot();
-        const jobIdentifier = data._jobIdentifier || `job_${Date.now()}`;
-        const attemptNumber = data._attemptNumber || 1;
-
-        // Generate S3 key and upload
-        screenshotKey = generateScreenshotKey(
-          jobIdentifier,
-          attemptNumber,
-          "form-error"
-        );
-        screenshotUrl = await uploadScreenshotToS3(screenshot, screenshotKey);
-
-        console.log(`📸 Error screenshot uploaded to S3: ${screenshotUrl}`);
-      }
-    } catch (screenshotErr) {
-      console.error(
-        `⚠️  Failed to upload error screenshot:`,
-        screenshotErr.message
-      );
-    }
+    // Capture error screenshot using centralized handler
+    const errorDetails = await captureErrorScreenshot(
+      driver,
+      e,
+      data,
+      "form-error"
+    );
 
     return {
       success: false,
       error: String(e.message || e),
       errorStack: e.stack,
-      screenshotUrl: screenshotUrl,
-      screenshotKey: screenshotKey,
+      screenshotUrl: errorDetails.screenshotUrl,
+      screenshotKey: errorDetails.screenshotKey,
+      pageSourceUrl: errorDetails.pageSourceUrl,
+      pageSourceKey: errorDetails.pageSourceKey,
       timestamp: new Date(),
       stage: "login-form", // Indicate this is a login form error
       postSubmissionFailed: false,
     };
-  } finally {
+  }
+   finally {
     // Cleanup: Close browser and delete cloned profile
     if (jobBrowser) {
-      // await jobBrowser.driver.sleep(10000); // sleep for 1 minute
+      // await jobBrowser.driver.sleep(20000); // sleep for 1 minute
       await cleanupJobBrowser(jobBrowser);
     }
   }
@@ -1763,7 +1777,7 @@ async function getCaptchaScreenShot(driver, filename = "image_screenshot") {
   fs.writeFileSync(`${filename}.png`, imageBase64, "base64");
   console.log(`Screenshot saved as ${filename}.png`);
 }
-
+//txtEmailID
 // Test data
 const testData = {
   proposerTitle: "Mr.",
