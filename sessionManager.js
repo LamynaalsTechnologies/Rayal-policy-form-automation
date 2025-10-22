@@ -28,12 +28,41 @@ const fs = require("fs");
 const path = require("path");
 
 // ============================================
+// OPTIMIZATIONS
+// ============================================
+
+const ProfilePoolManager = require("./profilePoolManager");
+const SessionHealthManager = require("./sessionHealthManager");
+const {
+  getMinimalChromeOptions,
+  isRamDiskAvailable,
+  getRamDiskPath,
+} = require("./chromeOptimizedConfig");
+
+// Initialize optimization managers
+const useRamDisk = isRamDiskAvailable();
+const profilePoolManager = new ProfilePoolManager({
+  poolSize: 5, // 5 ready profiles
+  useRamDisk: useRamDisk,
+  maxProfileUses: 10, // Recycle after 10 uses
+  maxProfileLifetime: 30 * 60 * 1000, // 30 minutes
+});
+
+const sessionHealthManager = new SessionHealthManager({
+  sessionLifetime: 60 * 60 * 1000, // 1 hour
+  heartbeatInterval: 5 * 60 * 1000, // 5 minutes
+  warningThreshold: 0.8, // Warn at 80%
+  refreshThreshold: 0.9, // Refresh at 90%
+});
+
+// ============================================
 // STATE MANAGEMENT
 // ============================================
 
 let masterDriver = null;
 let isSessionActive = false;
 let sessionLastChecked = null;
+let optimizationsEnabled = false;
 
 /**
  * Get session status
@@ -504,7 +533,7 @@ async function initializeMasterSession() {
     console.log("  🔐 INITIALIZING MASTER SESSION");
     console.log("=".repeat(60) + "\n");
 
-    // Step 1: Create master browser
+    // Step 1: Create master browser (this creates the base profile directory)
     console.log("📂 Creating master browser with profile...");
     masterDriver = await createMasterBrowser();
     console.log("✅ Master browser created\n");
@@ -537,6 +566,34 @@ async function initializeMasterSession() {
         throw new Error("Login failed. Cannot proceed with job processing.");
       }
     }
+
+    // Step 5: Initialize optimizations AFTER master profile exists
+    if (!optimizationsEnabled) {
+      console.log("🚀 Initializing performance optimizations...");
+      try {
+        await profilePoolManager.initialize();
+        console.log("✅ Profile pool ready\n");
+        optimizationsEnabled = true;
+      } catch (poolError) {
+        console.warn(
+          "⚠️  Profile pool initialization failed:",
+          poolError.message
+        );
+        console.warn(
+          "⚠️  Continuing without optimizations (will use standard cloning)\n"
+        );
+        optimizationsEnabled = false;
+      }
+    }
+
+    // Step 6: Register session with health manager
+    console.log("💓 Registering session with health monitor...");
+    sessionHealthManager.registerSession(
+      "master_session",
+      masterDriver,
+      CONFIG.CREDENTIALS
+    );
+    console.log("✅ Session health monitoring active\n");
 
     console.log("=".repeat(60));
     console.log("  ✅ MASTER SESSION READY");
@@ -679,29 +736,62 @@ async function createJobBrowser(jobId) {
       );
     }
 
-    // Step 2: Clone the master profile
-    console.log(`📂 [Job ${jobId}] Cloning master profile...`);
-    const clonedProfileInfo = cloneChromeProfile(`job_${jobId}`);
+    // Step 2: Acquire profile from pool (OPTIMIZED!)
+    let profile = null;
+    let clonedDriver = null;
 
-    if (!clonedProfileInfo) {
-      throw new Error("Failed to clone profile");
+    if (optimizationsEnabled) {
+      console.log(`⚡ [Job ${jobId}] Acquiring profile from pool...`);
+      profile = await profilePoolManager.acquireProfile(jobId);
+      console.log(
+        `✅ [Job ${jobId}] Profile acquired instantly: ${profile.id}`
+      );
+
+      // Step 3: Create browser with pooled profile
+      console.log(`🌐 [Job ${jobId}] Opening browser with pooled profile...`);
+      clonedDriver = await createClonedBrowser({
+        fullPath: profile.path,
+        userDataDir: profile.path,
+        profileName: profile.id,
+      });
+
+      return {
+        driver: clonedDriver,
+        profile: profile,
+        profileInfo: {
+          fullPath: profile.path,
+          userDataDir: profile.path,
+          profileName: profile.id,
+        },
+        jobId: jobId,
+        usingPool: true,
+      };
+    } else {
+      // Fallback to old method (if optimizations not enabled)
+      console.log(`📂 [Job ${jobId}] Cloning master profile...`);
+      const clonedProfileInfo = cloneChromeProfile(`job_${jobId}`);
+
+      if (!clonedProfileInfo) {
+        throw new Error("Failed to clone profile");
+      }
+
+      console.log(
+        `✅ [Job ${jobId}] Profile cloned: ${clonedProfileInfo.fullPath}`
+      );
+
+      // Step 3: Create browser with cloned profile
+      console.log(`🌐 [Job ${jobId}] Opening browser with cloned profile...`);
+      clonedDriver = await createClonedBrowser(clonedProfileInfo);
+
+      console.log(`✅ [Job ${jobId}] Cloned browser created successfully\n`);
+
+      return {
+        driver: clonedDriver,
+        profileInfo: clonedProfileInfo,
+        jobId: jobId,
+        usingPool: false,
+      };
     }
-
-    console.log(
-      `✅ [Job ${jobId}] Profile cloned: ${clonedProfileInfo.fullPath}`
-    );
-
-    // Step 3: Create browser with cloned profile
-    console.log(`🌐 [Job ${jobId}] Opening browser with cloned profile...`);
-    const clonedDriver = await createClonedBrowser(clonedProfileInfo);
-
-    console.log(`✅ [Job ${jobId}] Cloned browser created successfully\n`);
-
-    return {
-      driver: clonedDriver,
-      profileInfo: clonedProfileInfo,
-      jobId: jobId,
-    };
   } catch (error) {
     console.error(
       `❌ [Job ${jobId}] Failed to create job browser:`,
@@ -725,12 +815,24 @@ async function cleanupJobBrowser(jobBrowserInfo) {
       console.log(`✅ [Job ${jobId}] Browser closed`);
     }
 
-    // Delete cloned profile
-    if (jobBrowserInfo.profileInfo && jobBrowserInfo.profileInfo.userDataDir) {
-      const profilePath = jobBrowserInfo.profileInfo.userDataDir;
-      if (fs.existsSync(profilePath)) {
-        deleteDirectoryRecursive(profilePath);
-        console.log(`✅ [Job ${jobId}] Cloned profile deleted: ${profilePath}`);
+    // Handle profile cleanup based on method used
+    if (jobBrowserInfo.usingPool && optimizationsEnabled) {
+      // Release profile back to pool (OPTIMIZED!)
+      console.log(`♻️  [Job ${jobId}] Releasing profile back to pool...`);
+      await profilePoolManager.releaseProfile(jobId);
+    } else {
+      // Delete cloned profile (old method)
+      if (
+        jobBrowserInfo.profileInfo &&
+        jobBrowserInfo.profileInfo.userDataDir
+      ) {
+        const profilePath = jobBrowserInfo.profileInfo.userDataDir;
+        if (fs.existsSync(profilePath)) {
+          deleteDirectoryRecursive(profilePath);
+          console.log(
+            `✅ [Job ${jobId}] Cloned profile deleted: ${profilePath}`
+          );
+        }
       }
     }
 
@@ -766,6 +868,18 @@ function deleteDirectoryRecursive(dirPath) {
 // EXPORTS
 // ============================================
 
+/**
+ * Get optimization statistics
+ */
+function getOptimizationStats() {
+  return {
+    optimizationsEnabled,
+    profilePool: profilePoolManager.getStats(),
+    sessionHealth: sessionHealthManager.getStats(),
+    ramDiskEnabled: useRamDisk,
+  };
+}
+
 module.exports = {
   // Initialization
   initializeMasterSession,
@@ -779,9 +893,20 @@ module.exports = {
   createJobBrowser,
   cleanupJobBrowser,
 
+  // Optimization stats
+  getOptimizationStats,
+
   // Recovery management
   get recoveryManager() {
     return recoveryManager;
+  },
+
+  // Optimization managers
+  get profilePoolManager() {
+    return profilePoolManager;
+  },
+  get sessionHealthManager() {
+    return sessionHealthManager;
   },
 
   // Direct access to state (read-only)
