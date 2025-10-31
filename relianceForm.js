@@ -765,7 +765,7 @@ async function fillRelianceForm(
 
       // Name fields
       await safeSendKeys(driver, By.id("FirstName"), data.firstName || "John");
-      await safeSendKeys(driver, By.id("MiddleName"), data.middleName || "M");
+      // await safeSendKeys(driver, By.id("MiddleName"), data.middleName || "M");
       await safeSendKeys(driver, By.id("LastName"), data.lastName || "Doe");
 
       // DOB - Special handling for date field
@@ -794,7 +794,7 @@ async function fillRelianceForm(
       await safeSendKeys(
         driver,
         By.name("FatherFirstName"),
-        data.fatherFirstName || "Robert"
+        data.fatherName || "Robert"
       );
 
       // Address fields
@@ -974,7 +974,10 @@ async function fillRelianceForm(
         await driver.sleep(500);
 
         // Type the search text and trigger events
-        await vehicleMakeInput.sendKeys("tvs scooty zest");
+        const vehicleSearchText =  data.vehicleModel 
+          ? `${data.vehicleMake} ${data.vehicleModel}`
+          : "tvs scooty zest";
+        await vehicleMakeInput.sendKeys(vehicleSearchText);
         await driver.sleep(1000);
 
         // Trigger additional events to ensure autocomplete works
@@ -1045,56 +1048,72 @@ async function fillRelianceForm(
           await driver.sleep(1000);
         }
 
-        // Purchase Date - fill with today's date
+        // Purchase Date - use data from MongoDB or today's date
         console.log("Filling purchase date...");
-        const today = new Date().toLocaleDateString("en-GB"); // DD/MM/YYYY format
+        const purchaseDate = data.purchaseDate || new Date().toLocaleDateString("en-GB").split("/").join("-"); // Convert DD/MM/YYYY to DD-MM-YYYY
         const purchaseDateInput = await driver.wait(
           until.elementLocated(By.id("Date_PurchaseVehicle")),
           10000
         );
         await driver.executeScript(
           `
-          arguments[0].value = '${today}';
+          arguments[0].value = '${purchaseDate}';
           var event = new Event('change', { bubbles: true });
           arguments[0].dispatchEvent(event);
         `,
           purchaseDateInput
         );
-        console.log("Filled purchase date with today's date");
+        console.log(`Filled purchase date with: ${purchaseDate}`);
 
-        // Registration Date - fill with today's date
+        // Registration Date - use data from MongoDB or today's date
         console.log("Filling registration date...");
+        const registrationDate = data.registrationDate || new Date().toLocaleDateString("en-GB").split("/").join("-"); // Convert DD/MM/YYYY to DD-MM-YYYY
         const registrationDateInput = await driver.wait(
           until.elementLocated(By.id("Date_RegistrationVehicle")),
           10000
         );
         await driver.executeScript(
           `
-          arguments[0].value = '${today}';
+          arguments[0].value = '${registrationDate}';
           var event = new Event('change', { bubbles: true });
           arguments[0].dispatchEvent(event);
         `,
           registrationDateInput
         );
-        console.log("Filled registration date with today's date");
+        console.log(`Filled registration date with: ${registrationDate}`);
 
-        // Manufacturing Year and Month - Try a simpler approach
+        // Manufacturing Year and Month - Use data from MongoDB
         console.log("Attempting manufacturing year and month selection...");
         try {
           // Try to set values directly using JavaScript
+          const manufacturingYear = data.manufacturingYear || 2025;
+          const manufacturingMonth = data.manufacturingMonth || "10";
+          
           await driver.executeScript(`
             // Try to set manufacturing year
             var yearDropdown = document.getElementById('Manufacturing_YearVehicle');
             if (yearDropdown) {
               var kendoYearWidget = $(yearDropdown).data('kendoDropDownList');
               if (kendoYearWidget) {
-                // Try to select the first available year
+                // Try to select the year from data, otherwise first available
                 var dataSource = kendoYearWidget.dataSource;
                 if (dataSource && dataSource.data().length > 0) {
-                  var firstYear = dataSource.data()[0];
-                  kendoYearWidget.value(firstYear.Value);
+                  var yearValue = '${manufacturingYear}';
+                  var foundYear = null;
+                  
+                  // Search for matching year
+                  for (var i = 0; i < dataSource.data().length; i++) {
+                    var yearData = dataSource.data()[i];
+                    if (yearData.Text === yearValue || yearData.Value === yearValue) {
+                      foundYear = yearData;
+                      break;
+                    }
+                  }
+                  
+                  var selectedYear = foundYear || dataSource.data()[0];
+                  kendoYearWidget.value(selectedYear.Value);
                   kendoYearWidget.trigger('change');
-                  console.log('Set manufacturing year to:', firstYear.Text);
+                  console.log('Set manufacturing year to:', selectedYear.Text);
                 }
               }
             }
@@ -1107,10 +1126,22 @@ async function fillRelianceForm(
                 if (kendoMonthWidget) {
                   var dataSource = kendoMonthWidget.dataSource;
                   if (dataSource && dataSource.data().length > 0) {
-                    var firstMonth = dataSource.data()[0];
-                    kendoMonthWidget.value(firstMonth.Value);
+                    var monthValue = '${manufacturingMonth}';
+                    var foundMonth = null;
+                    
+                    // Search for matching month
+                    for (var i = 0; i < dataSource.data().length; i++) {
+                      var monthData = dataSource.data()[i];
+                      if (monthData.Text === monthValue || monthData.Value === monthValue) {
+                        foundMonth = monthData;
+                        break;
+                      }
+                    }
+                    
+                    var selectedMonth = foundMonth || dataSource.data()[0];
+                    kendoMonthWidget.value(selectedMonth.Value);
                     kendoMonthWidget.trigger('change');
-                    console.log('Set manufacturing month to:', firstMonth.Text);
+                    console.log('Set manufacturing month to:', selectedMonth.Text);
                   }
                 }
               }
@@ -1119,7 +1150,7 @@ async function fillRelianceForm(
 
           await driver.sleep(3000); // Wait for the JavaScript to execute
           console.log(
-            "Attempted to set manufacturing year and month via JavaScript"
+            `Attempted to set manufacturing year to ${manufacturingYear} and month to ${manufacturingMonth} via JavaScript`
           );
         } catch (err) {
           console.log("Error setting manufacturing year/month:", err.message);
@@ -1243,42 +1274,91 @@ async function fillRelianceForm(
 
         // Engine Number
         console.log("Filling engine number...");
+        const engineNumber = data.engineNumber || "FG5HS2808584";
         const engineNumberInput = await driver.wait(
           until.elementLocated(By.id("EngineNumberVehicle")),
           10000
         );
         await driver.executeScript(
           `
-          arguments[0].value = 'FG5HS2808584';
+          arguments[0].value = '${engineNumber}';
           var event = new Event('input', { bubbles: true });
           arguments[0].dispatchEvent(event);
         `,
           engineNumberInput
         );
-        console.log("Filled engine number");
+        console.log(`Filled engine number with: ${engineNumber}`);
 
         // Chassis Number
         console.log("Filling chassis number...");
+        const chassisNumber = data.chassisNumber || "MD626DG56S2H08322";
         const chassisNumberInput = await driver.wait(
           until.elementLocated(By.id("ChasisNumberVehicle")),
           10000
         );
         await driver.executeScript(
           `
-          arguments[0].value = 'MD626DG56S2H08322';
+          arguments[0].value = '${chassisNumber}';
           var event = new Event('input', { bubbles: true });
           arguments[0].dispatchEvent(event);
         `,
           chassisNumberInput
         );
-        console.log("Filled chassis number");
+        console.log(`Filled chassis number with: ${chassisNumber}`);
 
-        // Set IDV value
-        console.log("Setting IDV value...");
+        // Set IDV value (FIRST TIME) from formData.idv
+        console.log("Setting IDV value (initial) from formData...");
+        const idv = Number(String(data.idv || '').replace(/[^0-9]/g, '')) || 0;
+        if (idv > 0) {
         await driver.executeScript(`
-          document.getElementById('ActualIDVVehicle').value = '75000';
-        `);
-        console.log("Set IDV value to 75000");
+            try {
+              var desired = ${idv};
+              // Prefer total #IDVVehicle; fallback to #ActualIDVVehicle
+              var totalEl = document.getElementById('IDVVehicle') || document.getElementById('ActualIDVVehicle');
+              if (totalEl) {
+                totalEl.removeAttribute('readonly');
+                totalEl.removeAttribute('disabled');
+                try { totalEl.focus(); } catch(e) {}
+                totalEl.value = '';
+                totalEl.value = String(desired);
+                try { totalEl.dispatchEvent(new Event('input', { bubbles: true })); } catch(e) {}
+                try { totalEl.dispatchEvent(new Event('keyup', { bubbles: true })); } catch(e) {}
+                try { totalEl.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {}
+                try { totalEl.blur && totalEl.blur(); } catch(e) {}
+              }
+              // Also set Body/Chassis if present to align with validations
+              var bodyEl = document.getElementById('txtBodyIDV');
+              var chassisEl = document.getElementById('txtChassisIDV');
+              if (bodyEl && chassisEl) {
+                var minBody = 5000, minChassis = 3000;
+                var chassis = Math.max(minChassis, Math.floor(desired * 0.05));
+                var body = Math.max(minBody, desired - chassis);
+                // Adjust in case body + chassis exceeded desired due to mins
+                if (body + chassis !== desired && desired > (minBody + minChassis)) {
+                  chassis = desired - body;
+                }
+                bodyEl.removeAttribute('readonly');
+                chassisEl.removeAttribute('readonly');
+                bodyEl.value = '';
+                chassisEl.value = '';
+                bodyEl.value = String(body);
+                chassisEl.value = String(chassis);
+                try { bodyEl.dispatchEvent(new Event('input', { bubbles: true })); } catch(e) {}
+                try { chassisEl.dispatchEvent(new Event('input', { bubbles: true })); } catch(e) {}
+                try { bodyEl.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {}
+                try { chassisEl.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {}
+              }
+            } catch(e) {}
+          `);
+          // Verify IDV was set correctly
+          const idvCheck = await driver.executeScript(`
+            var el = document.getElementById('IDVVehicle') || document.getElementById('ActualIDVVehicle');
+            return el ? el.value : null;
+          `);
+          console.log(`IDV (initial) verification - Expected: ${idv}, Actual: ${idvCheck}`);
+        } else {
+          console.log('IDV not provided in formData; skipping initial set');
+        }
 
         // Click "Get Coverage Details" button
         console.log("Clicking 'Get Coverage Details' button...");
@@ -1308,7 +1388,6 @@ async function fillRelianceForm(
             getCoverageButton
           );
         }
-
         // Also try triggering the onclick event directly
         await driver.executeScript(`
           var button = document.getElementById('btnFetchIDV');
@@ -1371,16 +1450,380 @@ async function fillRelianceForm(
         console.log("Unchecked Helmet Cover checkbox");
         await driver.sleep(1000);
 
-        // Check "Is Registration Address Same" checkbox
+        // Set TPPD Limit if restriction enabled (select 6000)
+        try {
+          if (data.tppdRestrict === true || data.tppdRestrict === "true") {
+            console.log("TPPD restrict enabled. Selecting 6000 in TPPD dropdown...");
+
+            // First, try using Kendo DropDownList API directly
+            const kendoResult = await driver.executeScript(`
+              try {
+                var widget = $("#ddlTPPDLimit").data("kendoDropDownList");
+                if (widget && widget.dataSource && widget.dataSource.data().length) {
+                  var ds = widget.dataSource.data();
+                  var target = null;
+                  for (var i = 0; i < ds.length; i++) {
+                    var item = ds[i];
+                    var text = String(item.Text || item.text || "").replace(/,/g,"").trim();
+                    var value = String(item.Value || item.value || "").replace(/,/g,"").trim();
+                    if (text === "6000" || value === "6000" || text.indexOf("6000") !== -1) {
+                      target = item;
+                      break;
+                    }
+                  }
+                  if (target) {
+                    widget.value(target.Value || target.value);
+                    widget.trigger("change");
+                    return { ok: true, method: "kendo", text: target.Text || target.text, value: target.Value || target.value };
+                  }
+                  // fallback: select second option (index 1)
+                  if (ds.length > 1) {
+                    widget.select(1);
+                    widget.trigger("change");
+                    var sel = widget.dataItem(widget.select());
+                    return { ok: true, method: "kendo_index", text: sel && (sel.Text || sel.text), value: sel && (sel.Value || sel.value) };
+                  }
+                }
+                return { ok: false, method: "kendo", reason: "widget or item not found" };
+              } catch (e) {
+                return { ok: false, method: "kendo", error: e && e.message };
+              }
+            `);
+
+            if (!kendoResult || !kendoResult.ok) {
+              console.log("Kendo API select failed or not available, falling back to UI click...", kendoResult);
+
+              const tppdDropdown = await driver.wait(
+                until.elementLocated(
+                  By.css("span[aria-owns='ddlTPPDLimit_listbox']")
+                ),
+          10000
+        );
+        await driver.executeScript(
+                "arguments[0].scrollIntoView({block: 'center'});",
+                tppdDropdown
+              );
+              await driver.sleep(500);
+              await driver.executeScript("arguments[0].click();", tppdDropdown);
+              await driver.sleep(1000);
+
+              // Try clicking the second item in the listbox first, then text fallbacks
+              let optionEl = null;
+              const xpaths = [
+                "//ul[@id='ddlTPPDLimit_listbox']/li[2]",
+                "//li[normalize-space(text())='6000']",
+                "//li[normalize-space(text())='6,000']",
+                "//li[contains(normalize-space(text()), '6000')]",
+              ];
+              for (const xp of xpaths) {
+                try {
+                  optionEl = await driver.wait(
+                    until.elementLocated(By.xpath(xp)),
+                    2000
+                  );
+                  break;
+                } catch {}
+              }
+
+              if (optionEl) {
+                await driver.executeScript("arguments[0].click();", optionEl);
+                console.log("Selected TPPD limit via UI (second item or 6000 match)");
+                await driver.sleep(500);
+              } else {
+                console.log("Could not locate 6000 option in TPPD dropdown list");
+              }
+            } else {
+              console.log("Selected TPPD limit: 6000 via Kendo API");
+            }
+          } else {
+            console.log("TPPD restrict not enabled. Leaving default TPPD limit.");
+          }
+        } catch (err) {
+          console.log("Could not set TPPD limit:", err.message);
+        }
+
+        // Ensure Zero Depreciation is checked when enabled in data
+        try {
+          if (data.zeroDepreciation === true || data.zeroDepreciation === "true") {
+            console.log("Zero Depreciation enabled. Ensuring checkbox is checked...");
+            const zeroDepCheckbox = await driver.wait(
+              until.elementLocated(By.id("ChkBox10")),
+              10000
+            );
+            const isChecked = await zeroDepCheckbox.isSelected();
+            if (!isChecked) {
+              await driver.executeScript("arguments[0].click();", zeroDepCheckbox);
+              console.log("Checked Zero Depreciation (Nil Depreciation) checkbox");
+            } else {
+              console.log("Zero Depreciation already checked");
+            }
+            await driver.sleep(500);
+          } else {
+            console.log("Zero Depreciation not requested. Leaving as-is.");
+          }
+        } catch (err) {
+          console.log("Could not toggle Zero Depreciation checkbox:", err.message);
+        }
+
+        // IDV was already set before "Get Coverage Details" - skipping duplicate set
+        console.log("Skipping duplicate IDV set (already set before Get Coverage Details)");
+
+        // === FINANCIER FIELDS HANDLING ===
+        // Fill financier details BEFORE "Is Registration Address Same" checkbox
+        console.log("Handling financier fields...");
+        
+        if (data.hasFinancier) {
+          console.log("Vehicle has financier, checking VehicleHypothicated checkbox...");
+          
+          try {
+            const vehicleHypothicatedCheckbox = await driver.wait(
+              until.elementLocated(By.id("VehicleHypothicated")),
+              10000
+            );
+            
+            // Check if already checked
+            const isAlreadyChecked = await vehicleHypothicatedCheckbox.isSelected();
+            if (!isAlreadyChecked) {
+              await driver.executeScript("arguments[0].click();", vehicleHypothicatedCheckbox);
+              console.log("Checked VehicleHypothicated checkbox");
+            } else {
+              console.log("VehicleHypothicated checkbox already checked");
+            }
+            
+            // Trigger the VehicleHypothicate() function to show financier fields
+            await driver.executeScript(`
+              if (typeof VehicleHypothicate === 'function') {
+                VehicleHypothicate();
+              }
+            `);
+            console.log("Triggered VehicleHypothicate() function");
+            await driver.sleep(2000);
+
+            // Force financier sections to be visible
+            await driver.executeScript(`
+              var finTypeDiv = document.getElementById('DivFinancierType');
+              var finNameDiv = document.getElementById('DivFinancierName');
+              var finAddressDiv = document.getElementById('DivFinancierAddress');
+              
+              if (finTypeDiv) {
+                finTypeDiv.style.display = 'block';
+                finTypeDiv.style.visibility = 'visible';
+              }
+              if (finNameDiv) {
+                finNameDiv.style.display = 'block';
+                finNameDiv.style.visibility = 'visible';
+              }
+              if (finAddressDiv) {
+                finAddressDiv.style.display = 'block';
+                finAddressDiv.style.visibility = 'visible';
+              }
+            `);
+            console.log("Forced financier sections to be visible");
+            await driver.sleep(1000);
+
+            // Select Financier Type (default to Hypothecated)
+            console.log(`Selecting financier type...`);
+            const finTypeResult = await driver.executeScript(`
+              try {
+                var map = {
+                  'HYPOTHECATED': 1, 'HYPOTHECATE': 1, 'HYPOTHECATION': 1,
+                  'HYPOTHECATED/HP/LEASE': 1, 'HIRE PURCHASE': 2,
+                  'LEASE AGREEMENT': 3, 'MORTGAGE': 5
+                };
+                var raw = '${(data.financierType || '').toString().trim().toUpperCase()}';
+                var input = raw.replace(/HYPOTE?I?CAL|HYPOTEICAL|HYPOTHETICAL/g, 'HYPOTHECATED');
+                var val = map[input] || 1;
+                var w = $("#FinancierType").data("kendoDropDownList");
+                if (w) {
+                  w.value(String(val));
+                  w.trigger('change');
+                  return { ok: true, value: val };
+                }
+                return { ok: false, reason: 'widget not found' };
+              } catch(e) { return { ok: false, error: e && e.message }; }
+            `);
+            console.log("Financier type select result:", finTypeResult);
+            await driver.sleep(600);
+
+            // Fill Financier Name - Enter text and select FIRST result
+            if (data.financierName) {
+              console.log(`Filling financier name: ${data.financierName}`);
+              
+              // Force field to be visible and enabled
+              await driver.executeScript(`
+                var input = document.getElementById('AutoFinancierName');
+                if (input) {
+                  input.style.display = 'block';
+                  input.style.visibility = 'visible';
+                  input.removeAttribute('disabled');
+                  input.removeAttribute('readonly');
+                  var parent = input.parentElement;
+                  while (parent && parent.tagName !== 'BODY') {
+                    if (parent.style) {
+                      parent.style.display = '';
+                      parent.style.visibility = 'visible';
+                    }
+                    parent = parent.parentElement;
+                  }
+                }
+              `);
+              
+              const financierNameInput = await driver.wait(
+                until.elementLocated(By.id("AutoFinancierName")),
+                10000
+              );
+              
+              await driver.executeScript(
+                "arguments[0].scrollIntoView({block: 'center'});",
+                financierNameInput
+              );
+              await driver.sleep(500);
+
+              // Clear and type the financier name
+              await driver.executeScript("arguments[0].value = '';", financierNameInput);
+              await driver.sleep(300);
+              await driver.executeScript("arguments[0].click();", financierNameInput);
+              await driver.sleep(300);
+              
+              await financierNameInput.sendKeys(data.financierName);
+              await driver.sleep(1500);
+
+              // Trigger autocomplete events
+              await driver.executeScript(`
+                var input = arguments[0];
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('keyup', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+              `, financierNameInput);
+              console.log(`Typed financier name: ${data.financierName}`);
+              
+              // Wait for autocomplete dropdown
+              await driver.sleep(3000);
+
+              // Select FIRST result from dropdown
+              let selected = false;
+              try {
+                const firstItem = await driver.wait(
+                  until.elementLocated(By.xpath("//ul[@id='AutoFinancierName_listbox']/li[1]")),
+                  5000
+                );
+                await driver.wait(until.elementIsVisible(firstItem), 3000);
+                await driver.executeScript("arguments[0].click();", firstItem);
+                console.log("✅ Selected FIRST financier name from dropdown");
+                selected = true;
+              } catch(e) {
+                console.log("Dropdown not visible, trying keyboard selection...");
+                try { 
+                  await financierNameInput.sendKeys(Key.ARROW_DOWN); 
+                  await driver.sleep(300); 
+                  await financierNameInput.sendKeys(Key.ENTER);
+                  console.log("✅ Selected FIRST financier via keyboard");
+                  selected = true;
+                } catch(e2) {
+                  console.log("Keyboard failed, trying Kendo API...");
+                  await driver.executeScript(`
+                    try {
+                      var widget = $("#AutoFinancierName").data("kendoAutoComplete");
+                      if (widget && widget.dataSource && widget.dataSource.data().length > 0) {
+                        var firstItem = widget.dataSource.data()[0];
+                        widget.value(firstItem.FinancierName || firstItem.text || firstItem);
+                        widget.trigger('change');
+                      }
+                    } catch(e) {}
+                  `);
+                  selected = true;
+                }
+              }
+
+              if (selected) {
+                await driver.sleep(1000);
+                await driver.executeScript(`
+                  if (typeof ValidateFinancierName === 'function') {
+                    try { ValidateFinancierName(); } catch(e) {}
+                  }
+                `);
+                console.log("Triggered ValidateFinancierName() function");
+                await driver.sleep(1000);
+              }
+            } else {
+              console.log("No financier name provided");
+            }
+
+            // Fill Financier Address
+            if (data.financierAddress) {
+              console.log(`Filling financier address: ${data.financierAddress}`);
+              await driver.sleep(1500);
+              
+              // Force address field to be visible and enabled
+              await driver.executeScript(`
+                var input = document.getElementById('FinancierAddressVehicle');
+                if (input) {
+                  input.style.display = 'block';
+                  input.style.visibility = 'visible';
+                  input.removeAttribute('disabled');
+                  input.removeAttribute('readonly');
+                  var parent = input.parentElement;
+                  while (parent && parent.tagName !== 'BODY') {
+                    if (parent.style) {
+                      parent.style.display = '';
+                      parent.style.visibility = 'visible';
+                    }
+                    parent = parent.parentElement;
+                  }
+                }
+              `);
+              
+              const financierAddressInput = await driver.wait(
+                until.elementLocated(By.id("FinancierAddressVehicle")),
+                10000
+              );
+              
+              await driver.executeScript(
+                "arguments[0].scrollIntoView({block: 'center'});",
+                financierAddressInput
+              );
+              await driver.sleep(500);
+
+              // Clear and fill using JavaScript
+              await driver.executeScript(`
+                var el = arguments[0];
+                el.removeAttribute('readonly');
+                el.removeAttribute('disabled');
+                el.value = '';
+              `, financierAddressInput);
+              
+              await driver.sleep(500);
+              await financierAddressInput.sendKeys(data.financierAddress);
+              console.log(`✅ Filled financier address: ${data.financierAddress}`);
+              await driver.sleep(800);
+              
+              // Trigger events
+              await driver.executeScript(`
+                var el = arguments[0];
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                if (el.blur) el.blur();
+              `, financierAddressInput);
+              await driver.sleep(500);
+            } else {
+              console.log("No financier address provided");
+            }
+            
+            console.log("✅ Financier details filled successfully");
+          } catch (err) {
+            console.log("❌ Error handling financier fields:", err.message);
+          }
+        } else {
+          console.log("Vehicle has no financier, skipping financier fields");
+        }
+
+        // Now check "Is Registration Address Same" checkbox
         console.log("Checking 'Is Registration Address Same' checkbox...");
         const regAddressSameCheckbox = await driver.wait(
           until.elementLocated(By.id("IsRegistrationAddresssame")),
           10000
         );
-        await driver.executeScript(
-          "arguments[0].click();",
-          regAddressSameCheckbox
-        );
+        await driver.executeScript("arguments[0].click();", regAddressSameCheckbox);
         console.log("Checked 'Is Registration Address Same' checkbox");
         await driver.sleep(2000);
 
@@ -1717,6 +2160,7 @@ async function fillRelianceForm(
 
     // Return failure if post-calculation failed
     if (postCalculationFailed) {
+      hadError = true;
       return {
         success: false,
         error: postCalculationError || "Post-calculation stage failed",
@@ -1727,6 +2171,7 @@ async function fillRelianceForm(
 
     // Return failure if post-submission failed (even if modal submission succeeded)
     if (postSubmissionFailed) {
+      hadError = true;
       return {
         success: false,
         error: postSubmissionError || "Post-submission stage failed",
@@ -1738,6 +2183,7 @@ async function fillRelianceForm(
     return { success: true };
   } catch (e) {
     console.error("[relianceForm] Error:", e.message || e);
+    hadError = true;
 
     // Capture error screenshot using centralized handler
     const errorDetails = await captureErrorScreenshot(
@@ -1761,9 +2207,8 @@ async function fillRelianceForm(
     };
   }
    finally {
-    // Cleanup: Close browser and delete cloned profile
+    // Cleanup: Always close browser and delete cloned profile
     if (jobBrowser) {
-      // await jobBrowser.driver.sleep(20000); // sleep for 1 minute
       await cleanupJobBrowser(jobBrowser);
     }
   }

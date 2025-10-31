@@ -440,28 +440,65 @@ db.once("open", async () => {
     const captchaId = data?._id;
 
     let formData = {
-      username: "2WDHAB",
-      password: "ao533f@c",
-      proposerTitle: data?.proposerTitle,
-      firstName: data?.firstName,
-      middleName: data?.middleName,
-      lastName: data?.lastName,
-      dob: data?.dateOfBirth
-        ? moment(data?.dateOfBirth).format("DD-MM-YYYY")
+      username: "rfcpolicy",
+      password: "Pass@123",
+      // Proposer details
+      proposerTitle: data?.proposerTitle || "Mr.",
+      firstName: data?.fullName || data?.firstName,
+      middleName: data?.middleName || "",
+      lastName: data?.surname || data?.lastName,
+      dob: data?.dateOfBirth?.$date
+        ? moment(data.dateOfBirth.$date).format("DD-MM-YYYY")
+        : data?.dateOfBirth
+        ? moment(data.dateOfBirth).format("DD-MM-YYYY")
         : "",
-      fatherTitle: data?.fatherTitle,
-      fatherFirstName: data?.lastName,
+      gender: data?.gender,
+      // Father details
+      fatherTitle: data?.fatherTitle || "Mr.",
+      fatherName: data?.fatherName,
+      // Address details
       flatNo: data?.flatDoorNo,
-      floorNo: data?.flatDoorNo,
+      floorNo: data?.floorNo,
       premisesName: data?.buildingName,
-      blockNo: data?.blockNo,
-      road: data?.road,
-      state: data?.state == "TAMILNADU" ? "30" : "26",
+      blockNo: data?.blockName || data?.blockNo,
+      road: data?.roadStreetLane || data?.road,
+      state: data?.state == "TAMILNADU" ? "30" : data?.state == "KARNATAKA" ? "26" : "30",
       pinCode: data?.pincode,
+      // Contact details
       mobile: data?.mobileNumber,
       email: data?.email,
       aadhar: data?.aadhar,
+      // Vehicle details
+      vehicleMake: data?.vehicleMake,
+      vehicleModel: data?.vehicleModel,
+      vehicleCC: data?.vehicleCC,
       rtoCityLocation: data?.rtoCityLocation,
+      idv: data?.idv,
+      manufacturingYear: data?.manufacturingYear,
+      manufacturingMonth: data?.manufacturingMonth,
+      engineNumber: data?.engineNumber,
+      chassisNumber: data?.chassisNumber,
+      purchaseDate: data?.purchaseDate?.$date 
+        ? moment(data.purchaseDate.$date).format("DD-MM-YYYY")
+        : data?.purchaseDate
+        ? moment(data.purchaseDate).format("DD-MM-YYYY")
+        : "",
+      registrationDate: data?.registrationDate?.$date
+        ? moment(data.registrationDate.$date).format("DD-MM-YYYY")
+        : data?.registrationDate
+        ? moment(data.registrationDate).format("DD-MM-YYYY")
+        : "",
+      // Coverage options
+      zeroDepreciation: data?.zeroDepreciation,
+      tppdRestrict: data?.tppdRestrict,
+      paCover: data?.paCover,
+      // Financier details
+      hasFinancier: data?.hasFinancier,
+      financierType: data?.financierType,
+      financierName: data?.financierName,
+      financierAddress: data?.financierAddress,
+      // Registration address
+      isRegistrationAddressSame: data?.isRegistrationAddressSame,
     };
     console.log(
       "formData: ******* ******* ******* ******* ******* ******* ",
