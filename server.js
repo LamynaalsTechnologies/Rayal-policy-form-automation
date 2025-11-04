@@ -499,6 +499,9 @@ db.once("open", async () => {
       financierAddress: data?.financierAddress,
       // Registration address
       isRegistrationAddressSame: data?.isRegistrationAddressSame,
+      // Discount mapping (normalize multiple possible fields from Mongo)
+      discount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
+      ODDiscount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount
     };
     console.log(
       "formData: ******* ******* ******* ******* ******* ******* ",

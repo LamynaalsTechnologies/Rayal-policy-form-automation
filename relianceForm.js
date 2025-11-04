@@ -1360,6 +1360,54 @@ async function fillRelianceForm(
           console.log('IDV not provided in formData; skipping initial set');
         }
 
+        // Set Discount Rate (use data.discount from server; allowed: 60 or 80; default 60)
+        console.log("Setting discount rate...");
+        try {
+          const discountParsed = Number(String(data.discount ?? '').replace(/[^0-9.-]/g, ''));
+          let discountValue = Number.isFinite(discountParsed) ? discountParsed : 60;
+          discountValue = discountValue === 80 ? 80 : 60; // clamp to schema enum
+          const discountInput = await driver.wait(
+            until.elementLocated(By.id("Detariff_Discount_Rate")),
+            10000
+          );
+          await driver.wait(until.elementIsVisible(discountInput), 5000);
+          await driver.executeScript(
+            "arguments[0].scrollIntoView({block: 'center'});",
+            discountInput
+          );
+          await driver.sleep(500);
+
+          // Clear and set discount value
+          await driver.executeScript(
+            `
+            var el = arguments[0];
+            el.removeAttribute('readonly');
+            el.removeAttribute('disabled');
+            el.value = '';
+            el.value = String(arguments[1]);
+          `,
+            discountInput,
+            String(discountValue)
+          );
+
+          // Trigger input and blur events to call OnChangeofDiscountLoading()
+          await driver.executeScript(`
+            var el = arguments[0];
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+            // Also call the onblur function directly if it exists
+            if (typeof OnChangeofDiscountLoading === 'function') {
+              OnChangeofDiscountLoading();
+            }
+          `, discountInput);
+
+          console.log(`✅ Discount rate set to: ${discountValue}`);
+          await driver.sleep(1000);
+        } catch (err) {
+          console.log("⚠️ Could not set discount rate:", err.message);
+        }
+
         // Click "Get Coverage Details" button
         console.log("Clicking 'Get Coverage Details' button...");
         const getCoverageButton = await driver.wait(
