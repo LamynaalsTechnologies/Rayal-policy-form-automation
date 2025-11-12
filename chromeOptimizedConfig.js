@@ -144,7 +144,7 @@ function getOptimizedChromeOptions(profilePath, config = {}) {
  */
 function getMinimalChromeOptions(profilePath) {
   return getOptimizedChromeOptions(profilePath, {
-    headless: false, // Keep visible for debugging
+    headless: true, // Headless mode enabled
     disableImages: false, // Keep images for captcha
     eagerLoad: true,
   });
