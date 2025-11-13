@@ -48,6 +48,27 @@ const JOB_STATUS = {
   FAILED_POST_SUBMISSION: "failed_post_submission", // Failed after form submission
 };
 
+/**
+ * Get company name from formData, supporting both 'company' and 'Companyname' fields
+ * Normalizes to lowercase for consistent comparison
+ */
+function getCompanyName(formData) {
+  if (!formData) return "reliance";
+  
+  // Check multiple possible field names (case-insensitive)
+  const companyField = formData.Companyname || formData.companyname || 
+                       formData.company || formData.Company;
+  
+  if (!companyField) return "reliance";
+  
+  // Normalize to lowercase for comparison
+  const normalized = companyField.toString().toLowerCase();
+  
+  // Return normalized value
+  if (normalized === "national") return "national";
+  return "reliance";
+}
+
 const enqueueRelianceJob = async (formData, captchaId = null) => {
   try {
     if (!jobQueueCollection) {
@@ -83,7 +104,10 @@ const enqueueRelianceJob = async (formData, captchaId = null) => {
 
     // Try to process queue
     console.log("🔄 Triggering queue processing...");
-    void processRelianceQueue();
+    // Use setTimeout to debounce rapid calls and prevent race conditions
+    setTimeout(() => {
+      void processRelianceQueue();
+    }, 100);
 
     return result.insertedId;
   } catch (error) {
@@ -95,7 +119,10 @@ const enqueueRelianceJob = async (formData, captchaId = null) => {
 };
 
 const processRelianceQueue = async () => {
-  if (!jobQueueCollection) return;
+  if (!jobQueueCollection) {
+    console.warn("⚠️  [Reliance Queue] Job queue collection not initialized!");
+    return;
+  }
 
   try {
     // Count how many jobs are currently processing
@@ -103,122 +130,217 @@ const processRelianceQueue = async () => {
       status: JOB_STATUS.PROCESSING,
     });
 
+    // Count pending jobs
+    const pendingCount = await jobQueueCollection.countDocuments({
+      status: JOB_STATUS.PENDING,
+    });
+
     activeRelianceJobs = processingCount;
+
+    console.log(
+      `\n🔄 [Reliance Queue] Processing queue: ${pendingCount} pending, ${processingCount} processing, max=${MAX_PARALLEL_JOBS}`
+    );
 
     // Check if we can start more jobs
     if (activeRelianceJobs >= MAX_PARALLEL_JOBS) {
+      console.log(
+        `⏸️  [Reliance Queue] At max capacity (${activeRelianceJobs}/${MAX_PARALLEL_JOBS}), waiting...`
+      );
       return; // Already at max capacity
+    }
+
+    if (pendingCount === 0) {
+      console.log(`✅ [Reliance Queue] No pending jobs to process`);
+      return;
     }
 
     // Get pending jobs from database (oldest first)
     const availableSlots = MAX_PARALLEL_JOBS - activeRelianceJobs;
+    console.log(
+      `📊 [Reliance Queue] Available slots: ${availableSlots}, attempting to claim jobs...`
+    );
     
     // Use atomic findOneAndUpdate to prevent duplicate processing
     // This ensures only ONE instance can claim a job, even if multiple servers are running
+    let claimedCount = 0;
     for (let i = 0; i < availableSlots; i++) {
       // Atomically find and update a pending job to PROCESSING
       // This prevents race conditions when multiple server instances are running
-      const job = await jobQueueCollection.findOneAndUpdate(
-        { 
-          status: JOB_STATUS.PENDING  // Only match pending jobs
-        },
-        {
-          $set: {
-            status: JOB_STATUS.PROCESSING,
-            startedAt: new Date(),
-          },
-        },
-        {
-          sort: { createdAt: 1 }, // Oldest first
-          returnDocument: 'after' // Return the updated document
-        }
-      );
-
-      // If no job was found and updated, break the loop
-      if (!job || !job.value) {
-        break; // No more pending jobs
-      }
-
-      const claimedJob = job.value;
-      activeRelianceJobs++;
+      console.log(`🔍 [Reliance Queue] Attempting to claim job ${i + 1}/${availableSlots}...`);
       
-      console.log(
-        `[Reliance Queue] Claimed job for ${claimedJob.formData.firstName} (ID: ${claimedJob._id}); active=${activeRelianceJobs}`
-      );
+      try {
+        // First, find the oldest pending job
+        const pendingJob = await jobQueueCollection.findOne(
+          { status: JOB_STATUS.PENDING },
+          { sort: { createdAt: 1 } }
+        );
 
-      // Run job in parallel (don't await)
-      runPolicyJob(claimedJob)
-        .catch((unexpectedError) => {
-          // Safety net: Catch any unhandled errors
-          console.error(
-            `[Reliance Queue] 💥 UNEXPECTED ERROR for ${claimedJob.formData.firstName}:`,
-            unexpectedError.message
-          );
-          console.error("Stack trace:", unexpectedError.stack);
+        if (!pendingJob) {
+          console.log(`✅ [Reliance Queue] No more pending jobs to claim`);
+          break;
+        }
 
-          // Ensure job is not left in "processing" state
-          jobQueueCollection
-            .updateOne(
-              { _id: claimedJob._id },
-              {
-                $set: {
-                  status: JOB_STATUS.PENDING, // Reset to pending for retry
-                  lastError: `Unexpected error: ${unexpectedError.message}`,
-                  lastErrorTimestamp: new Date(),
-                },
-                $inc: { attempts: 1 },
-              }
-            )
-            .catch((err) =>
-              console.error("Failed to update job after unexpected error:", err)
-            );
-        })
-        .finally(() => {
-          activeRelianceJobs--;
-          // Try to process more jobs
-          void processRelianceQueue();
+        // Then atomically update it to PROCESSING (only if still PENDING)
+        // This prevents race conditions - if another process already claimed it, this will fail
+        const updateResult = await jobQueueCollection.findOneAndUpdate(
+          { 
+            _id: pendingJob._id,
+            status: JOB_STATUS.PENDING  // Only update if still pending (prevents race condition)
+          },
+          {
+            $set: {
+              status: JOB_STATUS.PROCESSING,
+              startedAt: new Date(),
+            },
+          },
+          {
+            returnDocument: 'after' // Return the updated document
+          }
+        );
+
+        // If update failed (job was already claimed by another process), try next job
+        if (!updateResult || !updateResult.value) {
+          console.log(`⚠️  [Reliance Queue] Job ${pendingJob._id} was already claimed by another process, trying next...`);
+          continue; // Try next job instead of breaking
+        }
+
+        const claimedJob = updateResult.value;
+        activeRelianceJobs++;
+        claimedCount++;
+        
+        const companyName = getCompanyName(claimedJob.formData);
+        console.log(
+          `\n🎯 [Reliance Queue] ✅ Claimed job #${claimedCount} for ${claimedJob.formData.firstName} ${claimedJob.formData.lastName} (Company: ${companyName}, ID: ${claimedJob._id}); active=${activeRelianceJobs}`
+        );
+        console.log(`🚀 [Reliance Queue] Starting job processing...`);
+        console.log(`📋 [Reliance Queue] Job details:`, {
+          jobId: claimedJob._id,
+          firstName: claimedJob.formData.firstName,
+          company: companyName,
+          attempts: claimedJob.attempts
         });
+
+        // Run job in parallel (don't await)
+        console.log(`🔄 [Reliance Queue] Calling runPolicyJob for ${claimedJob.formData.firstName}...`);
+        runPolicyJob(claimedJob)
+          .catch((unexpectedError) => {
+            // Safety net: Catch any unhandled errors
+            console.error(
+              `\n❌ [Reliance Queue] 💥 UNEXPECTED ERROR for ${claimedJob.formData.firstName}:`,
+              unexpectedError.message
+            );
+            console.error("Stack trace:", unexpectedError.stack);
+
+            // Ensure job is not left in "processing" state
+            jobQueueCollection
+              .updateOne(
+                { _id: claimedJob._id },
+                {
+                  $set: {
+                    status: JOB_STATUS.PENDING, // Reset to pending for retry
+                    lastError: `Unexpected error: ${unexpectedError.message}`,
+                    lastErrorTimestamp: new Date(),
+                  },
+                  $inc: { attempts: 1 },
+                }
+              )
+              .catch((err) =>
+                console.error("Failed to update job after unexpected error:", err)
+              );
+          })
+          .finally(() => {
+            activeRelianceJobs--;
+            console.log(
+              `\n✅ [Reliance Queue] Job completed for ${claimedJob.formData.firstName}, active jobs: ${activeRelianceJobs}`
+            );
+            // Try to process more jobs (debounced to prevent race conditions)
+            setTimeout(() => {
+              void processRelianceQueue();
+            }, 100);
+          });
+      } catch (error) {
+        console.error(`❌ [Reliance Queue] Error claiming job ${i + 1}:`, error.message);
+        console.error("Stack:", error.stack);
+        break; // Stop trying to claim more jobs if there's an error
+      }
+    }
+    
+    if (claimedCount > 0) {
+      console.log(`\n✅ [Reliance Queue] Successfully claimed ${claimedCount} job(s)\n`);
     }
   } catch (error) {
-    console.error("[Reliance Queue] Error processing queue:", error.message);
+    console.error("\n❌ [Reliance Queue] Error processing queue:", error.message);
+    console.error("Stack:", error.stack);
   }
 };
 
 const runPolicyJob = async (job) => {
   const jobIdentifier = `${job.formData.firstName}_${job._id}`;
   const JOB_TIMEOUT = 300000; // 5 minutes timeout per job
-  const companyName = job.formData.Companyname || "reliance"; // Default to reliance for backward compatibility
+  const companyName = getCompanyName(job.formData);
   const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
 
+  console.log(`\n${"!".repeat(60)}`);
+  console.log(`🎬 [${queueName}] runPolicyJob ENTERED for ${job.formData.firstName}`);
+  console.log(`${"!".repeat(60)}`);
+
   try {
-    console.log(
-      `[${queueName}] Processing ${companyName} form for: ${job.formData.firstName} ${job.formData.lastName}`
-    );
+    console.log("\n" + "=".repeat(60));
+    console.log(`  🚀 STARTING JOB: ${job.formData.firstName} ${job.formData.lastName}`);
+    console.log("=".repeat(60));
+    console.log(`[${queueName}] Processing ${companyName} form for: ${job.formData.firstName} ${job.formData.lastName}`);
+    console.log(`Job ID: ${job._id}`);
+    console.log(`Job Identifier: ${jobIdentifier}`);
+    console.log(`Company: ${companyName}`);
+    console.log("=".repeat(60) + "\n");
+    
+    console.log(`📞 [${queueName}] About to call form filling function...`);
 
     // Route to appropriate form filling function based on Companyname
     let fillFormPromise;
     if (companyName === "national") {
       // National Insurance form
-      fillFormPromise = fillNationalForm({
-        username: "9999839907",
-        password: "Rayal$2025",
-        ...job.formData,
-        _jobId: job._id, // Pass job ID for error logging
-        _jobIdentifier: jobIdentifier,
-        _attemptNumber: job.attempts + 1, // Current attempt number
-        _jobQueueCollection: jobQueueCollection, // Pass collection for logging
-      });
+      console.log(`🌐 [${queueName}] Routing to NATIONAL form processing...`);
+      console.log(`📋 [${queueName}] National credentials: username=9999839907`);
+      console.log(`📋 [${queueName}] Job metadata: jobId=${job._id}, identifier=${jobIdentifier}, attempt=${job.attempts + 1}`);
+      
+      try {
+        console.log(`⏳ [${queueName}] Creating fillNationalForm promise...`);
+        fillFormPromise = fillNationalForm({
+          username: "9999839907",
+          password: "Rayal$2025",
+          ...job.formData,
+          _jobId: job._id, // Pass job ID for error logging
+          _jobIdentifier: jobIdentifier,
+          _attemptNumber: job.attempts + 1, // Current attempt number
+          _jobQueueCollection: jobQueueCollection, // Pass collection for logging
+        });
+        console.log(`✅ [${queueName}] fillNationalForm promise created successfully`);
+        console.log(`⏳ [${queueName}] Awaiting National form completion...`);
+      } catch (formError) {
+        console.error(`❌ [${queueName}] CRITICAL: Error calling fillNationalForm:`, formError.message);
+        console.error("Stack:", formError.stack);
+        throw formError;
+      }
     } else {
       // Reliance form (default)
-      fillFormPromise = fillRelianceForm({
-        username: "rfcpolicy",
-        password: "Pass@123",
-        ...job.formData,
-        _jobId: job._id, // Pass job ID for error logging
-        _jobIdentifier: jobIdentifier,
-        _attemptNumber: job.attempts + 1, // Current attempt number
-        _jobQueueCollection: jobQueueCollection, // Pass collection for logging
-      });
+      console.log(`🌐 [${queueName}] Calling fillRelianceForm...`);
+      try {
+        fillFormPromise = fillRelianceForm({
+          username: "rfcpolicy",
+          password: "Pass@123",
+          ...job.formData,
+          _jobId: job._id, // Pass job ID for error logging
+          _jobIdentifier: jobIdentifier,
+          _attemptNumber: job.attempts + 1, // Current attempt number
+          _jobQueueCollection: jobQueueCollection, // Pass collection for logging
+        });
+        console.log(`✅ [${queueName}] fillRelianceForm called, promise created`);
+      } catch (formError) {
+        console.error(`❌ [${queueName}] Error calling fillRelianceForm:`, formError.message);
+        console.error("Stack:", formError.stack);
+        throw formError;
+      }
     }
 
     const timeoutPromise = new Promise((_, reject) =>
@@ -398,7 +520,7 @@ const runPolicyJob = async (job) => {
           },
         }
       );
-      const companyName = job.formData.Companyname || "reliance";
+      const companyName = getCompanyName(job.formData);
       const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
       console.error(
         `[${queueName}] ❌ Failed permanently (LOGIN FORM) after ${updatedJob.attempts} attempts`
@@ -413,7 +535,7 @@ const runPolicyJob = async (job) => {
           },
         }
       );
-      const companyName = job.formData.Companyname || "reliance";
+      const companyName = getCompanyName(job.formData);
       const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
       console.warn(
         `[${queueName}] ⚠️ Will retry (LOGIN FORM error) (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
@@ -493,7 +615,8 @@ db.once("open", async () => {
       }
       
       console.log("📋 Received data for:", data?.fullName || data?.firstName || "Unknown");
-      console.log("Company:", data?.Companyname || "reliance (default)");
+      const detectedCompany = getCompanyName(data);
+      console.log("Company:", detectedCompany);
       
       // Get the Captcha document _id for reference
       const captchaId = data?._id;
@@ -561,11 +684,12 @@ db.once("open", async () => {
         // Discount mapping (normalize multiple possible fields from Mongo)
         discount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
         ODDiscount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
-        Companyname : data?.Companyname
+        // Company mapping (support multiple field names: company, Companyname, etc.)
+        Companyname: data?.Companyname || data?.companyname || data?.company || data?.Company || "reliance"
       };
       
       console.log(`✅ Form data prepared for: ${formData.firstName} ${formData.lastName}`);
-      console.log(`   Company: ${formData.Companyname || "reliance (default)"}`);
+      console.log(`   Company: ${getCompanyName(formData)}`);
       console.log(`   Captcha ID: ${captchaId}`);
 
       // Add to queue with captchaId reference
@@ -1106,12 +1230,14 @@ async function main() {
       console.log("=".repeat(60) + "\n");
 
       await initializeMasterSession();
+      console.log("✅ Reliance master session initialized successfully\n");
 
       console.log("\n" + "=".repeat(60));
       console.log("  🚀 INITIALIZING NATIONAL AUTOMATION");
       console.log("=".repeat(60) + "\n");
 
       await initializeNationalMasterSession();
+      console.log("✅ National master session initialized successfully\n");
 
       console.log("\n" + "=".repeat(60));
       console.log("  ✅ READY TO PROCESS JOBS");

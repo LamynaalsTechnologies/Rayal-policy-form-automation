@@ -268,11 +268,40 @@ async function fillNationalForm(
   let driver = null;
   
   try {
-    console.log(`\n🚀 [${jobId}] Starting National Insurance job...`);
+    console.log(`\n${"=".repeat(60)}`);
+    console.log(`🚀 [${jobId}] STARTING NATIONAL INSURANCE JOB`);
+    console.log(`${"=".repeat(60)}`);
+    console.log(`📋 [${jobId}] Job Data:`, JSON.stringify({
+      jobId,
+      firstName: data.firstName,
+      lastName: data.lastName,
+      attemptNumber: data._attemptNumber,
+    }, null, 2));
     
     // === STEP 0: Create cloned browser (already logged in!) ===
-    jobBrowser = await createNationalJobBrowser(jobId);
+    console.log(`\n🌐 [${jobId}] STEP 1: Creating National job browser...`);
+    console.log(`⏳ [${jobId}] Calling createNationalJobBrowser...`);
+    
+    try {
+      jobBrowser = await createNationalJobBrowser(jobId);
+      console.log(`✅ [${jobId}] Browser creation returned successfully`);
+      console.log(`📊 [${jobId}] Job Browser Info:`, {
+        hasDriver: !!jobBrowser?.driver,
+        hasProfileInfo: !!jobBrowser?.profileInfo,
+        jobIdMatch: jobBrowser?.jobId === jobId
+      });
+    } catch (browserError) {
+      console.error(`❌ [${jobId}] CRITICAL: Browser creation failed!`);
+      console.error(`❌ [${jobId}] Error:`, browserError.message);
+      console.error(`❌ [${jobId}] Stack:`, browserError.stack);
+      throw new Error(`Failed to create National job browser: ${browserError.message}`);
+    }
+    
     driver = jobBrowser.driver;
+    
+    if (!driver) {
+      throw new Error("Browser driver is null or undefined after creation");
+    }
 
     console.log(`✅ [${jobId}] National browser ready with active session!`);
     console.log(`🌐 [${jobId}] Navigating to NIC portal...`);

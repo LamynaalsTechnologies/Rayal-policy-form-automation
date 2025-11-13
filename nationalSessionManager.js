@@ -283,11 +283,21 @@ async function reLoginNationalIfNeeded() {
  */
 async function createNationalJobBrowser(jobId) {
   try {
-    console.log(`\n📋 [National Job ${jobId}] Creating cloned browser...`);
+    console.log(`\n${"=".repeat(60)}`);
+    console.log(`📋 [National Job ${jobId}] CREATING CLONED BROWSER`);
+    console.log(`${"=".repeat(60)}`);
 
     // Step 1: Ensure session is active
+    console.log(`\n🔍 [National Job ${jobId}] STEP 1: Checking master session...`);
     const isStaleCheck =
       sessionLastChecked && Date.now() - sessionLastChecked.getTime() > 120000;
+
+    console.log(`📊 [National Job ${jobId}] Session State:`, {
+      isSessionActive,
+      sessionLastChecked: sessionLastChecked ? sessionLastChecked.toISOString() : 'never',
+      isStale: isStaleCheck,
+      hasMasterDriver: !!masterDriver
+    });
 
     if (!isSessionActive || isStaleCheck) {
       if (isStaleCheck) {
@@ -296,7 +306,9 @@ async function createNationalJobBrowser(jobId) {
         );
       }
 
+      console.log(`🔄 [National Job ${jobId}] Checking session validity...`);
       const sessionValid = await checkNationalSession();
+      console.log(`📊 [National Job ${jobId}] Session check result: ${sessionValid}`);
 
       if (!sessionValid) {
         if (recoveryManager.isRecovering) {
@@ -312,7 +324,9 @@ async function createNationalJobBrowser(jobId) {
           );
         }
 
+        console.log(`🔄 [National Job ${jobId}] Initiating re-login...`);
         const recovered = await reLoginNationalIfNeeded();
+        console.log(`📊 [National Job ${jobId}] Recovery result: ${recovered}`);
 
         if (!recovered) {
           throw new Error("National master session is not active and re-login failed");
@@ -329,34 +343,59 @@ async function createNationalJobBrowser(jobId) {
     }
 
     // Step 2: Clone master profile
-    console.log(`📂 [National Job ${jobId}] Cloning National master profile...`);
+    console.log(`\n📂 [National Job ${jobId}] STEP 2: Cloning master profile...`);
+    console.log(`📊 [National Job ${jobId}] Master profile path: ${PATHS.MASTER_PROFILE}`);
+    console.log(`📊 [National Job ${jobId}] Clone destination: ${PATHS.CLONED_PROFILE_BASE}`);
+    
     const clonedProfileInfo = cloneChromeProfile(`national_job_${jobId}`);
 
     if (!clonedProfileInfo) {
-      throw new Error("Failed to clone National profile");
+      throw new Error("Failed to clone National profile - cloneChromeProfile returned null");
     }
 
     console.log(
-      `✅ [National Job ${jobId}] National profile cloned: ${clonedProfileInfo.fullPath}`
+      `✅ [National Job ${jobId}] National profile cloned successfully!`
     );
+    console.log(`📊 [National Job ${jobId}] Clone details:`, {
+      userDataDir: clonedProfileInfo.userDataDir,
+      profileDirectory: clonedProfileInfo.profileDirectory,
+      fullPath: clonedProfileInfo.fullPath
+    });
 
     // Step 3: Create browser with cloned profile
-    console.log(`🌐 [National Job ${jobId}] Opening browser with cloned profile...`);
+    console.log(`\n🌐 [National Job ${jobId}] STEP 3: Creating browser instance...`);
+    console.log(`⏳ [National Job ${jobId}] Calling createClonedBrowser...`);
+    
     const clonedDriver = await createClonedBrowser(clonedProfileInfo);
+    
+    if (!clonedDriver) {
+      throw new Error("createClonedBrowser returned null driver");
+    }
 
-    console.log(`✅ [National Job ${jobId}] Cloned browser created successfully\n`);
+    console.log(`✅ [National Job ${jobId}] Browser instance created successfully!`);
+    console.log(`📊 [National Job ${jobId}] Driver session ID: ${await clonedDriver.getSession().then(s => s.getId()).catch(() => 'unknown')}`);
 
-    return {
+    const result = {
       driver: clonedDriver,
       profileInfo: clonedProfileInfo,
       jobId: jobId,
       usingPool: false,
     };
+
+    console.log(`${"=".repeat(60)}`);
+    console.log(`✅ [National Job ${jobId}] BROWSER CREATION COMPLETE`);
+    console.log(`${"=".repeat(60)}\n`);
+
+    return result;
   } catch (error) {
+    console.error(`\n${"=".repeat(60)}`);
+    console.error(`❌ [National Job ${jobId}] BROWSER CREATION FAILED`);
+    console.error(`${"=".repeat(60)}`);
     console.error(
-      `❌ [National Job ${jobId}] Failed to create job browser:`,
-      error.message
+      `❌ [National Job ${jobId}] Error:`, error.message
     );
+    console.error(`❌ [National Job ${jobId}] Stack:`, error.stack);
+    console.error(`${"=".repeat(60)}\n`);
     throw error;
   }
 }
