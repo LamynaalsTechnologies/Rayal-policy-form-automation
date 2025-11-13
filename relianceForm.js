@@ -570,8 +570,24 @@ async function fillRelianceForm(
     console.log(`🌐 [${jobId}] Navigating to form...`);
 
     // Navigate to the form page (already logged in from cloned profile!)
-    await driver.get("https://smartzone.reliancegeneral.co.in/Login/IMDLogin");
-    await driver.sleep(3000);
+    try {
+      console.log(`⏳ [${jobId}] Loading URL: https://smartzone.reliancegeneral.co.in/Login/IMDLogin`);
+      await driver.get("https://smartzone.reliancegeneral.co.in/Login/IMDLogin");
+      console.log(`✅ [${jobId}] Navigation successful!`);
+      
+      // Verify we're on the correct page
+      const currentUrl = await driver.getCurrentUrl();
+      console.log(`🌐 [${jobId}] Current URL after navigation: ${currentUrl}`);
+      
+      if (!currentUrl.includes("smartzone.reliancegeneral.co.in")) {
+        console.warn(`⚠️  [${jobId}] WARNING: Not on Reliance portal! Current URL: ${currentUrl}`);
+      }
+      
+      await driver.sleep(3000);
+    } catch (navError) {
+      console.error(`❌ [${jobId}] Navigation failed:`, navError.message);
+      throw new Error(`Failed to navigate to Reliance portal: ${navError.message}`);
+    }
 
     // === STEP 1: Check if cloned session is expired ===
     // This detects if we cloned an expired session and attempts to login on cloned browser
@@ -580,6 +596,7 @@ async function fillRelianceForm(
       password: data.password || "Pass@123",
     };
 
+    console.log(`🔍 [${jobId}] Checking session validity...`);
     const sessionValid = await checkAndRecoverClonedSession(
       driver,
       jobId,
@@ -593,31 +610,38 @@ async function fillRelianceForm(
         "Cloned session login failed after all attempts. Job will retry."
       );
     }
+    console.log(`✅ [${jobId}] Session is valid, proceeding with form...`);
+
+    // Check current URL to see where we are
+    const currentUrl = await driver.getCurrentUrl();
+    console.log(`🌐 [${jobId}] Current URL: ${currentUrl}`);
 
     // === STEP 1.1: Close popup modal if present ===
     try {
       await driver.sleep(2000);
-      console.log("Checking for modal close button...");
+      console.log(`🔍 [${jobId}] Checking for modal close button...`);
       const closeBtn = await driver.wait(
         until.elementLocated(By.id("Closebutton")),
         5000
       );
       await driver.wait(until.elementIsVisible(closeBtn), 5000);
       await driver.executeScript("arguments[0].click();", closeBtn);
-      console.log("Modal closed!");
+      console.log(`✅ [${jobId}] Modal closed!`);
       await driver.sleep(2000);
     } catch (err) {
-      console.log("No modal detected, continuing...");
+      console.log(`ℹ️  [${jobId}] No modal detected, continuing...`);
     }
 
     await driver.sleep(2000);
 
     // === STEP 2: wait for Motors menu ===
+    console.log(`🔍 [${jobId}] Waiting for Motors menu (divMainMotors)...`);
+    console.log(`⏳ [${jobId}] This may take up to 30 seconds...`);
     const motorsMenu = await driver.wait(
       until.elementLocated(By.id("divMainMotors")),
       30000
     );
-    console.log("Motors menu detected!");
+    console.log(`✅ [${jobId}] Motors menu detected!`);
 
     await driver
       .actions({ bridge: true })

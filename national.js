@@ -1,11 +1,10 @@
 const { By, until, Key } = require("selenium-webdriver");
-const { createFreshDriverFromBaseProfile } = require("./browser");
 const {
-  createJobBrowser,
-  cleanupJobBrowser,
-  reLoginIfNeeded,
+  createNationalJobBrowser,
+  cleanupNationalJobBrowser,
+  reLoginNationalIfNeeded,
   recoveryManager,
-} = require("./sessionManager");
+} = require("./nationalSessionManager");
 const fs = require("fs");
 const path = require("path");
 const { extractCaptchaText } = require("./Captcha");
@@ -172,47 +171,165 @@ async function safeSelectOption(driver, dropdownLocator, optionText, timeout = 1
   }
 }
 
-async function fillNationalForm(formData) {
+/**
+ * Centralized error screenshot handler for National
+ * Captures screenshot and uploads to S3 for any error
+ */
+async function captureErrorScreenshot(
+  driver,
+  error,
+  data,
+  errorStage = "unknown"
+) {
+  let screenshotUrl = null;
+  let screenshotKey = null;
+  let pageSourceUrl = null;
+  let pageSourceKey = null;
+
+  try {
+    if (!driver) {
+      console.log("⚠️  No driver available for screenshot");
+      return { screenshotUrl, screenshotKey, pageSourceUrl, pageSourceKey };
+    }
+
+    const screenshot = await driver.takeScreenshot();
+    const jobIdentifier = data._jobIdentifier || `national_job_${Date.now()}`;
+    const attemptNumber = data._attemptNumber || 1;
+
+    // Generate S3 key and upload screenshot
+    screenshotKey = generateScreenshotKey(
+      jobIdentifier,
+      attemptNumber,
+      errorStage
+    );
+    screenshotUrl = await uploadScreenshotToS3(screenshot, screenshotKey);
+
+    console.log(`📸 National error screenshot uploaded to S3: ${screenshotUrl}`);
+
+    // Also capture page source for debugging (optional)
+    try {
+      const pageSource = await driver.getPageSource();
+      pageSourceKey = screenshotKey.replace(".png", ".html");
+      const tempHtmlPath = path.join(
+        __dirname,
+        `temp-page-source-national-${Date.now()}.html`
+      );
+      fs.writeFileSync(tempHtmlPath, pageSource);
+
+      const { uploadToS3 } = require("./s3Uploader");
+      pageSourceUrl = await uploadToS3(tempHtmlPath, pageSourceKey);
+
+      fs.unlinkSync(tempHtmlPath); // Delete temp file
+      console.log(`📄 National page source uploaded to S3: ${pageSourceUrl}`);
+    } catch (sourceErr) {
+      console.log("⚠️  Could not capture page source:", sourceErr.message);
+    }
+
+    // Log to MongoDB if available
+    if (data._jobId && data._jobQueueCollection) {
+      const errorLog = {
+        timestamp: new Date(),
+        attemptNumber: attemptNumber,
+        errorMessage: error.message || String(error),
+        errorType: error.name || "UnknownError",
+        errorStack: error.stack || null,
+        screenshotUrl: screenshotUrl,
+        screenshotKey: screenshotKey,
+        pageSourceUrl: pageSourceUrl,
+        pageSourceKey: pageSourceKey,
+        stage: errorStage,
+      };
+
+      await data._jobQueueCollection.updateOne(
+        { _id: data._jobId },
+        {
+          $push: { errorLogs: errorLog },
+          $set: { [`last_${errorStage}_error`]: errorLog },
+        }
+      );
+
+      console.log(`✅ National error logged to job queue (stage: ${errorStage})`);
+    }
+  } catch (captureErr) {
+    console.error(
+      `❌ Failed to capture/upload National error screenshot:`,
+      captureErr.message
+    );
+  }
+
+  return { screenshotUrl, screenshotKey, pageSourceUrl, pageSourceKey };
+}
+
+async function fillNationalForm(
+  data = { username: "9999839907", password: "Rayal$2025" }
+) {
+  const jobId = data._jobIdentifier || `national_${Date.now()}`;
+  let jobBrowser = null;
   let driver = null;
-  let jobId = null;
   
   try {
-    console.log("Starting National Insurance form automation...");
+    console.log(`\n🚀 [${jobId}] Starting National Insurance job...`);
     
-    // Create fresh driver
-    const driverResult = await createFreshDriverFromBaseProfile();
-    driver = driverResult.driver;
-    jobId = `national_${Date.now()}`;
+    // === STEP 0: Create cloned browser (already logged in!) ===
+    jobBrowser = await createNationalJobBrowser(jobId);
+    driver = jobBrowser.driver;
+
+    console.log(`✅ [${jobId}] National browser ready with active session!`);
+    console.log(`🌐 [${jobId}] Navigating to NIC portal...`);
     
     // Navigate to NIC portal
-    console.log("Navigating to NIC portal...");
-    await driver.get("https://nicportal.nic.co.in/nicportal/signin/login");
-    await driver.sleep(3000);
+    try {
+      console.log(`⏳ [${jobId}] Loading URL: https://nicportal.nic.co.in/nicportal/signin/login`);
+      await driver.get("https://nicportal.nic.co.in/nicportal/signin/login");
+      console.log(`✅ [${jobId}] Navigation successful!`);
+      
+      // Verify we're on the correct page
+      const currentUrl = await driver.getCurrentUrl();
+      console.log(`🌐 [${jobId}] Current URL after navigation: ${currentUrl}`);
+      
+      if (!currentUrl.includes("nicportal.nic.co.in")) {
+        console.warn(`⚠️  [${jobId}] WARNING: Not on National portal! Current URL: ${currentUrl}`);
+      }
+      
+      await driver.sleep(3000);
+    } catch (navError) {
+      console.error(`❌ [${jobId}] Navigation failed:`, navError.message);
+      throw new Error(`Failed to navigate to National portal: ${navError.message}`);
+    }
     
     // Wait for page to load
     await waitForLoaderToDisappear(driver);
     
-    // Debug: Check what elements are available
-    try {
-      const pageTitle = await driver.getTitle();
-      console.log("Page title:", pageTitle);
-      
-      const currentUrl = await driver.getCurrentUrl();
-      console.log("Current URL:", currentUrl);
-      
-      // Check for dropdown elements
-      const dropdowns = await driver.findElements(By.css("mat-select"));
-      console.log(`Found ${dropdowns.length} mat-select dropdowns`);
-      
-      // Check for input fields
-      const inputs = await driver.findElements(By.css("input"));
-      console.log(`Found ${inputs.length} input fields`);
-    } catch (debugError) {
-      console.log("Debug info failed:", debugError.message);
-    }
+    // Check if already logged in (session still valid)
+    const currentUrl = await driver.getCurrentUrl();
+    const loginElements = await driver.findElements(By.name("log_txtfield_iUsername_01"));
+    const isOnLoginPage = loginElements.length > 0 || currentUrl.includes("/signin/login");
     
-    // Handle login form
-    console.log("Filling login form...");
+    if (!isOnLoginPage) {
+      console.log(`✅ [${jobId}] Already logged in! Session is active, skipping login...`);
+    } else {
+      console.log(`⚠️  [${jobId}] Session expired or not logged in. Attempting login...`);
+      
+      // Debug: Check what elements are available
+      try {
+        const pageTitle = await driver.getTitle();
+        console.log("Page title:", pageTitle);
+        
+        console.log("Current URL:", currentUrl);
+        
+        // Check for dropdown elements
+        const dropdowns = await driver.findElements(By.css("mat-select"));
+        console.log(`Found ${dropdowns.length} mat-select dropdowns`);
+        
+        // Check for input fields
+        const inputs = await driver.findElements(By.css("input"));
+        console.log(`Found ${inputs.length} input fields`);
+      } catch (debugError) {
+        console.log("Debug info failed:", debugError.message);
+      }
+      
+      // Handle login form
+      console.log("Filling login form...");
     
     // Select INTERMEDIARY option
     try {
@@ -350,12 +467,71 @@ async function fillNationalForm(formData) {
     console.log("Filled password");
     
     // Click login button
+    console.log("Looking for login button...");
     const loginButton = By.name("log_btn_login_01");
-    await safeClick(driver, loginButton, 10000);
-    console.log("Clicked login button");
+    
+    try {
+      // Wait for button to be present
+      const buttonElement = await driver.wait(until.elementLocated(loginButton), 10000);
+      console.log("Login button found");
+      
+      // Wait for button to be visible and enabled
+      await driver.wait(until.elementIsVisible(buttonElement), 10000);
+      console.log("Login button is visible");
+      
+      await driver.wait(until.elementIsEnabled(buttonElement), 10000);
+      console.log("Login button is enabled");
+      
+      // Try regular click first
+      try {
+        await buttonElement.click();
+        console.log("✅ Clicked login button (regular click)");
+      } catch (clickError) {
+        console.log("Regular click failed, trying JavaScript click...");
+        // Fallback to JavaScript click
+        await driver.executeScript("arguments[0].click();", buttonElement);
+        console.log("✅ Clicked login button (JavaScript click)");
+      }
+    } catch (buttonError) {
+      console.error("❌ Failed to click login button:", buttonError.message);
+      // Try alternative selectors
+      try {
+        console.log("Trying alternative login button selectors...");
+        const altSelectors = [
+          By.css("button[name='log_btn_login_01']"),
+          By.xpath("//button[contains(@name, 'login')]"),
+          By.xpath("//button[contains(text(), 'Login')]"),
+          By.xpath("//button[@type='submit']"),
+        ];
+        
+        for (const selector of altSelectors) {
+          try {
+            const altButton = await driver.findElement(selector);
+            if (await altButton.isDisplayed() && await altButton.isEnabled()) {
+              await driver.executeScript("arguments[0].click();", altButton);
+              console.log(`✅ Clicked login button using alternative selector: ${selector.toString()}`);
+              break;
+            }
+          } catch (e) {
+            continue;
+          }
+        }
+      } catch (altError) {
+        throw new Error(`Failed to click login button: ${buttonError.message}`);
+      }
+    }
     
     // Wait for login to complete
+    console.log("Waiting for login to complete...");
     await driver.sleep(5000);
+    
+    // Verify login was successful
+    const loginCheckUrl = await driver.getCurrentUrl();
+    const loginCheckElements = await driver.findElements(By.name("log_txtfield_iUsername_01"));
+    if (loginCheckElements.length > 0 || loginCheckUrl.includes("/signin/login")) {
+      throw new Error("National login failed - still on login page after login attempt");
+    }
+    console.log(`✅ [${jobId}] Login successful!`);
     
     // Debug: Check what's on the page after login
     try {
@@ -383,6 +559,7 @@ async function fillNationalForm(formData) {
     } catch (debugError) {
       console.log("Debug info after login failed:", debugError.message);
     }
+    } // End of login block (if isOnLoginPage)
     
     // Check for modal and close it if present
     console.log("Checking for modal after login...");
@@ -1554,50 +1731,39 @@ async function fillNationalForm(formData) {
 
 
     
-    console.log("National Insurance form automation completed successfully!");
-    
-    // Take screenshot for verification
-    const screenshot = await driver.takeScreenshot();
-    const screenshotKey = generateScreenshotKey(jobId, "national_form_completed");
-    await uploadScreenshotToS3(screenshot, screenshotKey);
-    console.log(`Screenshot uploaded: ${screenshotKey}`);
+    console.log(`✅ [${jobId}] National Insurance form automation completed successfully!`);
     
     return {
       success: true,
-      jobId: jobId,
-      message: "National Insurance form filled successfully"
     };
     
   } catch (error) {
-    console.error("Error in National Insurance form automation:", error);
+    console.error(`❌ [${jobId}] Error in National Insurance form automation:`, error.message);
     
-    // Take error screenshot
-    if (driver) {
-      try {
-        const screenshot = await driver.takeScreenshot();
-        const screenshotKey = generateScreenshotKey(jobId || `national_error_${Date.now()}`, "error");
-        await uploadScreenshotToS3(screenshot, screenshotKey);
-        console.log(`Error screenshot uploaded: ${screenshotKey}`);
-      } catch (screenshotError) {
-        console.error("Failed to take error screenshot:", screenshotError);
-      }
-    }
+    // Capture error screenshot using centralized handler
+    const errorDetails = await captureErrorScreenshot(
+      driver,
+      error,
+      data,
+      "national-form-error"
+    );
     
     return {
       success: false,
-      jobId: jobId,
-      error: error.message,
-      message: "National Insurance form automation failed"
+      error: String(error.message || error),
+      errorStack: error.stack,
+      screenshotUrl: errorDetails.screenshotUrl,
+      screenshotKey: errorDetails.screenshotKey,
+      pageSourceUrl: errorDetails.pageSourceUrl,
+      pageSourceKey: errorDetails.pageSourceKey,
+      timestamp: new Date(),
+      stage: "national-form",
     };
     
   } finally {
-    if (driver) {
-      try {
-        // await driver.quit();
-        console.log("Driver closed successfully");
-      } catch (closeError) {
-        console.error("Error closing driver:", closeError);
-      }
+    // Cleanup: Always close browser and delete cloned profile
+    if (jobBrowser) {
+      await cleanupNationalJobBrowser(jobBrowser);
     }
   }
 }

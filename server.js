@@ -21,7 +21,9 @@ const {
 const { captureAndLogError } = require("./errorLogger");
 const { runFormFlow } = require("./formFlow");
 const { fillRelianceForm } = require("./relianceForm");
+const { fillNationalForm } = require("./national");
 const { extractCaptchaText } = require("./Captcha");
+const { initializeNationalMasterSession } = require("./nationalSessionManager");
 require("dotenv").config();
 const express = require("express");
 const multer = require("multer");
@@ -48,6 +50,14 @@ const JOB_STATUS = {
 
 const enqueueRelianceJob = async (formData, captchaId = null) => {
   try {
+    if (!jobQueueCollection) {
+      throw new Error("Job queue collection not initialized!");
+    }
+    
+    if (!formData || !formData.firstName) {
+      throw new Error("Invalid formData: missing firstName");
+    }
+    
     // Save job to MongoDB with pending status
     const job = {
       captchaId: captchaId, // Reference to original Captcha collection document
@@ -60,17 +70,26 @@ const enqueueRelianceJob = async (formData, captchaId = null) => {
       errorLogs: [], // Initialize empty error logs array
     };
 
+    console.log(`📝 Inserting job into queue for ${formData.firstName}...`);
     const result = await jobQueueCollection.insertOne(job);
+    
+    if (!result.insertedId) {
+      throw new Error("Failed to insert job - no ID returned");
+    }
+    
     console.log(
-      `[Reliance Queue] Enqueued job for ${formData.firstName} (Job ID: ${result.insertedId}, Captcha ID: ${captchaId})`
+      `✅ [Reliance Queue] Enqueued job for ${formData.firstName} (Job ID: ${result.insertedId}, Captcha ID: ${captchaId})`
     );
 
     // Try to process queue
+    console.log("🔄 Triggering queue processing...");
     void processRelianceQueue();
 
     return result.insertedId;
   } catch (error) {
-    console.error("[Reliance Queue] Failed to enqueue job:", error.message);
+    console.error("❌ [Reliance Queue] Failed to enqueue job:", error.message);
+    console.error("Stack:", error.stack);
+    console.error("FormData:", JSON.stringify(formData, null, 2));
     throw error;
   }
 };
@@ -93,44 +112,46 @@ const processRelianceQueue = async () => {
 
     // Get pending jobs from database (oldest first)
     const availableSlots = MAX_PARALLEL_JOBS - activeRelianceJobs;
-    const pendingJobs = await jobQueueCollection
-      .find({ status: JOB_STATUS.PENDING })
-      .sort({ createdAt: 1 })
-      .limit(availableSlots)
-      .toArray();
-
-    if (pendingJobs.length === 0) {
-      return; // No pending jobs
-    }
-
-    console.log(
-      `[Reliance Queue] Found ${pendingJobs.length} pending jobs, starting processing...`
-    );
-
-    // Start processing each job
-    for (const job of pendingJobs) {
-      // Mark job as processing
-      await jobQueueCollection.updateOne(
-        { _id: job._id },
+    
+    // Use atomic findOneAndUpdate to prevent duplicate processing
+    // This ensures only ONE instance can claim a job, even if multiple servers are running
+    for (let i = 0; i < availableSlots; i++) {
+      // Atomically find and update a pending job to PROCESSING
+      // This prevents race conditions when multiple server instances are running
+      const job = await jobQueueCollection.findOneAndUpdate(
+        { 
+          status: JOB_STATUS.PENDING  // Only match pending jobs
+        },
         {
           $set: {
             status: JOB_STATUS.PROCESSING,
             startedAt: new Date(),
           },
+        },
+        {
+          sort: { createdAt: 1 }, // Oldest first
+          returnDocument: 'after' // Return the updated document
         }
       );
 
+      // If no job was found and updated, break the loop
+      if (!job || !job.value) {
+        break; // No more pending jobs
+      }
+
+      const claimedJob = job.value;
       activeRelianceJobs++;
+      
       console.log(
-        `[Reliance Queue] Starting job for ${job.formData.firstName} (ID: ${job._id}); active=${activeRelianceJobs}`
+        `[Reliance Queue] Claimed job for ${claimedJob.formData.firstName} (ID: ${claimedJob._id}); active=${activeRelianceJobs}`
       );
 
       // Run job in parallel (don't await)
-      runRelianceJob(job)
+      runPolicyJob(claimedJob)
         .catch((unexpectedError) => {
           // Safety net: Catch any unhandled errors
           console.error(
-            `[Reliance Queue] 💥 UNEXPECTED ERROR for ${job.formData.firstName}:`,
+            `[Reliance Queue] 💥 UNEXPECTED ERROR for ${claimedJob.formData.firstName}:`,
             unexpectedError.message
           );
           console.error("Stack trace:", unexpectedError.stack);
@@ -138,7 +159,7 @@ const processRelianceQueue = async () => {
           // Ensure job is not left in "processing" state
           jobQueueCollection
             .updateOne(
-              { _id: job._id },
+              { _id: claimedJob._id },
               {
                 $set: {
                   status: JOB_STATUS.PENDING, // Reset to pending for retry
@@ -163,25 +184,42 @@ const processRelianceQueue = async () => {
   }
 };
 
-const runRelianceJob = async (job) => {
+const runPolicyJob = async (job) => {
   const jobIdentifier = `${job.formData.firstName}_${job._id}`;
   const JOB_TIMEOUT = 300000; // 5 minutes timeout per job
+  const companyName = job.formData.Companyname || "reliance"; // Default to reliance for backward compatibility
+  const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
 
   try {
     console.log(
-      `[Reliance Queue] Processing form for: ${job.formData.firstName} ${job.formData.lastName}`
+      `[${queueName}] Processing ${companyName} form for: ${job.formData.firstName} ${job.formData.lastName}`
     );
 
-    // Wrap fillRelianceForm with timeout protection
-    const fillFormPromise = fillRelianceForm({
-      username: "rfcpolicy",
-      password: "Pass@123",
-      ...job.formData,
-      _jobId: job._id, // Pass job ID for error logging
-      _jobIdentifier: jobIdentifier,
-      _attemptNumber: job.attempts + 1, // Current attempt number
-      _jobQueueCollection: jobQueueCollection, // Pass collection for logging
-    });
+    // Route to appropriate form filling function based on Companyname
+    let fillFormPromise;
+    if (companyName === "national") {
+      // National Insurance form
+      fillFormPromise = fillNationalForm({
+        username: "9999839907",
+        password: "Rayal$2025",
+        ...job.formData,
+        _jobId: job._id, // Pass job ID for error logging
+        _jobIdentifier: jobIdentifier,
+        _attemptNumber: job.attempts + 1, // Current attempt number
+        _jobQueueCollection: jobQueueCollection, // Pass collection for logging
+      });
+    } else {
+      // Reliance form (default)
+      fillFormPromise = fillRelianceForm({
+        username: "rfcpolicy",
+        password: "Pass@123",
+        ...job.formData,
+        _jobId: job._id, // Pass job ID for error logging
+        _jobIdentifier: jobIdentifier,
+        _attemptNumber: job.attempts + 1, // Current attempt number
+        _jobQueueCollection: jobQueueCollection, // Pass collection for logging
+      });
+    }
 
     const timeoutPromise = new Promise((_, reject) =>
       setTimeout(
@@ -207,7 +245,7 @@ const runRelianceJob = async (job) => {
         }
       );
       console.log(
-        `[Reliance Queue] ✅ Success for ${job.formData.firstName} (ID: ${job._id})`
+        `[${queueName}] ✅ Success for ${job.formData.firstName} (ID: ${job._id})`
       );
     } else {
       // Job failed - determine failure type
@@ -265,7 +303,7 @@ const runRelianceJob = async (job) => {
           }
         );
         console.error(
-          `[Reliance Queue] ❌ Failed permanently (POST-SUBMISSION) for ${job.formData.firstName} - NO RETRY (form already submitted)`
+          `[${queueName}] ❌ Failed permanently (POST-SUBMISSION) for ${job.formData.firstName} - NO RETRY (form already submitted)`
         );
         console.error(`   Error: ${errorLog.errorMessage}`);
         if (errorLog.screenshotUrl) {
@@ -286,7 +324,7 @@ const runRelianceJob = async (job) => {
           }
         );
         console.error(
-          `[Reliance Queue] ❌ Failed permanently (LOGIN FORM) for ${job.formData.firstName} after ${updatedJob.attempts} attempts`
+          `[${queueName}] ❌ Failed permanently (LOGIN FORM) for ${job.formData.firstName} after ${updatedJob.attempts} attempts`
         );
         console.error(`   Last error: ${errorLog.errorMessage}`);
         if (errorLog.screenshotUrl) {
@@ -304,7 +342,7 @@ const runRelianceJob = async (job) => {
           }
         );
         console.warn(
-          `[Reliance Queue] ⚠️ Failed (LOGIN FORM) for ${job.formData.firstName}, will retry (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
+          `[${queueName}] ⚠️ Failed (LOGIN FORM) for ${job.formData.firstName}, will retry (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
         );
         if (errorLog.screenshotUrl) {
           console.warn(`   Screenshot: ${errorLog.screenshotUrl}`);
@@ -312,8 +350,10 @@ const runRelianceJob = async (job) => {
       }
     }
   } catch (e) {
+    const companyName = job.formData.Companyname || "reliance";
+    const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
     console.error(
-      `[Reliance Queue] ❌ Error for ${job.formData.firstName}:`,
+      `[${queueName}] ❌ Error for ${job.formData.firstName}:`,
       e.message
     );
 
@@ -358,8 +398,10 @@ const runRelianceJob = async (job) => {
           },
         }
       );
+      const companyName = job.formData.Companyname || "reliance";
+      const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
       console.error(
-        `[Reliance Queue] ❌ Failed permanently (LOGIN FORM) after ${updatedJob.attempts} attempts`
+        `[${queueName}] ❌ Failed permanently (LOGIN FORM) after ${updatedJob.attempts} attempts`
       );
     } else {
       await jobQueueCollection.updateOne(
@@ -371,8 +413,10 @@ const runRelianceJob = async (job) => {
           },
         }
       );
+      const companyName = job.formData.Companyname || "reliance";
+      const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
       console.warn(
-        `[Reliance Queue] ⚠️ Will retry (LOGIN FORM error) (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
+        `[${queueName}] ⚠️ Will retry (LOGIN FORM error) (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
       );
     }
   }
@@ -433,87 +477,121 @@ db.once("open", async () => {
     },
   ]);
   changeStream.on("change", async (change) => {
-    // console.log(change);
-    let data = change?.fullDocument;
-    console.log("data: ******* ******* ******* ******* ******* ******* ", data);
-    // Get the Captcha document _id for reference
-    const captchaId = data?._id;
+    try {
+      console.log("\n" + "=".repeat(60));
+      console.log("  📥 MONGODB CHANGE STREAM EVENT");
+      console.log("=".repeat(60));
+      console.log("Operation Type:", change.operationType);
+      console.log("Document ID:", change.documentKey?._id);
+      
+      let data = change?.fullDocument;
+      
+      if (!data) {
+        console.error("❌ No fullDocument in change event!");
+        console.log("Change event:", JSON.stringify(change, null, 2));
+        return;
+      }
+      
+      console.log("📋 Received data for:", data?.fullName || data?.firstName || "Unknown");
+      console.log("Company:", data?.Companyname || "reliance (default)");
+      
+      // Get the Captcha document _id for reference
+      const captchaId = data?._id;
 
-    let formData = {
-      username: "rfcpolicy",
-      password: "Pass@123",
-      // Proposer details
-      proposerTitle: data?.proposerTitle || "Mr.",
-      firstName: data?.fullName || data?.firstName,
-      middleName: data?.middleName || "",
-      lastName: data?.surname || data?.lastName,
-      dob: data?.dateOfBirth?.$date
-        ? moment(data.dateOfBirth.$date).format("DD-MM-YYYY")
-        : data?.dateOfBirth
-        ? moment(data.dateOfBirth).format("DD-MM-YYYY")
-        : "",
-      gender: data?.gender,
-      // Father details
-      fatherTitle: data?.fatherTitle || "Mr.",
-      fatherName: data?.fatherName,
-      // Address details
-      flatNo: data?.flatDoorNo,
-      floorNo: data?.floorNo,
-      premisesName: data?.buildingName,
-      blockNo: data?.blockName || data?.blockNo,
-      road: data?.roadStreetLane || data?.road,
-      state: data?.state == "TAMILNADU" ? "30" : data?.state == "KARNATAKA" ? "26" : "30",
-      pinCode: data?.pincode,
-      // Contact details
-      mobile: data?.mobileNumber,
-      email: data?.email,
-      aadhar: data?.aadhar,
-      // Vehicle details
-      vehicleMake: data?.vehicleMake,
-      vehicleModel: data?.vehicleModel,
-      vehicleCC: data?.vehicleCC,
-      rtoCityLocation: data?.rtoCityLocation,
-      idv: data?.idv,
-      manufacturingYear: data?.manufacturingYear,
-      manufacturingMonth: data?.manufacturingMonth,
-      engineNumber: data?.engineNumber,
-      chassisNumber: data?.chassisNumber,
-      purchaseDate: data?.purchaseDate?.$date 
-        ? moment(data.purchaseDate.$date).format("DD-MM-YYYY")
-        : data?.purchaseDate
-        ? moment(data.purchaseDate).format("DD-MM-YYYY")
-        : "",
-      registrationDate: data?.registrationDate?.$date
-        ? moment(data.registrationDate.$date).format("DD-MM-YYYY")
-        : data?.registrationDate
-        ? moment(data.registrationDate).format("DD-MM-YYYY")
-        : "",
-      // Coverage options
-      zeroDepreciation: data?.zeroDepreciation,
-      tppdRestrict: data?.tppdRestrict,
-      paCover: data?.paCover,
-      // Financier details
-      hasFinancier: data?.hasFinancier,
-      financierType: data?.financierType,
-      financierName: data?.financierName,
-      financierAddress: data?.financierAddress,
-      // Registration address
-      isRegistrationAddressSame: data?.isRegistrationAddressSame,
-      // Discount mapping (normalize multiple possible fields from Mongo)
-      discount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
-      ODDiscount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount
-    };
-    console.log(
-      "formData: ******* ******* ******* ******* ******* ******* ",
-      formData
-    );
-    console.log(
-      `[MongoDB Watch] New customer data received: ${formData.firstName} (Captcha ID: ${captchaId})`
-    );
+      let formData = {
+        username: "rfcpolicy",
+        password: "Pass@123",
+        // Proposer details
+        proposerTitle: data?.proposerTitle || "Mr.",
+        firstName: data?.fullName || data?.firstName,
+        middleName: data?.middleName || "",
+        lastName: data?.surname || data?.lastName,
+        dob: data?.dateOfBirth?.$date
+          ? moment(data.dateOfBirth.$date).format("DD-MM-YYYY")
+          : data?.dateOfBirth
+          ? moment(data.dateOfBirth).format("DD-MM-YYYY")
+          : "",
+        gender: data?.gender,
+        // Father details
+        fatherTitle: data?.fatherTitle || "Mr.",
+        fatherName: data?.fatherName,
+        // Address details
+        flatNo: data?.flatDoorNo,
+        floorNo: data?.floorNo,
+        premisesName: data?.buildingName,
+        blockNo: data?.blockName || data?.blockNo,
+        road: data?.roadStreetLane || data?.road,
+        state: data?.state == "TAMILNADU" ? "30" : data?.state == "KARNATAKA" ? "26" : "30",
+        pinCode: data?.pincode,
+        // Contact details
+        mobile: data?.mobileNumber,
+        email: data?.email,
+        aadhar: data?.aadhar,
+        // Vehicle details
+        vehicleMake: data?.vehicleMake,
+        vehicleModel: data?.vehicleModel,
+        vehicleCC: data?.vehicleCC,
+        rtoCityLocation: data?.rtoCityLocation,
+        idv: data?.idv,
+        manufacturingYear: data?.manufacturingYear,
+        manufacturingMonth: data?.manufacturingMonth,
+        engineNumber: data?.engineNumber,
+        chassisNumber: data?.chassisNumber,
+        purchaseDate: data?.purchaseDate?.$date 
+          ? moment(data.purchaseDate.$date).format("DD-MM-YYYY")
+          : data?.purchaseDate
+          ? moment(data.purchaseDate).format("DD-MM-YYYY")
+          : "",
+        registrationDate: data?.registrationDate?.$date
+          ? moment(data.registrationDate.$date).format("DD-MM-YYYY")
+          : data?.registrationDate
+          ? moment(data.registrationDate).format("DD-MM-YYYY")
+          : "",
+        // Coverage options
+        zeroDepreciation: data?.zeroDepreciation,
+        tppdRestrict: data?.tppdRestrict,
+        paCover: data?.paCover,
+        // Financier details
+        hasFinancier: data?.hasFinancier,
+        financierType: data?.financierType,
+        financierName: data?.financierName,
+        financierAddress: data?.financierAddress,
+        // Registration address
+        isRegistrationAddressSame: data?.isRegistrationAddressSame,
+        // Discount mapping (normalize multiple possible fields from Mongo)
+        discount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
+        ODDiscount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
+        Companyname : data?.Companyname
+      };
+      
+      console.log(`✅ Form data prepared for: ${formData.firstName} ${formData.lastName}`);
+      console.log(`   Company: ${formData.Companyname || "reliance (default)"}`);
+      console.log(`   Captcha ID: ${captchaId}`);
 
-    // Add to queue with captchaId reference
-    await enqueueRelianceJob(formData, captchaId);
+      // Add to queue with captchaId reference
+      console.log("📤 Enqueueing job...");
+      const jobId = await enqueueRelianceJob(formData, captchaId);
+      console.log(`✅ Job enqueued successfully! Job ID: ${jobId}`);
+      console.log("=".repeat(60) + "\n");
+      
+    } catch (error) {
+      console.error("\n❌ ERROR in MongoDB change stream handler:");
+      console.error("Error:", error.message);
+      console.error("Stack:", error.stack);
+      console.error("Change event:", JSON.stringify(change, null, 2));
+      console.log("=".repeat(60) + "\n");
+    }
   });
+  
+  // Handle change stream errors
+  changeStream.on("error", (error) => {
+    console.error("\n❌ MONGODB CHANGE STREAM ERROR:");
+    console.error("Error:", error.message);
+    console.error("Stack:", error.stack);
+    console.log("=".repeat(60) + "\n");
+  });
+  
+  console.log("✅ MongoDB change stream initialized and watching 'onlinePolicy' collection");
 });
 
 // Setup Express app for API routes
@@ -1020,7 +1098,7 @@ async function main() {
     console.log("Server started on http://localhost:8800");
 
     // ============================================
-    // INITIALIZE MASTER SESSION
+    // INITIALIZE MASTER SESSIONS
     // ============================================
     try {
       console.log("\n" + "=".repeat(60));
@@ -1030,11 +1108,22 @@ async function main() {
       await initializeMasterSession();
 
       console.log("\n" + "=".repeat(60));
+      console.log("  🚀 INITIALIZING NATIONAL AUTOMATION");
+      console.log("=".repeat(60) + "\n");
+
+      await initializeNationalMasterSession();
+
+      console.log("\n" + "=".repeat(60));
       console.log("  ✅ READY TO PROCESS JOBS");
       console.log("=".repeat(60));
       console.log(
-        "📊 Session Status:",
+        "📊 Reliance Session Status:",
         JSON.stringify(getSessionStatus(), null, 2)
+      );
+      const { getNationalSessionStatus } = require("./nationalSessionManager");
+      console.log(
+        "📊 National Session Status:",
+        JSON.stringify(getNationalSessionStatus(), null, 2)
       );
       console.log("=".repeat(60) + "\n");
     } catch (e) {
