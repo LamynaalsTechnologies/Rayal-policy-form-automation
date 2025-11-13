@@ -11,7 +11,7 @@ async function getDriver() {
   if (singletonDriver) return singletonDriver;
 
   const options = new chrome.Options();
-  options.addArguments("--headless=new");
+  // options.addArguments("--headless=new");
   options.addArguments("--start-maximized");
   const userDataDir = path.join(__dirname, "chrome-profile");
   try {
@@ -348,7 +348,7 @@ async function createFreshDriver() {
   console.log("[driver] Creating fresh driver instance");
 
   const options = new chrome.Options();
-  options.addArguments("--headless=new");
+  // options.addArguments("--headless=new");
   options.addArguments("--start-maximized");
 
   // Use the same profile directory but add additional options to handle conflicts
@@ -476,7 +476,7 @@ async function createFreshDriverFromBaseProfile(baseProfileDir) {
   }
 
   const options = new chrome.Options();
-  options.addArguments("--headless=new");
+  // options.addArguments("--headless=new");
   options.addArguments("--start-maximized");
   options.addArguments(`--user-data-dir=${tempProfileDir}`);
   options.addArguments("--no-first-run");
@@ -622,7 +622,7 @@ async function createChromeDriver(profileName = "InsurancePortalProfile") {
 
   // Set Chrome options
   const options = new chrome.Options()
-    .addArguments("--headless=new")
+    // .addArguments("--headless=new")
     .addArguments(`--user-data-dir=${profilePath}`) // ← FIXED: Use unique profilePath!
     .addArguments("--start-maximized")
     .addArguments("--disable-blink-features=AutomationControlled");
