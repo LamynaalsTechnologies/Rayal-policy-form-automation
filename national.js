@@ -1,11 +1,10 @@
 const { By, until, Key } = require("selenium-webdriver");
-const { createFreshDriverFromBaseProfile } = require("./browser");
 const {
-  createJobBrowser,
-  cleanupJobBrowser,
-  reLoginIfNeeded,
+  createNationalJobBrowser,
+  cleanupNationalJobBrowser,
+  reLoginNationalIfNeeded,
   recoveryManager,
-} = require("./sessionManager");
+} = require("./nationalSessionManager");
 const fs = require("fs");
 const path = require("path");
 const { extractCaptchaText } = require("./Captcha");
@@ -106,6 +105,27 @@ async function waitForLoaderToDisappear(
   }
 }
 
+async function waitForPortalLoaderToDisappear(driver, timeout = 5000, pollInterval = 400) {
+  const locator = By.css("div.loading-text");
+  try {
+    const loaders = await driver.findElements(locator);
+    for (const loader of loaders) {
+      try {
+        if (await loader.isDisplayed()) {
+          console.log("Portal loader visible but skipping wait as requested.");
+          return;
+        }
+      } catch (error) {
+        if (error.name !== "StaleElementReferenceError") {
+          throw error;
+        }
+      }
+    }
+  } catch (lookupError) {
+    console.log("Portal loader lookup error (ignored):", lookupError.message);
+  }
+}
+
 async function safeClick(driver, locator, timeout = 15000) {
   const el = await driver.wait(until.elementLocated(locator), timeout);
   await driver.wait(until.elementIsVisible(el), timeout);
@@ -117,12 +137,49 @@ async function safeClick(driver, locator, timeout = 15000) {
   }
 }
 
-async function safeType(driver, locator, text, timeout = 15000) {
+async function safeType(driver, locator, text, timeout = 5000) {
   const el = await driver.wait(until.elementLocated(locator), timeout);
   await driver.wait(until.elementIsVisible(el), timeout);
   await driver.wait(until.elementIsEnabled(el), timeout);
   await el.clear();
   await el.sendKeys(text);
+}
+
+async function scrollAndClick(driver, locator, timeout = 5000) {
+  const el = await driver.wait(until.elementLocated(locator), timeout);
+  await driver.wait(until.elementIsVisible(el), timeout);
+  const target = await driver.executeScript(`
+    const element = arguments[0];
+    if (!element) return null;
+    const tag = (element.tagName || '').toLowerCase();
+    if (['button', 'a'].includes(tag)) return element;
+    const role = element.getAttribute ? element.getAttribute('role') : null;
+    if (role && ['button', 'link'].includes(role)) return element;
+    const buttonParent = element.closest ? element.closest('button, a, [role="button"], [role="link"]') : null;
+    return buttonParent || element;
+  `, el);
+  await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", target);
+  await driver.sleep(150);
+  try {
+    await target.click();
+  } catch (clickError) {
+    await driver.executeScript("arguments[0].click();", target);
+  }
+  return target;
+}
+
+async function scrollAndClickElement(driver, element) {
+  if (!element) {
+    throw new Error("scrollAndClickElement received null element");
+  }
+  await driver.wait(until.elementIsVisible(element), 10000);
+  await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", element);
+  await driver.sleep(150);
+  try {
+    await element.click();
+  } catch (clickError) {
+    await driver.executeScript("arguments[0].click();", element);
+  }
 }
 
 async function safeSelectOption(driver, dropdownLocator, optionText, timeout = 15000) {
@@ -148,10 +205,26 @@ async function safeSelectOption(driver, dropdownLocator, optionText, timeout = 1
         console.log(`  Option ${i}: "${optText}"`);
       }
       
-      // Try clicking the first option if our specific one isn't found
-      if (allOptions.length > 0) {
-        console.log("Clicking first available option...");
-        await allOptions[0].click();
+      // Try clicking the specific option if it exists in the listed options
+      const matchingOption = await driver.executeAsyncScript(`
+        const options = arguments[0];
+        const desired = arguments[1].trim().toLowerCase();
+        const done = arguments[2];
+        for (const opt of options) {
+          const text = (opt.textContent || opt.innerText || '').trim().toLowerCase();
+          if (text === desired) {
+            done(opt);
+            return;
+          }
+        }
+        done(null);
+      `, allOptions, optionText);
+      
+      if (matchingOption) {
+        await driver.executeScript("arguments[0].click();", matchingOption);
+        console.log(`Clicked matching option "${optionText}" from fallback list.`);
+      } else {
+        console.log(`Option "${optionText}" not present in fallback list; leaving selection unchanged.`);
       }
     } catch (listError) {
       console.log("Could not list options:", listError.message);
@@ -172,192 +245,416 @@ async function safeSelectOption(driver, dropdownLocator, optionText, timeout = 1
   }
 }
 
-async function fillNationalForm(formData) {
+async function enableSlideToggle(
+  driver,
+  toggleLocator,
+  toggleDescription = "slide toggle"
+) {
+  const locatorList = Array.isArray(toggleLocator) ? toggleLocator : [toggleLocator];
+  let locatedElement = null;
+  let lastError = null;
+  
+  for (const locator of locatorList) {
+    try {
+      locatedElement = await driver.wait(until.elementLocated(locator), 5000);
+      if (locatedElement) {
+        console.log(`${toggleDescription} located using ${locator.toString()}`);
+        break;
+      }
+    } catch (locError) {
+      lastError = locError;
+    }
+  }
+  
+  if (!locatedElement) {
+    throw lastError || new Error(`${toggleDescription} element not found`);
+  }
+  
+  const slideToggle = await driver.executeScript(`
+    const el = arguments[0];
+    if (!el) return null;
+    if (el.tagName && el.tagName.toLowerCase() === 'mat-mdc-slide-toggle') return el;
+    const closestToggle = el.closest ? el.closest('mat-mdc-slide-toggle') : null;
+    return closestToggle || el;
+  `, locatedElement);
+  
+  if (!slideToggle) {
+    throw new Error(`${toggleDescription} root slide-toggle element could not be resolved.`);
+  }
+  
+  await driver.wait(until.elementIsVisible(slideToggle), 10000);
+  await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", slideToggle);
+  await driver.sleep(200);
+  
+  const isOn = await driver.executeScript(
+    "const toggle = arguments[0]; return toggle.getAttribute && toggle.getAttribute('aria-checked') === 'true';",
+    slideToggle
+  );
+  
+  if (isOn) {
+    console.log(`${toggleDescription} already ON.`);
+    return slideToggle;
+  }
+  
+  await driver.executeScript(`
+    const toggle = arguments[0];
+    const handleButton = toggle.querySelector('button.mdc-switch__handle');
+    if (handleButton) {
+      handleButton.click();
+      return;
+    }
+    const nativeControl = toggle.querySelector('input.mdc-switch__native-control');
+    if (nativeControl) {
+      nativeControl.click();
+      return;
+    }
+    const icons = toggle.querySelector('.mdc-switch__icons');
+    if (icons) {
+      icons.click();
+      return;
+    }
+    toggle.click();
+  `, slideToggle);
+  
+  await driver.sleep(400);
+  return slideToggle;
+}
+
+async function openFinancierSection(driver) {
+  try {
+    console.log("Opening Financier Interest Applicable section if not visible...");
+    const financierTab = By.xpath("//span[contains(normalize-space(.), 'Financier Interest Applicable')]");
+    const tabElement = await driver.wait(until.elementLocated(financierTab), 5000);
+    const tabParent = await driver.executeScript("return arguments[0].closest('mat-expansion-panel') || arguments[0];", tabElement);
+    
+    if (tabParent) {
+      const isExpanded = await driver.executeScript(`
+        const panel = arguments[0];
+        if (panel.hasAttribute && panel.hasAttribute('aria-expanded')) {
+          return panel.getAttribute('aria-expanded') === 'true';
+        }
+        if (panel.classList && panel.classList.contains('mat-expanded')) {
+          return true;
+        }
+        return false;
+      `, tabParent);
+      
+      if (!isExpanded) {
+        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", tabElement);
+        await driver.sleep(200);
+        await driver.executeScript("arguments[0].click();", tabElement);
+        await driver.sleep(800);
+      }
+    } else {
+      await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", tabElement);
+      await driver.sleep(200);
+      await driver.executeScript("arguments[0].click();", tabElement);
+      await driver.sleep(800);
+    }
+  } catch (e) {
+    console.log("Financier section open helper failed (may already be visible):", e.message);
+  }
+}
+
+async function openVehicleInformationSection(driver) {
+  try {
+    console.log("Ensuring Vehicle Information section is expanded...");
+    const vehicleHeader = By.xpath("//mat-expansion-panel-header[.//h4[contains(., 'Vehicle Information')]]");
+    const panelHeader = await driver.wait(until.elementLocated(vehicleHeader), 5000);
+    await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", panelHeader);
+    await driver.sleep(200);
+    const isExpanded = await driver.executeScript(`
+      const header = arguments[0];
+      const panel = header.closest ? header.closest('mat-expansion-panel') : null;
+      if (!panel) return true;
+      if (panel.hasAttribute && panel.hasAttribute('aria-expanded')) {
+        return panel.getAttribute('aria-expanded') === 'true';
+      }
+      return panel.classList && panel.classList.contains('mat-expanded');
+    `, panelHeader);
+    if (!isExpanded) {
+      console.log("Vehicle Information panel collapsed, expanding...");
+      await driver.executeScript("arguments[0].click();", panelHeader);
+      await driver.sleep(600);
+    }
+  } catch (e) {
+    console.log("Vehicle Information expansion check failed:", e.message);
+  }
+}
+
+/**
+ * Captures error screenshot and uploads to S3 for National form errors
+ */
+async function captureErrorScreenshot(
+  driver,
+  error,
+  data,
+  errorStage = "unknown"
+) {
+  let screenshotUrl = null;
+  let screenshotKey = null;
+  let pageSourceUrl = null;
+  let pageSourceKey = null;
+
+  try {
+    if (!driver) {
+      console.log("⚠️  [National] No driver available for screenshot");
+      return { screenshotUrl, screenshotKey, pageSourceUrl, pageSourceKey };
+    }
+
+    const screenshot = await driver.takeScreenshot();
+    const jobIdentifier = data._jobIdentifier || `national_${Date.now()}`;
+    const attemptNumber = data._attemptNumber || 1;
+
+    // Generate S3 key and upload screenshot
+    screenshotKey = generateScreenshotKey(
+      jobIdentifier,
+      attemptNumber,
+      errorStage,
+      "national"
+    );
+
+    screenshotUrl = await uploadScreenshotToS3(screenshot, screenshotKey);
+
+    console.log(`📸 [National] Error screenshot captured: ${screenshotKey}`);
+  } catch (screenshotError) {
+    console.error("❌ [National] Failed to capture error screenshot:", screenshotError.message);
+  }
+
+  return { screenshotUrl, screenshotKey, pageSourceUrl, pageSourceKey };
+}
+
+async function fillNationalForm(
+  data = { username: "9999839907", password: "Rayal$2025" }
+) {
+  const jobId = data._jobIdentifier || `national_${Date.now()}`;
+  let jobBrowser = null;
   let driver = null;
-  let jobId = null;
+  let postSubmissionFailed = false;
+  let postSubmissionError = null;
+  let postCalculationFailed = false;
+  let postCalculationError = null;
   
   try {
-    console.log("Starting National Insurance form automation...");
+    console.log(`\n🚀 [${jobId}] Starting National Insurance job...`);
     
-    // Create fresh driver
-    const driverResult = await createFreshDriverFromBaseProfile();
-    driver = driverResult.driver;
-    jobId = `national_${Date.now()}`;
+    // === STEP 0: Create fresh browser ===
+    jobBrowser = await createNationalJobBrowser(jobId);
+    driver = jobBrowser.driver;
+
+    console.log(`✅ [${jobId}] National browser ready!`);
     
-    // Navigate to NIC portal
-    console.log("Navigating to NIC portal...");
-    await driver.get("https://nicportal.nic.co.in/nicportal/signin/login");
-    await driver.sleep(3000);
+    // === STEP 1: Navigate to login page and login ===
+    // National uses simple approach: every job logs in fresh
+    console.log(`🌐 [${jobId}] Navigating to National login page...`);
     
-    // Wait for page to load
-    await waitForLoaderToDisappear(driver);
-    
-    // Debug: Check what elements are available
     try {
-      const pageTitle = await driver.getTitle();
-      console.log("Page title:", pageTitle);
+      console.log(`⏳ [${jobId}] Loading URL: R`);
+      await driver.get("https://nicportal.nic.co.in/nicportal/signin/login");
+      console.log(`✅ [${jobId}] Navigation successful!`);
+      
+      await driver.sleep(3000);
+      await waitForLoaderToDisappear(driver);
+      await waitForPortalLoaderToDisappear(driver);
+      await waitForPortalLoaderToDisappear(driver);
       
       const currentUrl = await driver.getCurrentUrl();
-      console.log("Current URL:", currentUrl);
+      console.log(`🌐 [${jobId}] Current URL after navigation: ${currentUrl}`);
       
-      // Check for dropdown elements
-      const dropdowns = await driver.findElements(By.css("mat-select"));
-      console.log(`Found ${dropdowns.length} mat-select dropdowns`);
-      
-      // Check for input fields
-      const inputs = await driver.findElements(By.css("input"));
-      console.log(`Found ${inputs.length} input fields`);
-    } catch (debugError) {
-      console.log("Debug info failed:", debugError.message);
+      if (!currentUrl.includes("nicportal.nic.co.in")) {
+        console.warn(`⚠️  [${jobId}] WARNING: Not on National portal! Current URL: ${currentUrl}`);
+      }
+    } catch (navError) {
+      console.error(`❌ [${jobId}] Navigation failed:`, navError.message);
+      throw new Error(`Failed to navigate to National portal: ${navError.message}`);
     }
     
-    // Handle login form
-    console.log("Filling login form...");
+    // === STEP 2: Perform login ===
+    console.log(`🔐 [${jobId}] Starting login process...`);
     
-    // Select INTERMEDIARY option
     try {
-      // First, click on the specific dropdown to open it
-      // Try multiple selectors for the dropdown
-      let dropdown;
-      try {
-        dropdown = By.name("reg_dropdown_iType_02");
-        await driver.wait(until.elementLocated(dropdown), 5000);
-      } catch (e) {
-        console.log("Name selector failed, trying ID selector...");
+      // Handle login form
+      console.log(`[${jobId}] Filling login form...`);
+        
+        // Select INTERMEDIARY option
         try {
-          dropdown = By.id("mat-select-4");
-          await driver.wait(until.elementLocated(dropdown), 5000);
-        } catch (e2) {
-          console.log("ID selector failed, trying CSS selector...");
-          dropdown = By.css("mat-select[role='combobox']");
-          await driver.wait(until.elementLocated(dropdown), 5000);
+          // First, click on the specific dropdown to open it
+          // Try multiple selectors for the dropdown
+          let dropdown;
+          try {
+            dropdown = By.name("reg_dropdown_iType_02");
+            await driver.wait(until.elementLocated(dropdown), 5000);
+          } catch (e) {
+            console.log("Name selector failed, trying ID selector...");
+            try {
+              dropdown = By.id("mat-select-4");
+              await driver.wait(until.elementLocated(dropdown), 5000);
+            } catch (e2) {
+              console.log("ID selector failed, trying CSS selector...");
+              dropdown = By.css("mat-select[role='combobox']");
+              await driver.wait(until.elementLocated(dropdown), 5000);
+            }
+          }
+          
+          await safeClick(driver, dropdown, 10000);
+          await driver.sleep(2000);
+          
+          // Check if dropdown is open and look for INTERMEDIARY option
+          console.log("Looking for INTERMEDIARY option...");
+          
+          // Debug: List all available options
+          try {
+            const allOptions = await driver.findElements(By.css("mat-option"));
+            console.log(`Found ${allOptions.length} options in dropdown`);
+            for (let i = 0; i < allOptions.length; i++) {
+              const optionText = await allOptions[i].getText();
+              console.log(`Option ${i}: "${optionText}"`);
+            }
+          } catch (debugError) {
+            console.log("Could not list options:", debugError.message);
+          }
+          
+          const intermediaryOption = By.xpath("//mat-option[contains(., 'INTERMEDIARY')]");
+          
+          // Wait for the option to be available
+          await driver.wait(until.elementLocated(intermediaryOption), 10000);
+          await safeClick(driver, intermediaryOption, 10000);
+          console.log("Selected INTERMEDIARY option");
+          
+          // Wait a bit for the selection to take effect
+          await driver.sleep(1000);
+        } catch (error) {
+          console.log("INTERMEDIARY option not found or already selected:", error.message);
+          
+          // Try alternative approach - look for any option that contains "INTERMEDIARY"
+          try {
+            console.log("Trying alternative selector...");
+            const altOption = By.xpath("//mat-option[contains(text(), 'INTERMEDIARY')]");
+            await safeClick(driver, altOption, 5000);
+            console.log("Selected INTERMEDIARY option with alternative selector");
+          } catch (altError) {
+            console.log("Alternative selector also failed:", altError.message);
+          }
         }
-      }
-      
-      await safeClick(driver, dropdown, 10000);
-      await driver.sleep(2000);
-      
-      // Check if dropdown is open and look for INTERMEDIARY option
-      console.log("Looking for INTERMEDIARY option...");
-      
-      // Debug: List all available options
-      try {
-        const allOptions = await driver.findElements(By.css("mat-option"));
-        console.log(`Found ${allOptions.length} options in dropdown`);
-        for (let i = 0; i < allOptions.length; i++) {
-          const optionText = await allOptions[i].getText();
-          console.log(`Option ${i}: "${optionText}"`);
+        
+        // Select second dropdown option (after INTERMEDIARY)
+        try {
+          console.log("Selecting second dropdown option...");
+          
+          // Wait a bit for the first selection to take effect
+          await driver.sleep(2000);
+          
+          // Try to find and click the dropdown again
+          let secondDropdown;
+          try {
+            secondDropdown = By.name("reg_dropdown_iType_02");
+            await driver.wait(until.elementLocated(secondDropdown), 5000);
+          } catch (e) {
+            console.log("Name selector failed for second dropdown, trying ID selector...");
+            try {
+              secondDropdown = By.id("mat-select-4");
+              await driver.wait(until.elementLocated(secondDropdown), 5000);
+            } catch (e2) {
+              console.log("ID selector failed for second dropdown, trying CSS selector...");
+              secondDropdown = By.css("mat-select[role='combobox']");
+              await driver.wait(until.elementLocated(secondDropdown), 5000);
+            }
+          }
+          
+          await safeClick(driver, secondDropdown, 10000);
+          await driver.sleep(2000);
+          
+          // Debug: List all available options in the second dropdown
+          try {
+            const allOptions = await driver.findElements(By.css("mat-option"));
+            console.log(`Found ${allOptions.length} options in second dropdown`);
+            for (let i = 0; i < allOptions.length; i++) {
+              const optionText = await allOptions[i].getText();
+              console.log(`Second dropdown option ${i}: "${optionText}"`);
+            }
+          } catch (debugError) {
+            console.log("Could not list second dropdown options:", debugError.message);
+          }
+          
+          // Select BROKER POSP option specifically
+          try {
+            const brokerPospOption = By.xpath("//mat-option[contains(., 'BROKER POSP')]");
+            await safeClick(driver, brokerPospOption, 10000);
+            console.log("Selected BROKER POSP option");
+          } catch (brokerError) {
+            console.log("BROKER POSP option not found, trying alternative selector...");
+            try {
+              const altBrokerOption = By.xpath("//mat-option[contains(text(), 'BROKER POSP')]");
+              await safeClick(driver, altBrokerOption, 10000);
+              console.log("Selected BROKER POSP option with alternative selector");
+            } catch (altBrokerError) {
+              console.log("Alternative BROKER POSP selector also failed:", altBrokerError.message);
+            }
+          }
+          
+          // Wait for selection to take effect
+          await driver.sleep(1000);
+          
+        } catch (error) {
+          console.log("Second dropdown selection failed:", error.message);
         }
-      } catch (debugError) {
-        console.log("Could not list options:", debugError.message);
-      }
-      
-      const intermediaryOption = By.xpath("//mat-option[contains(., 'INTERMEDIARY')]");
-      
-      // Wait for the option to be available
-      await driver.wait(until.elementLocated(intermediaryOption), 10000);
-      await safeClick(driver, intermediaryOption, 10000);
-      console.log("Selected INTERMEDIARY option");
-      
-      // Wait a bit for the selection to take effect
-      await driver.sleep(1000);
-    } catch (error) {
-      console.log("INTERMEDIARY option not found or already selected:", error.message);
-      
-      // Try alternative approach - look for any option that contains "INTERMEDIARY"
-      try {
-        console.log("Trying alternative selector...");
-        const altOption = By.xpath("//mat-option[contains(text(), 'INTERMEDIARY')]");
-        await safeClick(driver, altOption, 5000);
-        console.log("Selected INTERMEDIARY option with alternative selector");
-      } catch (altError) {
-        console.log("Alternative selector also failed:", altError.message);
-      }
+        
+          // Fill username
+        console.log(`[${jobId}] Looking for username field...`);
+        const usernameField = By.name("log_txtfield_iUsername_01");
+        await safeType(driver, usernameField, data.username || "9999839907", 10000);
+        console.log(`[${jobId}] Filled username`);
+        
+        // Fill password
+        console.log(`[${jobId}] Looking for password field...`);
+        const passwordField = By.name("log_pwd_iPassword_01");
+        await safeType(driver, passwordField, data.password || "Rayal$2025", 10000);
+        console.log(`[${jobId}] Filled password`);
+        
+        // Click login button
+        console.log(`[${jobId}] Looking for login button...`);
+        const loginButton = By.name("log_btn_login_01");
+        
+        try {
+          const buttonElement = await driver.wait(until.elementLocated(loginButton), 10000);
+          console.log(`[${jobId}] Login button found`);
+          
+          await driver.wait(until.elementIsVisible(buttonElement), 10000);
+          console.log(`[${jobId}] Login button is visible`);
+          
+          await driver.wait(until.elementIsEnabled(buttonElement), 10000);
+          console.log(`[${jobId}] Login button is enabled`);
+          
+          try {
+            await buttonElement.click();
+            console.log(`✅ [${jobId}] Clicked login button (regular click)`);
+          } catch (clickError) {
+            console.log(`[${jobId}] Regular click failed, trying JavaScript click...`);
+            await driver.executeScript("arguments[0].click();", buttonElement);
+            console.log(`✅ [${jobId}] Clicked login button (JavaScript click)`);
+          }
+        } catch (buttonError) {
+          console.error(`❌ [${jobId}] Failed to click login button:`, buttonError.message);
+          throw new Error(`Failed to click login button: ${buttonError.message}`);
+        }
+        
+        console.log(`[${jobId}] Waiting for login to complete...`);
+        await driver.sleep(5000);
+        await waitForPortalLoaderToDisappear(driver);
+        
+        // Verify login was successful
+        const loginCheckUrl = await driver.getCurrentUrl();
+        const loginCheckElements = await driver.findElements(By.name("log_txtfield_iUsername_01"));
+        if (loginCheckElements.length > 0 || loginCheckUrl.includes("/signin/login")) {
+          throw new Error("National login failed - still on login page after login attempt");
+        }
+        console.log(`✅ [${jobId}] Login successful!`);
+    } catch (loginError) {
+      console.error(`❌ [${jobId}] Login failed:`, loginError.message);
+      throw loginError;
     }
     
-    // Select second dropdown option (after INTERMEDIARY)
-    try {
-      console.log("Selecting second dropdown option...");
-      
-      // Wait a bit for the first selection to take effect
-      await driver.sleep(2000);
-      
-      // Try to find and click the dropdown again
-      let secondDropdown;
-      try {
-        secondDropdown = By.name("reg_dropdown_iType_02");
-        await driver.wait(until.elementLocated(secondDropdown), 5000);
-      } catch (e) {
-        console.log("Name selector failed for second dropdown, trying ID selector...");
-        try {
-          secondDropdown = By.id("mat-select-4");
-          await driver.wait(until.elementLocated(secondDropdown), 5000);
-        } catch (e2) {
-          console.log("ID selector failed for second dropdown, trying CSS selector...");
-          secondDropdown = By.css("mat-select[role='combobox']");
-          await driver.wait(until.elementLocated(secondDropdown), 5000);
-        }
-      }
-      
-      await safeClick(driver, secondDropdown, 10000);
-      await driver.sleep(2000);
-      
-      // Debug: List all available options in the second dropdown
-      try {
-        const allOptions = await driver.findElements(By.css("mat-option"));
-        console.log(`Found ${allOptions.length} options in second dropdown`);
-        for (let i = 0; i < allOptions.length; i++) {
-          const optionText = await allOptions[i].getText();
-          console.log(`Second dropdown option ${i}: "${optionText}"`);
-        }
-      } catch (debugError) {
-        console.log("Could not list second dropdown options:", debugError.message);
-      }
-      
-      // Select BROKER POSP option specifically
-      try {
-        const brokerPospOption = By.xpath("//mat-option[contains(., 'BROKER POSP')]");
-        await safeClick(driver, brokerPospOption, 10000);
-        console.log("Selected BROKER POSP option");
-      } catch (brokerError) {
-        console.log("BROKER POSP option not found, trying alternative selector...");
-        try {
-          const altBrokerOption = By.xpath("//mat-option[contains(text(), 'BROKER POSP')]");
-          await safeClick(driver, altBrokerOption, 10000);
-          console.log("Selected BROKER POSP option with alternative selector");
-        } catch (altBrokerError) {
-          console.log("Alternative BROKER POSP selector also failed:", altBrokerError.message);
-        }
-      }
-      
-      // Wait for selection to take effect
-      await driver.sleep(1000);
-      
-    } catch (error) {
-      console.log("Second dropdown selection failed:", error.message);
-    }
-    
-    // Fill username
-    console.log("Looking for username field...");
-    const usernameField = By.name("log_txtfield_iUsername_01");
-    await safeType(driver, usernameField, formData.username || "9999839907", 10000);
-    console.log("Filled username");
-    
-    // Fill password
-    console.log("Looking for password field...");
-    const passwordField = By.name("log_pwd_iPassword_01");
-    await safeType(driver, passwordField, formData.password || "Rayal$2025", 10000);
-    console.log("Filled password");
-    
-    // Click login button
-    const loginButton = By.name("log_btn_login_01");
-    await safeClick(driver, loginButton, 10000);
-    console.log("Clicked login button");
-    
-    // Wait for login to complete
-    await driver.sleep(5000);
-    
-    // Debug: Check what's on the page after login
+    // Debug: Check what's on the page after login/session check
     try {
       const pageTitle = await driver.getTitle();
       console.log("Page title after login:", pageTitle);
@@ -658,7 +955,7 @@ async function fillNationalForm(formData) {
     
     // Type the RTO location
     await rtoInput.clear();
-    await rtoInput.sendKeys(formData.rtoLocation || "Mumbai");
+    await rtoInput.sendKeys(data.rtoLocation || "Mumbai");
     await driver.sleep(2000); // Wait for autocomplete options to appear
     
     // Click on the first autocomplete option
@@ -679,7 +976,7 @@ async function fillNationalForm(formData) {
     await driver.wait(until.elementIsEnabled(makeInput), 15000);
     
     await makeInput.clear();
-    await makeInput.sendKeys(formData.make || "Honda");
+    await makeInput.sendKeys(data.make || "Honda");
     await driver.sleep(2000); // Wait for autocomplete options to appear
     
     // Click on the first autocomplete option
@@ -721,7 +1018,7 @@ async function fillNationalForm(formData) {
     await driver.wait(until.elementIsEnabled(variantInput), 15000);
     
     await variantInput.clear();
-    await variantInput.sendKeys(formData.variant || "Standard");
+    await variantInput.sendKeys(data.variant || "Standard");
     await driver.sleep(2000); // Wait for autocomplete options to appear
     
     // Click on the first autocomplete option
@@ -739,7 +1036,7 @@ async function fillNationalForm(formData) {
     console.log("Filling percentage...");
     try {
       const percentageField = By.name("mcy_text_percentage_01");
-      await safeType(driver, percentageField, "80", 15000);
+      await safeType(driver, percentageField, "75", 15000);
       await driver.sleep(500);
     } catch (e) {
       console.log("Could not fill percentage field:", e.message);
@@ -796,6 +1093,7 @@ async function fillNationalForm(formData) {
       
       console.log("Successfully clicked Generate Quick Quote button");
       await driver.sleep(3000); // Wait for quote to generate
+      await waitForPortalLoaderToDisappear(driver);
     } catch (e) {
       console.log("Generate Quick Quote button not found, trying alternative:", e.message);
       
@@ -806,6 +1104,7 @@ async function fillNationalForm(formData) {
         await driver.executeScript("arguments[0].click();", generateBtn);
         console.log("Clicked Generate Quick Quote button (alternative)");
         await driver.sleep(3000);
+        await waitForPortalLoaderToDisappear(driver);
       } catch (e2) {
         console.log("All strategies failed for Generate Quick Quote button:", e2.message);
       }
@@ -855,7 +1154,7 @@ async function fillNationalForm(formData) {
       await driver.sleep(2000);
       
       // Find the radio input element by ID (most reliable)
-      const panNotAvailableInput = By.id("mat-radio-21-input");
+      const panNotAvailableInput = By.id("mat-radio-22-input");
       const inputElement = await driver.wait(until.elementLocated(panNotAvailableInput), 10000);
       
       // Check if already selected
@@ -1006,8 +1305,9 @@ async function fillNationalForm(formData) {
       // Clear any existing text
       await titleInput.clear();
       
-      // Type the value
-      await titleInput.sendKeys("Mr");
+      // Type the value - default to "Mr" if not provided
+      const title = ( "Mr").trim() || "Mr";
+      await titleInput.sendKeys(title);
       await driver.sleep(1500); // Wait for autocomplete to appear
       
       // Try to select from autocomplete - wait for options to appear
@@ -1034,18 +1334,57 @@ async function fillNationalForm(formData) {
     
     // Fill First Name
     try {
-      console.log("Filling First Name...");
+      console.log(`[${jobId}] Filling First Name...`);
       const firstNameField = By.name("newcust_textfield_firstName_01");
-      await safeType(driver, firstNameField, "Test", 10000);
+      
+      // Get firstName - handle cases where it might be fullName or need splitting
+      let firstName = data.firstName || data.fullName;
+      
+      // Validate and process firstName
+      if (!firstName || typeof firstName !== 'string') {
+        console.log(`[${jobId}] No firstName in data, using default "Test"`);
+        firstName = "Test";
+      } else {
+        // If firstName contains spaces, it might be a full name - take first part
+        if (firstName.includes(" ")) {
+          firstName = firstName.trim().split(" ")[0];
+          console.log(`[${jobId}] Extracted first name from full name: "${firstName}"`);
+        }
+        
+        // Ensure we have a valid value after processing
+        firstName = firstName.trim();
+        if (!firstName) {
+          console.log(`[${jobId}] firstName is empty after processing, using default "Test"`);
+          firstName = "Test";
+        }
+      }
+      
+      console.log(`[${jobId}] Using First Name: "${firstName}"`);
+      
+      // Wait for field to be available
+      const firstNameInput = await driver.wait(until.elementLocated(firstNameField), 10000);
+      await driver.wait(until.elementIsVisible(firstNameInput), 10000);
+      await driver.wait(until.elementIsEnabled(firstNameInput), 10000);
+      
+      // Clear and type
+      await firstNameInput.clear();
+      await firstNameInput.sendKeys(firstName);
+      
+      console.log(`[${jobId}] ✅ Successfully filled First Name: "${firstName}"`);
     } catch (e) {
-      console.log("Could not fill First Name:", e.message);
+      console.error(`[${jobId}] ❌ Could not fill First Name:`, e.message);
+      console.error(`[${jobId}] Error stack:`, e.stack);
+      // Don't throw - continue with form filling
     }
     
     // Fill Middle Name (optional)
     try {
       console.log("Filling Middle Name...");
       const middleNameField = By.name("newcust_textfield_middleName_01");
-      await safeType(driver, middleNameField, "Kumar", 10000);
+      const middleName = data.middleName || "";
+      if (middleName) {
+        await safeType(driver, middleNameField, middleName, 10000);
+      }
     } catch (e) {
       console.log("Could not fill Middle Name:", e.message);
     }
@@ -1054,7 +1393,8 @@ async function fillNationalForm(formData) {
     try {
       console.log("Filling Last Name...");
       const lastNameField = By.name("newcust_textfield_lastName_01");
-      await safeType(driver, lastNameField, "Customer", 10000);
+      const lastName = data.lastName || data.surname || "Customer";
+      await safeType(driver, lastNameField, lastName, 10000);
     } catch (e) {
       console.log("Could not fill Last Name:", e.message);
     }
@@ -1063,7 +1403,8 @@ async function fillNationalForm(formData) {
     try {
       console.log("Selecting Gender...");
       const genderDropdown = By.name("newcust_dropdown_gender_01");
-      await safeSelectOption(driver, genderDropdown, "Male", 10000);
+      const gender = data.gender || "Male";
+      await safeSelectOption(driver, genderDropdown, gender, 10000);
     } catch (e) {
       console.log("Could not select Gender:", e.message);
     }
@@ -1079,8 +1420,9 @@ async function fillNationalForm(formData) {
       await occupationInput.clear();
       
       // Type the value
+      const occupation = data.occupation || "Engineer";
       await occupationInput.click();
-      await occupationInput.sendKeys("Engineer");
+      await occupationInput.sendKeys(occupation);
       await driver.sleep(1500); // Wait for autocomplete to appear
       
       // Try to select from autocomplete - wait for options to appear
@@ -1110,7 +1452,22 @@ async function fillNationalForm(formData) {
       console.log("Filling Date of Birth...");
       const dobField = By.name("newcust_datepicker_dob_01");
       const dobInput = await driver.wait(until.elementLocated(dobField), 10000);
-      await dobInput.sendKeys("01/01/1990");
+      // Format: DD/MM/YYYY or MM/DD/YYYY - try to parse from data
+      let dob = "01/01/1990"; // default
+      if (data.dob) {
+        // If dob is in DD-MM-YYYY format, convert to DD/MM/YYYY
+        dob = data.dob.replace(/-/g, "/");
+      } else if (data.dateOfBirth) {
+        // Try to format dateOfBirth
+        const date = new Date(data.dateOfBirth);
+        if (!isNaN(date.getTime())) {
+          const day = String(date.getDate()).padStart(2, '0');
+          const month = String(date.getMonth() + 1).padStart(2, '0');
+          const year = date.getFullYear();
+          dob = `${day}/${month}/${year}`;
+        }
+      }
+      await dobInput.sendKeys(dob);
     } catch (e) {
       console.log("Could not fill Date of Birth:", e.message);
     }
@@ -1167,7 +1524,8 @@ async function fillNationalForm(formData) {
     try {
       console.log("Filling House Number...");
       const houseNoField = By.name("newcust_textfield_building_01");
-      await safeType(driver, houseNoField, "123", 10000);
+      const buildingName = data.buildingName || data.premisesName || data.flatNo || data.flatDoorNo || "123";
+      await safeType(driver, houseNoField, buildingName, 10000);
     } catch (e) {
       console.log("Could not fill House Number:", e.message);
     }
@@ -1176,7 +1534,8 @@ async function fillNationalForm(formData) {
     try {
       console.log("Filling Street...");
       const streetField = By.name("newcust_textfield_street_01");
-      await safeType(driver, streetField, "Main Street", 10000);
+      const street = data.road || data.roadStreetLane || data.street || "Main Street";
+      await safeType(driver, streetField, street, 10000);
     } catch (e) {
       console.log("Could not fill Street:", e.message);
     }
@@ -1185,7 +1544,8 @@ async function fillNationalForm(formData) {
     try {
       console.log("Filling Pincode...");
       const pincodeField = By.name("newcust_textfield_pincode_01");
-      await safeType(driver, pincodeField, "400001", 10000);
+      const pincode = data.pincode || data.pinCode || "400001";
+      await safeType(driver, pincodeField, String(pincode), 10000);
     } catch (e) {
       console.log("Could not fill Pincode:", e.message);
     }
@@ -1194,7 +1554,8 @@ async function fillNationalForm(formData) {
     try {
       console.log("Filling Locality...");
       const localityField = By.name("newcust_textfield_locality_01");
-      await safeType(driver, localityField, "Colaba", 10000);
+      const locality = data.locality || data.area || "Colaba";
+      await safeType(driver, localityField, locality, 10000);
     } catch (e) {
       console.log("Could not fill Locality:", e.message);
     }
@@ -1203,7 +1564,8 @@ async function fillNationalForm(formData) {
     try {
       console.log("Filling City...");
       const cityField = By.name("newcust_textfield_city_01");
-      await safeType(driver, cityField, "Mumbai", 10000);
+      const city = data.city || data.rtoCityLocation || "Mumbai";
+      await safeType(driver, cityField, city, 10000);
     } catch (e) {
       console.log("Could not fill City:", e.message);
     }
@@ -1212,7 +1574,8 @@ async function fillNationalForm(formData) {
     try {
       console.log("Filling District...");
       const districtField = By.name("newcust_textfield_district_01");
-      await safeType(driver, districtField, "Mumbai", 10000);
+      const district = data.district || data.city || "Mumbai";
+      await safeType(driver, districtField, district, 10000);
     } catch (e) {
       console.log("Could not fill District:", e.message);
     }
@@ -1221,7 +1584,8 @@ async function fillNationalForm(formData) {
     try {
       console.log("Filling State...");
       const stateField = By.name("newcust_textfield_state_01");
-      await safeType(driver, stateField, "Maharashtra", 10000);
+      const state = "Maharashtra";
+      await safeType(driver, stateField, state, 10000);
     } catch (e) {
       console.log("Could not fill State:", e.message);
     }
@@ -1230,7 +1594,8 @@ async function fillNationalForm(formData) {
     try {
       console.log("Filling Country...");
       const countryField = By.name("newcust_textfield_country_01");
-      await safeType(driver, countryField, "India", 10000);
+      const country = data.country || "India";
+      await safeType(driver, countryField, country, 10000);
     } catch (e) {
       console.log("Could not fill Country:", e.message);
     }
@@ -1294,7 +1659,8 @@ async function fillNationalForm(formData) {
       await emailInput.clear();
       
       // Type the email value
-      await emailInput.sendKeys("test@example.com");
+      const email = data.email || "test@example.com";
+      await emailInput.sendKeys(email);
       console.log("Successfully filled Email ID");
       
       await driver.sleep(500);
@@ -1306,7 +1672,8 @@ async function fillNationalForm(formData) {
     try {
       console.log("Filling Mobile No...");
       const mobileField = By.name("newcust_textfield_mobNo_01");
-      await safeType(driver, mobileField, "9876543210", 10000);
+      const mobile = data.mobile || data.mobileNumber || "9876543210";
+      await safeType(driver, mobileField, String(mobile), 10000);
     } catch (e) {
       console.log("Could not fill Mobile No:", e.message);
     }
@@ -1423,7 +1790,8 @@ async function fillNationalForm(formData) {
       const engineField = By.name("mcy_text_engineNumber_01");
       const engineInput = await driver.wait(until.elementLocated(engineField), 10000);
       await engineInput.clear();
-      await engineInput.sendKeys("ENG123456789");
+      const engineNumber = data.engineNumber || "JC85EG4183208";
+      await engineInput.sendKeys(engineNumber);
       console.log("Filled Engine Number");
       await driver.sleep(500);
     } catch (e) {
@@ -1436,7 +1804,8 @@ async function fillNationalForm(formData) {
       const chassisField = By.name("mcy_text_chasisNumber_01");
       const chassisInput = await driver.wait(until.elementLocated(chassisField), 10000);
       await chassisInput.clear();
-      await chassisInput.sendKeys("CH123456789");
+      const chassisNumber = data.chassisNumber || "ME4JC85MJSG061153";
+      await chassisInput.sendKeys(chassisNumber);
       console.log("Filled Chassis Number");
       await driver.sleep(500);
     } catch (e) {
@@ -1466,27 +1835,113 @@ async function fillNationalForm(formData) {
       console.log("Could not fill Color:", e.message);
     }
     
-    // Fill Body Type (autocomplete)
+    await openVehicleInformationSection(driver);
+    
+    // Select Type of Body
     try {
-      console.log("Filling Body Type...");
-      const bodyField = By.name("mcy_dropdown_body_01");
-      const bodyInput = await driver.wait(until.elementLocated(bodyField), 10000);
-      await bodyInput.clear();
-      await bodyInput.sendKeys("CRF");
-      await driver.sleep(1500); // Wait for autocomplete
+      console.log("Selecting Type of Body...");
+      const typeLocators = [
+        By.name("mcy_dropdown_body_01"),
+        By.xpath("//mat-label[contains(., 'Type of Body')]/ancestor::mat-form-field//mat-select")
+      ];
+      let typeSelected = false;
       
-      try {
-        const bodyOptions = await driver.wait(until.elementsLocated(By.css("mat-option")), 5000);
-        if (bodyOptions.length > 0) {
-          await driver.executeScript("arguments[0].click();", bodyOptions[0]);
-          console.log("Selected Body Type from autocomplete");
+      for (const locator of typeLocators) {
+        try {
+          await safeSelectOption(driver, locator, "Others", 10000);
+          console.log(`Selected Type of Body using locator: ${locator.toString()}`);
+          typeSelected = true;
+          break;
+        } catch (selectionError) {
+          console.log(`Type of Body selection failed for ${locator.toString()}: ${selectionError.message}`);
         }
-      } catch (e) {
-        console.log("Could not select Body Type from autocomplete:", e.message);
       }
+      
+      if (!typeSelected) {
+        console.log("Falling back to direct input for Type of Body...");
+        const bodyInput = await driver.wait(until.elementLocated(By.name("mcy_dropdown_body_01")), 10000);
+        await bodyInput.clear();
+        await bodyInput.sendKeys("Others");
+        await driver.sleep(1500);
+        try {
+          const bodyOptions = await driver.wait(
+            until.elementsLocated(By.xpath("//mat-option[normalize-space(.)='Others']")),
+            3000
+          );
+          if (bodyOptions.length > 0) {
+            await driver.executeScript("arguments[0].click();", bodyOptions[0]);
+            console.log("Selected Type of Body 'Others' from fallback autocomplete");
+            typeSelected = true;
+          }
+        } catch (fallbackError) {
+          console.log("Fallback autocomplete selection failed:", fallbackError.message);
+        }
+      }
+      
       await driver.sleep(500);
     } catch (e) {
-      console.log("Could not fill Body Type:", e.message);
+      console.log("Could not select Type of Body:", e.message);
+    }
+    
+    await openVehicleInformationSection(driver);
+    
+    // Select Year of Manufacture
+    try {
+      console.log("Selecting Year of Manufacture...");
+      const yearLocators = [
+        By.xpath("//div[@id='mat-select-value-29']/ancestor::mat-select"),
+        By.id("mat-select-29"),
+        By.xpath("//mat-form-field[.//mat-label[contains(., 'Year of Manufacture')]]//mat-select"),
+        By.xpath("//mat-label[contains(., 'Year of Manufacture')]/ancestor::mat-form-field//mat-select"),
+        By.css("mat-select[formcontrolname*='year']"),
+        By.css("mat-select[name*='year']"),
+      ];
+      let yearSelected = false;
+      
+      const manufacturingYear = data.manufacturingYear || data.manufacturingyear || "2025";
+      const yearString = String(manufacturingYear);
+      
+      for (const locator of yearLocators) {
+        try {
+          await safeSelectOption(driver, locator, yearString, 12000);
+          console.log(`Selected Year of Manufacture using locator: ${locator.toString()}`);
+          yearSelected = true;
+          break;
+        } catch (selectionError) {
+          console.log(`Year of Manufacture selection failed for ${locator.toString()}: ${selectionError.message}`);
+        }
+      }
+      
+      if (!yearSelected) {
+        console.log(`Year dropdown fallback: trying direct option click for ${yearString}...`);
+        try {
+          const trigger = await driver.wait(
+            until.elementLocated(By.xpath("//mat-form-field[.//mat-label[contains(., 'Year of Manufacture')]]//mat-select")),
+            5000
+          );
+          await driver.executeScript("arguments[0].click();", trigger);
+          await driver.sleep(500);
+          
+          const yearOption = await driver.wait(
+            until.elementLocated(By.xpath(`//div[contains(@class,'cdk-overlay-pane')]//mat-option[.//span[normalize-space(.)='${yearString}']]`)),
+            5000
+          );
+          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", yearOption);
+          await driver.executeScript("arguments[0].click();", yearOption);
+          console.log(`Selected Year of Manufacture ${yearString} via direct option fallback.`);
+          yearSelected = true;
+        } catch (fallbackError) {
+          console.log("Direct Year of Manufacture selection failed:", fallbackError.message);
+        }
+      }
+      
+      if (!yearSelected) {
+        console.log(`Unable to select Year of Manufacture ${yearString} after all strategies.`);
+      }
+      
+      await driver.sleep(500);
+    } catch (e) {
+      console.log("Year of Manufacture handling failed:", e.message);
     }
     
     // === COMPULSORY PA FOR OWNER DRIVER SECTION ===
@@ -1551,53 +2006,881 @@ async function fillNationalForm(formData) {
     // === POST-CUSTOMER CREATION STEPS ===
     console.log("Handling post-customer creation steps...");
     
-
-
+    // Open Financier Interest Applicable tab
+    try {
+      console.log("Opening Financier Interest Applicable tab...");
+      const financierTab = By.xpath("//span[contains(normalize-space(.), 'Financier Interest Applicable')]");
+      await safeClick(driver, financierTab, 10000);
+      await driver.sleep(2000);
+    } catch (e) {
+      console.log("Financier Interest Applicable tab not found:", e.message);
+    }
     
-    console.log("National Insurance form automation completed successfully!");
+    // Ensure Financier Interest section is visible
+    await openFinancierSection(driver);
     
-    // Take screenshot for verification
-    const screenshot = await driver.takeScreenshot();
-    const screenshotKey = generateScreenshotKey(jobId, "national_form_completed");
-    await uploadScreenshotToS3(screenshot, screenshotKey);
-    console.log(`Screenshot uploaded: ${screenshotKey}`);
+    // Enable Financier Interest switch
+    const financierToggleLocators = [
+      By.xpath("//*[@id='mat-mdc-slide-toggle-8-button']"),
+      By.xpath("//*[@id='mat-mdc-slide-toggle-8-button']/div[2]/div/div[3]/svg[2]"),
+      By.css("mat-mdc-slide-toggle[name='mcy_toggle_FinancierInterestApplicable_01']"),
+      By.xpath("//mat-mdc-slide-toggle[contains(., 'Financier Interest Applicable')]"),
+      By.xpath("//mat-expansion-panel[contains(., 'Financier Interest Applicable')]//mat-mdc-slide-toggle"),
+    ];
+    try {
+      await enableSlideToggle(driver, financierToggleLocators, "Financier Interest switch");
+      await driver.sleep(600);
+    } catch (e) {
+      console.log("Financier switch handling failed:", e.message);
+    }
     
-    return {
-      success: true,
-      jobId: jobId,
-      message: "National Insurance form filled successfully"
-    };
+    // Select Financier Interest Type (Hypothecation)
+    try {
+      console.log("Selecting Financier Interest Type...");
+      const interestLocators = [
+        By.xpath("//div[@id='mat-select-value-41']/ancestor::mat-select"),
+        By.id("mat-select-41"),
+        By.xpath("//mat-form-field[.//mat-label[contains(., 'Financier Interest Type')]]//mat-select"),
+        By.xpath("//mat-label[contains(., 'Financier Interest Type')]/ancestor::mat-form-field//mat-select"),
+        By.css("mat-select[formcontrolname*='Financier']"),
+        By.css("mat-select[name*='Financier']"),
+      ];
+      let interestSelected = false;
+      
+      for (const locator of interestLocators) {
+        try {
+          await safeSelectOption(driver, locator, "Hypothecation", 12000);
+          console.log(`Selected Financier Interest Type using locator: ${locator.toString()}`);
+          interestSelected = true;
+          break;
+        } catch (interestError) {
+          console.log(`Financier Interest Type selection failed for ${locator.toString()}: ${interestError.message}`);
+        }
+      }
+      
+      if (!interestSelected) {
+        console.log("Financier Interest Type fallback: attempting direct option selection...");
+        try {
+          const trigger = await driver.wait(
+            until.elementLocated(By.xpath("//mat-form-field[.//mat-label[contains(., 'Financier Interest Type')]]//mat-select")),
+            5000
+          );
+          await driver.executeScript("arguments[0].click();", trigger);
+          await driver.sleep(500);
+          
+          const option = await driver.wait(
+            until.elementLocated(By.xpath("//div[contains(@class,'cdk-overlay-pane')]//mat-option[.//span[normalize-space(.)='Hypothecation']]")),
+            5000
+          );
+          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", option);
+          await driver.executeScript("arguments[0].click();", option);
+          console.log("Selected Financier Interest Type 'Hypothecation' via direct option fallback.");
+          interestSelected = true;
+        } catch (fallbackError) {
+          console.log("All strategies failed for Financier Interest Type selection:", fallbackError.message);
+        }
+      }
+      
+      if (!interestSelected) {
+        console.log("Could not select Financier Interest Type.");
+      }
+      
+      await driver.sleep(500);
+    } catch (e) {
+      console.log("Financier Interest Type handling failed:", e.message);
+    }
     
-  } catch (error) {
-    console.error("Error in National Insurance form automation:", error);
-    
-    // Take error screenshot
-    if (driver) {
+    // Fill Financier Name
+    try {
+      console.log("Filling Financier Name...");
+      await safeType(driver, By.name("mcy_text_FinancierName_01"), "Financier Test Name", 10000);
+    } catch (e) {
+      console.log("Could not fill Financier Name by name attribute, trying label-based locator...");
       try {
-        const screenshot = await driver.takeScreenshot();
-        const screenshotKey = generateScreenshotKey(jobId || `national_error_${Date.now()}`, "error");
-        await uploadScreenshotToS3(screenshot, screenshotKey);
-        console.log(`Error screenshot uploaded: ${screenshotKey}`);
-      } catch (screenshotError) {
-        console.error("Failed to take error screenshot:", screenshotError);
+        const financierNameInput = By.xpath("//mat-label[contains(., 'Financier Name')]/ancestor::mat-form-field//input");
+        await safeType(driver, financierNameInput, "Financier Test Name", 10000);
+      } catch (fallbackError) {
+        console.log("All strategies failed for Financier Name:", fallbackError.message);
       }
     }
     
+    // Fill Financier Address
+    try {
+      console.log("Filling Financier Address...");
+      await safeType(driver, By.name("mcy_text_FinancierAddress_01"), "123 Finance Street, Business City", 10000);
+    } catch (e) {
+      console.log("Could not fill Financier Address by name attribute, trying label-based locator...");
+      try {
+        const financierAddressInput = By.xpath("//mat-label[contains(., 'Financier Address')]/ancestor::mat-form-field//input");
+        await safeType(driver, financierAddressInput, "123 Finance Street, Business City", 10000);
+      } catch (fallbackError) {
+        console.log("All strategies failed for Financier Address:", fallbackError.message);
+      }
+    }
+    
+    // Check declaration checkbox
+    try {
+      console.log("Checking financier declaration checkbox...");
+      const declarationCheckboxLocators = [
+        By.css("*[name='mcy_checkbox_declaration01_01']"),
+        By.id("mat-mdc-checkbox-2-input"),
+        By.name("mcy_checkbox_declaration01_01"),
+        By.xpath("//input[@type='checkbox' and contains(@id, 'checkbox') and contains(@name, 'declaration')]")
+      ];
+      let checkboxChecked = false;
+      
+      for (const locator of declarationCheckboxLocators) {
+        try {
+          const checkbox = await driver.wait(until.elementLocated(locator), 5000);
+          await driver.wait(until.elementIsVisible(checkbox), 5000);
+          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", checkbox);
+          await driver.sleep(200);
+          const isChecked = await checkbox.isSelected().catch(() => false);
+          if (!isChecked) {
+            await driver.executeScript("arguments[0].click();", checkbox);
+            console.log(`Clicked checkbox using locator: ${locator.toString()}`);
+            const nowChecked = await checkbox.isSelected().catch(() => false);
+            if (!nowChecked) {
+              await driver.executeScript("if (!arguments[0].checked) { arguments[0].checked = true; arguments[0].dispatchEvent(new Event('change', { bubbles: true })); }", checkbox);
+              console.log("Forced checkbox checked via script dispatch.");
+            }
+          } else {
+            console.log("Checkbox already checked.");
+          }
+          checkboxChecked = true;
+          break;
+        } catch (checkboxError) {
+          console.log(`Checkbox interaction failed for ${locator.toString()}: ${checkboxError.message}`);
+        }
+      }
+      
+      if (!checkboxChecked) {
+        console.log("Could not interact with the financier declaration checkbox.");
+      }
+      
+      await driver.sleep(500);
+    } catch (e) {
+      console.log("Financier declaration checkbox handling failed:", e.message);
+    }
+    
+    // Click Check Vahan button and handle popup
+    try {
+      console.log("Clicking Check Vahan button...");
+      await openVehicleInformationSection(driver);
+      const checkVahanLocators = [
+        By.xpath("//span[contains(@class, 'checkbtn') and contains(normalize-space(.), 'Check Vahan')]"),
+        By.xpath("//button[contains(@class, 'checkbtn') and contains(normalize-space(.), 'Check Vahan')]"),
+        By.name("mcod_btn_addCover_01"),
+        By.xpath("//span[@name='mcod_btn_addCover_01']"),
+      ];
+      let vahanClicked = false;
+      
+      try {
+        const vahanButtonsByName = await driver.findElements(By.name("mcod_btn_addCover_01"));
+        if (vahanButtonsByName.length > 1) {
+          console.log(`Multiple Check Vahan buttons found (${vahanButtonsByName.length}), clicking the second.`);
+          await scrollAndClickElement(driver, vahanButtonsByName[1]);
+          vahanClicked = true;
+        } else if (vahanButtonsByName.length === 1) {
+          console.log("Single Check Vahan button found by name, clicking it.");
+          await scrollAndClickElement(driver, vahanButtonsByName[0]);
+          vahanClicked = true;
+        }
+      } catch (multiError) {
+        console.log("Direct Check Vahan name-based click failed:", multiError.message);
+      }
+      
+      for (const locator of checkVahanLocators) {
+        if (vahanClicked) {
+          break;
+        }
+        try {
+          await scrollAndClick(driver, locator, 12000);
+          vahanClicked = true;
+          console.log(`Clicked Check Vahan using locator: ${locator.toString()}`);
+          break;
+        } catch (vahanError) {
+          console.log(`Check Vahan click failed for ${locator.toString()}: ${vahanError.message}`);
+        }
+      }
+      
+      if (vahanClicked) {
+        console.log(`[${jobId}] Waiting for Vahan response to complete...`);
+        await driver.sleep(3000); // Wait for initial response
+        await waitForLoaderToDisappear(driver, undefined, 20000);
+        await waitForPortalLoaderToDisappear(driver);
+        await driver.sleep(2000); // Additional wait for response to process
+        
+        try {
+          console.log(`[${jobId}] Checking for Vahan popup/modal after response...`);
+          
+          // Try multiple times to ensure popup is closed
+          let attempts = 0;
+          const maxAttempts = 5;
+          let popupStillVisible = true;
+          
+          while (attempts < maxAttempts && popupStillVisible) {
+            attempts++;
+            console.log(`[${jobId}] Close attempt ${attempts}/${maxAttempts}...`);
+            
+            // Use JavaScript to find and close the popup directly - try ALL methods
+            const closeResult = await driver.executeScript(`
+              // Find the Vahan dialog by multiple methods
+              let dialog = document.querySelector('app-check-vahan-dialog') ||
+                          document.querySelector('[app-check-vahan-dialog]') ||
+                          document.querySelector('mat-dialog-container') ||
+                          document.querySelector('.cd-popup.is-visible') || 
+                          document.querySelector('.cd-popup[class*="is-visible"]') ||
+                          document.querySelector('div[class*="cd-popup"][class*="is-visible"]');
+              
+              if (!dialog) {
+                // Try finding by visibility - check for Material dialog
+                const allDialogs = document.querySelectorAll('app-check-vahan-dialog, mat-dialog-container, .cd-popup, [class*="cd-popup"]');
+                for (let d of allDialogs) {
+                  const style = window.getComputedStyle(d);
+                  if (d.classList.contains('is-visible') || 
+                      style.display !== 'none' ||
+                      style.visibility !== 'hidden' ||
+                      d.offsetParent !== null) {
+                    dialog = d;
+                    break;
+                  }
+                }
+              }
+              
+              if (dialog) {
+                console.log('Found Vahan dialog, attempting ALL close methods...');
+                
+                // Method 1: Find and click close button - specific to Vahan dialog structure
+                // The close button is inside h2.mat-mdc-dialog-title
+                let closeBtn = dialog.querySelector('h2.mat-mdc-dialog-title span.cd-popup-close') ||
+                              dialog.querySelector('h2[mat-dialog-title] span.cd-popup-close') ||
+                              dialog.querySelector('h2 span.cd-popup-close') ||
+                              dialog.querySelector('span.cd-popup-close') ||
+                              dialog.querySelector('.cd-popup-close') ||
+                              dialog.querySelector('span[class*="cd-popup-close"]') ||
+                              dialog.querySelector('button.close') ||
+                              dialog.querySelector('[aria-label="Close"]') ||
+                              dialog.querySelector('[aria-label*="close" i]') ||
+                              dialog.querySelector('[class*="close"]');
+                
+                // Also search in parent elements (mat-dialog-container)
+                if (!closeBtn) {
+                  let parent = dialog.parentElement;
+                  while (parent && parent !== document.body) {
+                    closeBtn = parent.querySelector('h2.mat-mdc-dialog-title span.cd-popup-close') ||
+                              parent.querySelector('span.cd-popup-close');
+                    if (closeBtn) break;
+                    parent = parent.parentElement;
+                  }
+                }
+                
+                // Search entire document if not found in dialog
+                if (!closeBtn) {
+                  closeBtn = document.querySelector('h2.mat-mdc-dialog-title span.cd-popup-close') ||
+                            document.querySelector('h2[mat-dialog-title] span.cd-popup-close') ||
+                            document.querySelector('span.cd-popup-close') ||
+                            document.querySelector('.cd-popup-close') ||
+                            document.querySelector('span[class*="cd-popup-close"]');
+                }
+                
+                if (closeBtn) {
+                  console.log('Found close button, attempting multiple click methods...');
+                  
+                  // Try multiple click methods
+                  try {
+                    closeBtn.click();
+                  } catch (e) {
+                    console.log('Standard click failed:', e);
+                  }
+                  
+                  try {
+                    closeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                  } catch (e) {
+                    console.log('MouseEvent click failed:', e);
+                  }
+                  
+                  try {
+                    closeBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                    closeBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                  } catch (e) {
+                    console.log('MouseEvent mousedown/up failed:', e);
+                  }
+                  
+                  // Try triggering any close handlers
+                  try {
+                    if (closeBtn.onclick) closeBtn.onclick();
+                    if (closeBtn.parentElement && closeBtn.parentElement.onclick) closeBtn.parentElement.onclick();
+                  } catch (e) {
+                    console.log('onclick handler failed:', e);
+                  }
+                  
+                  // Force focus and click
+                  try {
+                    closeBtn.focus();
+                    closeBtn.click();
+                  } catch (e) {
+                    console.log('Focus and click failed:', e);
+                  }
+                  
+                  console.log('All close button click methods attempted');
+                } else {
+                  console.log('Close button not found in popup');
+                }
+                
+                // Method 2: Close Material dialog using Angular Material methods
+                // Try to find and close the dialog using Material's close method
+                try {
+                  const dialogContainer = dialog.closest('mat-dialog-container') || 
+                                        document.querySelector('mat-dialog-container');
+                  if (dialogContainer) {
+                    // Try to trigger Material dialog close
+                    const closeEvent = new Event('close', { bubbles: true });
+                    dialogContainer.dispatchEvent(closeEvent);
+                  }
+                } catch (e) {
+                  console.log('Material dialog close event failed:', e);
+                }
+                
+                // Method 3: Remove is-visible class and all visibility classes
+                dialog.classList.remove('is-visible');
+                dialog.classList.remove('visible');
+                dialog.classList.remove('show');
+                dialog.classList.add('is-hidden');
+                dialog.classList.add('hidden');
+                
+                // Method 4: Set display to none and visibility hidden
+                dialog.style.display = 'none';
+                dialog.style.visibility = 'hidden';
+                dialog.style.opacity = '0';
+                dialog.style.zIndex = '-1';
+                
+                // Method 5: Hide backdrop/overlay (Material dialog backdrop)
+                const backdrop = dialog.querySelector('.cd-popup-backdrop') ||
+                               dialog.closest('mat-dialog-container')?.querySelector('.cdk-overlay-backdrop') ||
+                               document.querySelector('.cdk-overlay-backdrop') ||
+                               document.querySelector('.cd-popup-backdrop');
+                if (backdrop) {
+                  backdrop.style.display = 'none';
+                  backdrop.style.visibility = 'hidden';
+                  backdrop.classList.remove('is-visible', 'visible', 'show', 'cdk-overlay-backdrop-showing');
+                }
+                
+                // Method 6: Close Material dialog container
+                const matDialogContainer = dialog.closest('mat-dialog-container') ||
+                                        document.querySelector('mat-dialog-container');
+                if (matDialogContainer) {
+                  matDialogContainer.style.display = 'none';
+                  matDialogContainer.style.visibility = 'hidden';
+                  matDialogContainer.classList.remove('cdk-overlay-pane');
+                }
+                
+                // Method 7: Remove pointer events
+                dialog.style.pointerEvents = 'none';
+                
+                // Check if still visible
+                const style = window.getComputedStyle(dialog);
+                const isStillVisible = style.display !== 'none' && 
+                                     style.visibility !== 'hidden' && 
+                                     dialog.offsetParent !== null;
+                
+                return { 
+                  success: !isStillVisible, 
+                  found: true,
+                  stillVisible: isStillVisible,
+                  methods: 'all',
+                  dialogType: dialog.tagName
+                };
+              }
+              
+              return { success: true, found: false, reason: 'dialog not found' };
+            `);
+            
+            console.log(`[${jobId}] Close attempt ${attempts} result:`, closeResult);
+            
+            // Check if dialog is actually closed
+            await driver.sleep(500);
+            popupStillVisible = await driver.executeScript(`
+              // Check for Vahan dialog or Material dialog
+              const dialog = document.querySelector('app-check-vahan-dialog') ||
+                            document.querySelector('mat-dialog-container') ||
+                            document.querySelector('.cd-popup.is-visible') ||
+                            document.querySelector('.cd-popup[class*="is-visible"]');
+              
+              if (dialog) {
+                const style = window.getComputedStyle(dialog);
+                if (style.display !== 'none' && style.visibility !== 'hidden' && dialog.offsetParent !== null) {
+                  return true;
+                }
+              }
+              
+              // Check all dialogs by computed style
+              const allDialogs = document.querySelectorAll('app-check-vahan-dialog, mat-dialog-container, .cd-popup');
+              for (let d of allDialogs) {
+                const style = window.getComputedStyle(d);
+                if (style.display !== 'none' && style.visibility !== 'hidden' && d.offsetParent !== null) {
+                  return true;
+                }
+              }
+              return false;
+            `);
+            
+            if (!popupStillVisible) {
+              console.log(`[${jobId}] ✅ Popup confirmed closed after attempt ${attempts}`);
+              break;
+            } else {
+              console.log(`[${jobId}] ⚠️ Popup still visible, will retry...`);
+              await driver.sleep(500);
+            }
+          }
+          
+          // Final aggressive close attempt
+          if (popupStillVisible) {
+            console.log(`[${jobId}] Dialog still visible after ${maxAttempts} attempts, forcing close...`);
+            await driver.executeScript(`
+              // Close ALL dialogs aggressively - Vahan dialog and Material dialogs
+              document.querySelectorAll('app-check-vahan-dialog, mat-dialog-container, .cd-popup, [class*="cd-popup"]').forEach(d => {
+                d.classList.remove('is-visible', 'visible', 'show', 'cdk-overlay-pane');
+                d.classList.add('is-hidden', 'hidden');
+                d.style.display = 'none';
+                d.style.visibility = 'hidden';
+                d.style.opacity = '0';
+                d.style.zIndex = '-1';
+                d.style.pointerEvents = 'none';
+              });
+              
+              // Hide all backdrops (Material and custom)
+              document.querySelectorAll('.cdk-overlay-backdrop, .cd-popup-backdrop, [class*="backdrop"]').forEach(b => {
+                b.style.display = 'none';
+                b.style.visibility = 'hidden';
+                b.classList.remove('is-visible', 'visible', 'show', 'cdk-overlay-backdrop-showing');
+              });
+              
+              // Close overlay container
+              const overlayContainer = document.querySelector('.cdk-overlay-container');
+              if (overlayContainer) {
+                const dialogs = overlayContainer.querySelectorAll('mat-dialog-container, app-check-vahan-dialog');
+                dialogs.forEach(d => {
+                  d.style.display = 'none';
+                  d.style.visibility = 'hidden';
+                });
+              }
+            `);
+            await driver.sleep(1000);
+          }
+          
+          await driver.sleep(1000);
+          
+          // Also try Selenium-based approach to click X icon button
+          try {
+            console.log(`[${jobId}] Trying Selenium-based X icon click...`);
+            
+            const closeButtonLocators = [
+              // Specific to Vahan dialog structure - close button inside h2 title
+              By.xpath("//h2[@class='mat-mdc-dialog-title']//span[@class='cd-popup-close']"),
+              By.xpath("//h2[contains(@class, 'mat-mdc-dialog-title')]//span[@class='cd-popup-close']"),
+              By.xpath("//h2[@mat-dialog-title]//span[@class='cd-popup-close']"),
+              By.xpath("//h2//span[@class='cd-popup-close']"),
+              // General selectors
+              By.css("span.cd-popup-close"),
+              By.xpath("//span[@class='cd-popup-close']"),
+              By.xpath("//span[contains(@class, 'cd-popup-close')]"),
+              By.xpath("//span[contains(@class, 'cd-popup-close') and normalize-space(text())='X']"),
+              By.xpath("//span[contains(@class, 'cd-popup-close') and contains(text(), 'X')]"),
+              By.xpath("//span[contains(@class, 'cd-popup-close') and (text()='X' or text()='×')]"),
+              By.xpath("//*[@class='cd-popup-close' and contains(text(), 'X')]"),
+              // Inside app-check-vahan-dialog
+              By.xpath("//app-check-vahan-dialog//span[@class='cd-popup-close']"),
+              By.xpath("//app-check-vahan-dialog//h2//span[@class='cd-popup-close']"),
+              // Material dialog close
+              By.xpath("//mat-dialog-container//span[@class='cd-popup-close']"),
+              By.xpath("//button[contains(@class, 'close')]"),
+              By.xpath("//button[@aria-label='Close']"),
+              By.xpath("//*[contains(@class, 'close') and contains(text(), 'X')]"),
+              By.xpath("//*[contains(@class, 'close')]"),
+            ];
+            
+            let closed = false;
+            for (const closeLocator of closeButtonLocators) {
+              try {
+                const closeButtons = await driver.findElements(closeLocator);
+                console.log(`[${jobId}] Found ${closeButtons.length} close buttons with locator: ${closeLocator.toString()}`);
+                
+                for (const closeButton of closeButtons) {
+                  try {
+                    const isDisplayed = await closeButton.isDisplayed();
+                    const isEnabled = await closeButton.isEnabled();
+                    console.log(`[${jobId}] Close button - displayed: ${isDisplayed}, enabled: ${isEnabled}`);
+                    
+                    if (isDisplayed) {
+                      // Scroll to button
+                      await driver.executeScript("arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", closeButton);
+                      await driver.sleep(300);
+                      
+                      // Try multiple click methods
+                      try {
+                        await closeButton.click();
+                        console.log(`[${jobId}] ✅ Clicked close button (standard click)`);
+                closed = true;
+                      } catch (clickError) {
+                        console.log(`[${jobId}] Standard click failed, trying JavaScript click...`);
+                        try {
+                          await driver.executeScript("arguments[0].click();", closeButton);
+                          console.log(`[${jobId}] ✅ Clicked close button (JavaScript click)`);
+                          closed = true;
+                        } catch (jsClickError) {
+                          console.log(`[${jobId}] JavaScript click failed, trying event dispatch...`);
+                          try {
+                            await driver.executeScript(`
+                              arguments[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                              arguments[0].dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                              arguments[0].dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                            `, closeButton);
+                            console.log(`[${jobId}] ✅ Dispatched click events`);
+                            closed = true;
+                          } catch (eventError) {
+                            console.log(`[${jobId}] Event dispatch failed:`, eventError.message);
+                          }
+                        }
+                      }
+                      
+                      if (closed) {
+                        await driver.sleep(1000);
+                break;
+                      }
+                    }
+                  } catch (e) {
+                    console.log(`[${jobId}] Error checking/clicking button:`, e.message);
+                  }
+                }
+                if (closed) break;
+              } catch (closeError) {
+                console.log(`[${jobId}] Error with locator ${closeLocator.toString()}:`, closeError.message);
+              }
+            }
+            
+            if (!closed) {
+              console.log(`[${jobId}] Could not click X icon, force closing with JavaScript...`);
+              // Force close with JavaScript
+              await driver.executeScript(`
+                const popups = document.querySelectorAll('.cd-popup.is-visible, [class*="cd-popup"][class*="is-visible"]');
+                popups.forEach(p => {
+                  p.classList.remove('is-visible');
+                  p.style.display = 'none';
+                  p.style.visibility = 'hidden';
+                });
+              `);
+              console.log(`[${jobId}] Force closed popup using JavaScript`);
+            } else {
+              console.log(`[${jobId}] ✅ Successfully clicked X icon button`);
+            }
+          } catch (seleniumError) {
+            console.error(`[${jobId}] Selenium close attempt error:`, seleniumError.message);
+          }
+          
+          // Final verification
+          await driver.sleep(500);
+          const stillVisible = await driver.executeScript(`
+            const popup = document.querySelector('.cd-popup.is-visible');
+            return popup ? false : true;
+          `);
+          
+          if (stillVisible) {
+            console.log(`[${jobId}] ✅ Vahan modal successfully closed`);
+          } else {
+            console.log(`[${jobId}] ⚠️ Vahan modal may still be visible`);
+          }
+          
+        } catch (popupError) {
+          console.error(`[${jobId}] Error while handling Vahan popup:`, popupError.message);
+          // Try emergency close
+          try {
+            await driver.executeScript(`
+              document.querySelectorAll('.cd-popup').forEach(p => {
+                p.classList.remove('is-visible');
+                p.style.display = 'none';
+              });
+            `);
+            console.log(`[${jobId}] Emergency close attempted`);
+          } catch (e) {
+            console.log(`[${jobId}] Emergency close failed:`, e.message);
+          }
+        }
+      } else {
+        console.log(`[${jobId}] Check Vahan button could not be clicked; continuing.`);
+      }
+    } catch (e) {
+      console.log("Check Vahan flow failed:", e.message);
+    }
+
+    
+    // Check declaration checkbox after Vahan - force check with events
+    try {
+      console.log(`[${jobId}] Checking declaration checkbox after Vahan...`);
+      await driver.sleep(1500);
+      
+      // Force check the checkbox using JavaScript with proper events
+      const checkboxResult = await driver.executeScript(`
+        // Find checkbox by name attribute
+        const checkbox = document.querySelector('input[name="mcy_checkbox_declaration01_01"]') ||
+                        document.querySelector('input#mat-mdc-checkbox-1-input') ||
+                        document.querySelector('input[type="checkbox"][name*="declaration"]');
+        
+        if (!checkbox) {
+          return { found: false, error: 'Checkbox not found' };
+        }
+        
+        // Check current state
+        const wasChecked = checkbox.checked || 
+                          checkbox.classList.contains('mdc-checkbox--selected') ||
+                          checkbox.getAttribute('aria-checked') === 'true';
+        
+        if (!wasChecked) {
+          // Method 1: Set checked property directly
+          checkbox.checked = true;
+          
+          // Method 2: Add Material Design classes
+          checkbox.classList.add('mdc-checkbox--selected');
+          checkbox.setAttribute('aria-checked', 'true');
+          
+          // Method 3: Find wrapper and update it too
+          const wrapper = checkbox.closest('.mdc-checkbox');
+          if (wrapper) {
+            wrapper.classList.add('mdc-checkbox--selected');
+            const background = wrapper.querySelector('.mdc-checkbox__background');
+            if (background) {
+              background.classList.add('mdc-checkbox__background--selected');
+            }
+          }
+          
+          // Method 4: Trigger all necessary events
+          const events = ['click', 'change', 'input'];
+          events.forEach(eventType => {
+            const event = new Event(eventType, { bubbles: true, cancelable: true });
+            checkbox.dispatchEvent(event);
+          });
+          
+          // Method 5: Also try clicking the wrapper
+          if (wrapper) {
+            wrapper.click();
+          } else {
+            checkbox.click();
+          }
+        }
+        
+        // Wait a bit and check final state
+        setTimeout(() => {}, 100);
+        
+        const nowChecked = checkbox.checked || 
+                          checkbox.classList.contains('mdc-checkbox--selected') ||
+                          checkbox.getAttribute('aria-checked') === 'true';
+        
+        return { 
+          found: true, 
+          wasChecked: wasChecked, 
+          nowChecked: nowChecked,
+          checked: checkbox.checked,
+          hasClass: checkbox.classList.contains('mdc-checkbox--selected'),
+          ariaChecked: checkbox.getAttribute('aria-checked')
+        };
+      `);
+      
+      console.log(`[${jobId}] Checkbox result:`, checkboxResult);
+      
+      if (checkboxResult && checkboxResult.found) {
+        await driver.sleep(500);
+        
+        // Double-check and force if still not checked
+        if (!checkboxResult.nowChecked) {
+          console.log(`[${jobId}] Checkbox still not checked, forcing again...`);
+          
+          await driver.executeScript(`
+            const checkbox = document.querySelector('input[name="mcy_checkbox_declaration01_01"]');
+            if (checkbox) {
+              checkbox.checked = true;
+              checkbox.setAttribute('checked', 'checked');
+              checkbox.setAttribute('aria-checked', 'true');
+              checkbox.classList.add('mdc-checkbox--selected');
+              
+              const wrapper = checkbox.closest('.mdc-checkbox');
+              if (wrapper) {
+                wrapper.classList.add('mdc-checkbox--selected');
+                wrapper.click();
+              }
+              
+              checkbox.click();
+              checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+              checkbox.dispatchEvent(new Event('click', { bubbles: true }));
+            }
+          `);
+          
+          await driver.sleep(500);
+        }
+        
+        // Final verification with Selenium
+        try {
+          const checkboxLocators = [
+            By.name("mcy_checkbox_declaration01_01"),
+            By.css("input[name='mcy_checkbox_declaration01_01']"),
+          ];
+          
+          for (const locator of checkboxLocators) {
+            try {
+              const elements = await driver.findElements(locator);
+              if (elements.length > 0) {
+                const finalState = await driver.executeScript(`
+                  const cb = arguments[0];
+                  cb.checked = true;
+                  cb.setAttribute('checked', 'checked');
+                  cb.setAttribute('aria-checked', 'true');
+                  cb.classList.add('mdc-checkbox--selected');
+                  
+                  const wrapper = cb.closest('.mdc-checkbox');
+                  if (wrapper) {
+                    wrapper.classList.add('mdc-checkbox--selected');
+                  }
+                  
+                  return cb.checked || cb.classList.contains('mdc-checkbox--selected');
+                `, elements[0]);
+                
+                console.log(`[${jobId}] ✅ Declaration checkbox force-checked. Final state:`, finalState);
+                break;
+              }
+            } catch (e) {
+              // Continue
+            }
+          }
+        } catch (verifyError) {
+          console.log(`[${jobId}] Final verification skipped:`, verifyError.message);
+        }
+      } else {
+        console.log(`[${jobId}] ⚠️ Checkbox not found`);
+      }
+      
+      await driver.sleep(500);
+      
+    } catch (e) {
+      console.log(`[${jobId}] Declaration checkbox handling error:`, e.message);
+    }
+    
+    await driver.sleep(500);
+    
+    // Click Calculate Premium button
+    try {
+      console.log(`[${jobId}] Clicking Calculate Premium button...`);
+      const calculatePremiumLocators = [
+        By.name("mcy_button_calculatePremium_01"),
+        By.xpath("//button[@name='mcy_button_calculatePremium_01']"),
+        By.xpath("//button[contains(@class, 'q-quote-btn') and .//span[normalize-space(.)='Calculate Premium']]"),
+        By.xpath("//span[normalize-space(.)='Calculate Premium']/ancestor::button"),
+        By.xpath("//button[contains(@class, 'mat-mdc-raised-button') and .//span[contains(text(), 'Calculate Premium')]]"),
+      ];
+      let premiumClicked = false;
+      for (const locator of calculatePremiumLocators) {
+        try {
+          await scrollAndClick(driver, locator, 12000);
+          premiumClicked = true;
+          console.log(`[${jobId}] ✅ Clicked Calculate Premium using locator: ${locator.toString()}`);
+          break;
+        } catch (calcError) {
+          console.log(`[${jobId}] Calculate Premium click failed for ${locator.toString()}: ${calcError.message}`);
+        }
+      }
+      if (!premiumClicked) {
+        throw new Error("Unable to click Calculate Premium button.");
+      }
+      await driver.sleep(3000);
+      await waitForPortalLoaderToDisappear(driver);
+      console.log(`[${jobId}] ✅ Calculate Premium button clicked successfully`);
+    } catch (e) {
+      console.error(`[${jobId}] Calculate Premium button not found:`, e.message);
+    }
+    
+    // Confirm popup OK
+    try {
+      console.log("Handling confirmation popup...");
+      const confirmOkButton = By.xpath("//span[contains(., 'OK')]/ancestor::button");
+      await safeClick(driver, confirmOkButton, 5000);
+      await driver.sleep(2000);
+      await waitForPortalLoaderToDisappear(driver);
+    } catch (e) {
+      console.log("Confirmation popup OK button not found or not needed:", e.message);
+    }
+    
+    // Click Send Quotation button
+    try {
+      console.log("Clicking Send Quotation button...");
+      const sendQuotationButton = By.xpath("//span[contains(., 'Send Quotation')]/ancestor::button");
+      await safeClick(driver, sendQuotationButton, 10000);
+      await driver.sleep(2000);
+      await waitForPortalLoaderToDisappear(driver);
+    } catch (e) {
+      console.log("Send Quotation button not found:", e.message);
+    }
+    
+    // Close the quotation popup
+    try {
+      console.log("Closing quotation popup...");
+      const closePopupButton = By.xpath("//span[contains(., 'Close')]/ancestor::button");
+      await safeClick(driver, closePopupButton, 5000);
+      await driver.sleep(1000);
+    } catch (e) {
+      console.log("Close button for quotation popup not found or already closed:", e.message);
+    }
+    
+
+
+    
+    console.log(`✅ [${jobId}] National Insurance form automation completed successfully!`);
+    
+    // Return success if post-calculation failed
+    if (postCalculationFailed) {
+      return {
+        success: false,
+        error: postCalculationError || "Post-calculation stage failed",
+        postSubmissionFailed: true, // Treat as post-submission failure
+        stage: "post-calculation",
+      };
+    }
+
+    // Return failure if post-submission failed (even if modal submission succeeded)
+    if (postSubmissionFailed) {
+      return {
+        success: false,
+        error: postSubmissionError || "Post-submission stage failed",
+        postSubmissionFailed: true,
+        stage: "post-submission",
+      };
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error(`[${jobId}] [nationalForm] Error:`, error.message || error);
+    
+    // Capture error screenshot using centralized handler
+    const errorDetails = await captureErrorScreenshot(
+      driver,
+      error,
+      data,
+      "form-error"
+    );
+
     return {
       success: false,
-      jobId: jobId,
-      error: error.message,
-      message: "National Insurance form automation failed"
+      error: String(error.message || error),
+      errorStack: error.stack,
+      screenshotUrl: errorDetails.screenshotUrl,
+      screenshotKey: errorDetails.screenshotKey,
+      pageSourceUrl: errorDetails.pageSourceUrl,
+      pageSourceKey: errorDetails.pageSourceKey,
+      timestamp: new Date(),
+      stage: "login-form", // Indicate this is a login form error
+      postSubmissionFailed: false,
     };
-    
   } finally {
-    if (driver) {
-      try {
-        // await driver.quit();
-        console.log("Driver closed successfully");
-      } catch (closeError) {
-        console.error("Error closing driver:", closeError);
-      }
+    // Cleanup: Always close browser and delete cloned profile
+    if (jobBrowser) {
+      await cleanupNationalJobBrowser(jobBrowser);
     }
   }
 }

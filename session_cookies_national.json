@@ -1,0 +1,40 @@
+[
+  {
+    "domain": "nicportal.nic.co.in",
+    "expiry": 1763045678,
+    "httpOnly": true,
+    "name": "NSC_WJQ-OJDQPSUBM-Bqqt-JOU-8180",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "ffffffff096c3bd845525d5f4f58455e445a4a4229a0"
+  },
+  {
+    "domain": "nicportal.nic.co.in",
+    "httpOnly": false,
+    "name": "TS37aaf96d027",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "08e3dc232cab20000a3ae63b2edc1eb5afe2def95d9247bbf4586138cd56018adcb5969efab0b336083f904e68113000453010f869f8bf8518348d9ba76f9f4f25e64741d16408dd5efbb14ab92a80b307fbbe4c1f4a6df821ff6bdd444ee286"
+  },
+  {
+    "domain": ".nicportal.nic.co.in",
+    "httpOnly": false,
+    "name": "TS01c38ef6",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "016e9ded6b8ee774805851a316637e38233a529fde098c8f6f46a2d297c9f518aac321fd0f60c94e2b4852a13356e8d85572f33f40"
+  },
+  {
+    "domain": ".nic.co.in",
+    "expiry": 1770797501,
+    "httpOnly": false,
+    "name": "_gcl_au",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false,
+    "value": "1.1.125554925.1763021501"
+  }
+]

@@ -21,7 +21,9 @@ const {
 const { captureAndLogError } = require("./errorLogger");
 const { runFormFlow } = require("./formFlow");
 const { fillRelianceForm } = require("./relianceForm");
+const { fillNationalForm } = require("./national");
 const { extractCaptchaText } = require("./Captcha");
+// National uses fresh login for each job, no master session needed
 require("dotenv").config();
 const express = require("express");
 const multer = require("multer");
@@ -126,7 +128,7 @@ const processRelianceQueue = async () => {
       );
 
       // Run job in parallel (don't await)
-      runRelianceJob(job)
+      runPolicyJob(job)
         .catch((unexpectedError) => {
           // Safety net: Catch any unhandled errors
           console.error(
@@ -163,25 +165,47 @@ const processRelianceQueue = async () => {
   }
 };
 
-const runRelianceJob = async (job) => {
+const runPolicyJob = async (job) => {
   const jobIdentifier = `${job.formData.firstName}_${job._id}`;
   const JOB_TIMEOUT = 300000; // 5 minutes timeout per job
 
   try {
+    // Normalize company name - check both Companyname and company fields, convert to lowercase
+    const companyName = (job.formData.Companyname || job.formData.company || "reliance").toLowerCase();
+    const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
+    
     console.log(
-      `[Reliance Queue] Processing form for: ${job.formData.firstName} ${job.formData.lastName}`
+      `\n[${queueName}] Processing ${companyName} form for: ${job.formData.firstName} ${job.formData.lastName}`
+    );
+    console.log(
+      `[${queueName}] Company detection: job.formData.Companyname="${job.formData.Companyname}", job.formData.company="${job.formData.company}", normalized="${companyName}"`
     );
 
-    // Wrap fillRelianceForm with timeout protection
-    const fillFormPromise = fillRelianceForm({
-      username: "rfcpolicy",
-      password: "Pass@123",
-      ...job.formData,
-      _jobId: job._id, // Pass job ID for error logging
-      _jobIdentifier: jobIdentifier,
-      _attemptNumber: job.attempts + 1, // Current attempt number
-      _jobQueueCollection: jobQueueCollection, // Pass collection for logging
-    });
+    // Route to appropriate form filling function based on Companyname
+    let fillFormPromise;
+    if (companyName === "national") {
+      // National Insurance form
+      fillFormPromise = fillNationalForm({
+        ...job.formData,
+        username: "9999839907", // Always use this username for National
+        password: "Rayal$2025", // Always use this password for National
+        _jobId: job._id, // Pass job ID for error logging
+        _jobIdentifier: jobIdentifier,
+        _attemptNumber: job.attempts + 1, // Current attempt number
+        _jobQueueCollection: jobQueueCollection, // Pass collection for logging
+      });
+    } else {
+      // Reliance form (default)
+      fillFormPromise = fillRelianceForm({
+        username: "rfcpolicy",
+        password: "Pass@123",
+        ...job.formData,
+        _jobId: job._id, // Pass job ID for error logging
+        _jobIdentifier: jobIdentifier,
+        _attemptNumber: job.attempts + 1, // Current attempt number
+        _jobQueueCollection: jobQueueCollection, // Pass collection for logging
+      });
+    }
 
     const timeoutPromise = new Promise((_, reject) =>
       setTimeout(
@@ -501,14 +525,20 @@ db.once("open", async () => {
       isRegistrationAddressSame: data?.isRegistrationAddressSame,
       // Discount mapping (normalize multiple possible fields from Mongo)
       discount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
-      ODDiscount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount
+      ODDiscount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
+      // Company name mapping - check both 'company' and 'Companyname' fields, normalize to lowercase
+      Companyname: data?.Companyname || (data?.company ? data.company.toLowerCase() : "reliance")
     };
+    
     console.log(
       "formData: ******* ******* ******* ******* ******* ******* ",
       formData
     );
     console.log(
       `[MongoDB Watch] New customer data received: ${formData.firstName} (Captcha ID: ${captchaId})`
+    );
+    console.log(
+      `[MongoDB Watch] Company mapping: data.company="${data?.company}", data.Companyname="${data?.Companyname}", formData.Companyname="${formData.Companyname}"`
     );
 
     // Add to queue with captchaId reference
@@ -1028,14 +1058,16 @@ async function main() {
       console.log("=".repeat(60) + "\n");
 
       await initializeMasterSession();
+      console.log("✅ Reliance master session initialized successfully\n");
 
       console.log("\n" + "=".repeat(60));
       console.log("  ✅ READY TO PROCESS JOBS");
       console.log("=".repeat(60));
       console.log(
-        "📊 Session Status:",
+        "📊 Reliance Session Status:",
         JSON.stringify(getSessionStatus(), null, 2)
       );
+      console.log("📊 National: Uses fresh login for each job (no master session)");
       console.log("=".repeat(60) + "\n");
     } catch (e) {
       console.error("\n❌ Failed to initialize master session:", e.message);
