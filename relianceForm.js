@@ -1845,14 +1845,217 @@ async function fillRelianceForm(
               console.log(`✅ Filled financier address: ${data.financierAddress}`);
               await driver.sleep(800);
               
-              // Trigger events
+              // Trigger events WITHOUT blur to prevent form refresh/hiding fields
               await driver.executeScript(`
                 var el = arguments[0];
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
-                if (el.blur) el.blur();
+                // DO NOT trigger blur() as it may cause form to refresh and hide other fields
               `, financierAddressInput);
+              await driver.sleep(1000);
+              
+              // Re-trigger VehicleHypothicate() to ensure all financier fields remain visible
+              await driver.executeScript(`
+                if (typeof VehicleHypothicate === 'function') {
+                  try {
+                    VehicleHypothicate();
+                  } catch(e) {
+                    console.log('Error re-triggering VehicleHypothicate:', e);
+                  }
+                }
+              `);
+              await driver.sleep(1000);
+              
+              // Re-ensure all form fields are still visible after address fill
+              await driver.executeScript(`
+                // Ensure financier name field and its container are visible
+                var finNameInput = document.getElementById('AutoFinancierName');
+                var finNameDiv = document.getElementById('DivFinancierName');
+                if (finNameInput) {
+                  finNameInput.style.display = 'block';
+                  finNameInput.style.visibility = 'visible';
+                  var parent = finNameInput.closest('div, form, fieldset, tr, td');
+                  while (parent && parent.tagName !== 'BODY') {
+                    if (parent.style) {
+                      parent.style.display = '';
+                      parent.style.visibility = 'visible';
+                    }
+                    parent = parent.parentElement;
+                  }
+                }
+                if (finNameDiv) {
+                  finNameDiv.style.display = 'block';
+                  finNameDiv.style.visibility = 'visible';
+                }
+                
+                // Ensure financier type field is visible
+                var finTypeDiv = document.getElementById('DivFinancierType');
+                if (finTypeDiv) {
+                  finTypeDiv.style.display = 'block';
+                  finTypeDiv.style.visibility = 'visible';
+                }
+                
+                // Ensure vehicle details section is still visible
+                var vehicleSection = document.getElementById('VehicleDetailsMakeModel');
+                if (vehicleSection) {
+                  var parent = vehicleSection.closest('div, form, fieldset');
+                  if (parent) {
+                    parent.style.display = '';
+                    parent.style.visibility = 'visible';
+                  }
+                }
+                
+                // Ensure IDV fields are visible
+                var idvField = document.getElementById('IDVVehicle') || document.getElementById('ActualIDVVehicle');
+                if (idvField) {
+                  var idvParent = idvField.closest('div, form, fieldset');
+                  if (idvParent) {
+                    idvParent.style.display = '';
+                    idvParent.style.visibility = 'visible';
+                  }
+                }
+                
+                // Ensure discount field is visible
+                var discountField = document.getElementById('Detariff_Discount_Rate');
+                if (discountField) {
+                  var discountParent = discountField.closest('div, form, fieldset');
+                  if (discountParent) {
+                    discountParent.style.display = '';
+                    discountParent.style.visibility = 'visible';
+                  }
+                }
+              `);
               await driver.sleep(500);
+              
+              // Wait for any loaders to disappear that might have been triggered
+              await waitForLoaderToDisappear(driver);
+              
+              // Verify financier name field is still visible and restore if needed
+              try {
+                // First, get the current value to preserve it (use original as fallback)
+                let currentFinNameValue = '';
+                try {
+                  currentFinNameValue = await driver.executeScript(`
+                    var field = document.getElementById('AutoFinancierName');
+                    return field ? field.value : '';
+                  `);
+                } catch (e) {
+                  // If we can't get the value, use the original from data
+                  currentFinNameValue = data.financierName || '';
+                }
+                
+                // If value is empty, use original from data
+                if (!currentFinNameValue && data.financierName) {
+                  currentFinNameValue = data.financierName;
+                }
+                
+                const financierNameField = await driver.findElement(By.id("AutoFinancierName"));
+                const isFinNameVisible = await financierNameField.isDisplayed();
+                if (!isFinNameVisible) {
+                  console.log("⚠️ Financier name field hidden after address fill, attempting to restore...");
+                  await driver.executeScript(`
+                    var field = document.getElementById('AutoFinancierName');
+                    var finNameDiv = document.getElementById('DivFinancierName');
+                    var savedValue = arguments[0];
+                    if (field) {
+                      field.style.display = 'block';
+                      field.style.visibility = 'visible';
+                      field.removeAttribute('disabled');
+                      field.removeAttribute('readonly');
+                      // Restore the value if it was cleared
+                      if (!field.value && savedValue) {
+                        field.value = savedValue;
+                        // Trigger Kendo autocomplete to update if needed
+                        var widget = $(field).data('kendoAutoComplete');
+                        if (widget) {
+                          widget.value(savedValue);
+                          widget.trigger('change');
+                        }
+                      }
+                      var parent = field.closest('div, form, fieldset, tr, td');
+                      while (parent && parent.tagName !== 'BODY') {
+                        if (parent.style) {
+                          parent.style.display = '';
+                          parent.style.visibility = 'visible';
+                        }
+                        parent = parent.parentElement;
+                      }
+                    }
+                    if (finNameDiv) {
+                      finNameDiv.style.display = 'block';
+                      finNameDiv.style.visibility = 'visible';
+                    }
+                  `, currentFinNameValue);
+                  await driver.sleep(500);
+                } else {
+                  // Even if visible, ensure the value is preserved
+                  await driver.executeScript(`
+                    var field = document.getElementById('AutoFinancierName');
+                    var savedValue = arguments[0];
+                    if (field && !field.value && savedValue) {
+                      field.value = savedValue;
+                      var widget = $(field).data('kendoAutoComplete');
+                      if (widget) {
+                        widget.value(savedValue);
+                        widget.trigger('change');
+                      }
+                    }
+                  `, currentFinNameValue);
+                }
+                console.log("✅ Verified financier name field is still accessible");
+              } catch (verifyErr) {
+                console.log("⚠️ Could not verify financier name field:", verifyErr.message);
+                // Try to restore anyway with original value
+                await driver.executeScript(`
+                  var field = document.getElementById('AutoFinancierName');
+                  var finNameDiv = document.getElementById('DivFinancierName');
+                  var savedValue = arguments[0];
+                  if (field) {
+                    field.style.display = 'block';
+                    field.style.visibility = 'visible';
+                    field.removeAttribute('disabled');
+                    field.removeAttribute('readonly');
+                    if (!field.value && savedValue) {
+                      field.value = savedValue;
+                      var widget = $(field).data('kendoAutoComplete');
+                      if (widget) {
+                        widget.value(savedValue);
+                      }
+                    }
+                  }
+                  if (finNameDiv) {
+                    finNameDiv.style.display = 'block';
+                    finNameDiv.style.visibility = 'visible';
+                  }
+                `, data.financierName || '');
+              }
+              
+              // Verify critical fields are still present and visible
+              try {
+                const vehicleMakeField = await driver.findElement(By.id("VehicleDetailsMakeModel"));
+                const isVehicleVisible = await vehicleMakeField.isDisplayed();
+                if (!isVehicleVisible) {
+                  console.log("⚠️ Vehicle field hidden after financier address, attempting to restore...");
+                  await driver.executeScript(`
+                    var field = document.getElementById('VehicleDetailsMakeModel');
+                    if (field) {
+                      field.style.display = 'block';
+                      field.style.visibility = 'visible';
+                      var parent = field.closest('div, form, fieldset, tr, td');
+                      while (parent && parent.tagName !== 'BODY') {
+                        if (parent.style) {
+                          parent.style.display = '';
+                          parent.style.visibility = 'visible';
+                        }
+                        parent = parent.parentElement;
+                      }
+                    }
+                  `);
+                }
+                console.log("✅ Verified vehicle fields are still accessible");
+              } catch (verifyErr) {
+                console.log("⚠️ Could not verify vehicle fields:", verifyErr.message);
+              }
             } else {
               console.log("No financier address provided");
             }
