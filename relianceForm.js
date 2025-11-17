@@ -807,7 +807,7 @@ async function fillRelianceForm(
       );
       await safeSendKeys(driver, By.id("block"), data.blockNo || "A");
       await safeSendKeys(driver, By.id("road"), data.road || "MG Road");
-      await safeSendKeys(driver, By.id("area"), data.road || "MG Road");
+      await safeSendKeys(driver, By.id("area"), data.areaAndLocality || data.area || data.locality || "MG Road");
 
       // === ADDRESS DROPDOWNS - Simplified approach ===
       console.log("Filling address dropdowns...");

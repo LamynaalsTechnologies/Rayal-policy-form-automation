@@ -2,14 +2,11 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { Server } = require("socket.io");
-const { MongoClient } = require("mongodb");
 const {
   getDriver,
   openNewTab,
-  ensureLoggedIn,
   closeCurrentTab,
   ensureCleanState,
-  createFreshDriverFromBaseProfile,
   createChromeDriver,
 } = require("./browser");
 const {
@@ -19,7 +16,6 @@ const {
   reLoginIfNeeded,
 } = require("./sessionManager");
 const { captureAndLogError } = require("./errorLogger");
-const { runFormFlow } = require("./formFlow");
 const { fillRelianceForm } = require("./relianceForm");
 const { fillNationalForm } = require("./national");
 const { extractCaptchaText } = require("./Captcha");
@@ -486,6 +482,7 @@ db.once("open", async () => {
       premisesName: data?.buildingName,
       blockNo: data?.blockName || data?.blockNo,
       road: data?.roadStreetLane || data?.road,
+      areaAndLocality: data?.areaAndLocality || data?.area || data?.locality || "",
       state: data?.state == "TAMILNADU" ? "30" : data?.state == "KARNATAKA" ? "26" : "30",
       pinCode: data?.pincode,
       // Contact details
@@ -924,156 +921,32 @@ const server = http.createServer((req, res) => {
 
 const io = new Server(server);
 
-const url =
-  "mongodb+srv://karthikeyanthavamani86:karthi123@cluster0.zqxsu.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
-const client = new MongoClient(url);
-const dbName = "selenium-form-filler";
+// Start server
+server.listen(8800, async () => {
+  console.log("Server started on http://localhost:8800");
 
-async function main() {
-  await client.connect();
-  console.log("Connected successfully to MongoDB");
-  const db = client.db(dbName);
-  const collection = db.collection("data");
-  const portalLoginUrl =
-    "https://smartzone.reliancegeneral.co.in/Login/IMDLogin";
-  const portalHomeUrl = "https://www.uiic.in/GCWebPortal/login/HomeAction.do";
+  // ============================================
+  // INITIALIZE MASTER SESSION
+  // ============================================
+  try {
+    console.log("\n" + "=".repeat(60));
+    console.log("  🚀 INITIALIZING RELIANCE AUTOMATION");
+    console.log("=".repeat(60) + "\n");
 
-  // Job queue with unbounded parallel jobs using TABS on a single driver
-  const jobQueue = [];
-  let activeJobs = 0;
+    await initializeMasterSession();
+    console.log("✅ Reliance master session initialized successfully\n");
 
-  const enqueueJob = (job) => {
-    jobQueue.push(job);
+    console.log("\n" + "=".repeat(60));
+    console.log("  ✅ READY TO PROCESS JOBS");
+    console.log("=".repeat(60));
     console.log(
-      `[queue] Enqueued job amount=%s; queued=%d active=%d`,
-      job.amount,
-      jobQueue.length,
-      activeJobs
+      "📊 Reliance Session Status:",
+      JSON.stringify(getSessionStatus(), null, 2)
     );
-    void processQueue();
-  };
-
-  const processQueue = async () => {
-    // Start all queued jobs immediately (be mindful of CPU/RAM usage)
-    while (jobQueue.length > 0) {
-      const job = jobQueue.shift();
-      activeJobs++;
-      console.log(
-        `[queue] Starting job amount=%s; active=%d queued=%d`,
-        job.amount,
-        activeJobs,
-        jobQueue.length
-      );
-
-      // Run job in parallel (don't await)
-      runJob(job).finally(() => {
-        activeJobs--;
-        console.log(
-          `[queue] Job completed amount=%s; active=%d queued=%d`,
-          job.amount,
-          activeJobs,
-          jobQueue.length
-        );
-        // Process more jobs if capacity available
-        void processQueue();
-      });
-    }
-  };
-
-  const runJob = async (job) => {
-    const { amount, socketId } = job;
-    const socket = io.sockets.sockets.get(socketId);
-    const baseProfileDir = path.join(__dirname, "chrome-profile");
-    let driver = null;
-    let tempProfileDir = null;
-    try {
-      // Create a fresh Chrome/WebDriver per job by cloning base profile (preserves login)
-      const created = await createFreshDriverFromBaseProfile(baseProfileDir);
-      driver = created.driver;
-      tempProfileDir = created.profileDir;
-
-      // Navigate and ensure login inside this independent browser
-      await driver.get("https://www.uiic.in/GCWebPortal/login/HomeAction.do");
-      await ensureLoggedIn(driver, 15000);
-
-      // Run the form flow with timeout guard
-      const formFlowPromise = runFormFlow(driver, amount);
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(
-          () => reject(new Error("Form flow timeout after 2 minutes")),
-          120000
-        )
-      );
-      await Promise.race([formFlowPromise, timeoutPromise]);
-
-      if (socket) socket.emit("autofill:success", { amount });
-    } catch (e) {
-      console.error("[queue] Job failed:", e);
-      if (socket)
-        socket.emit("autofill:error", {
-          amount,
-          error: String((e && e.message) || e),
-        });
-    } finally {
-      // Cleanup this job's driver and temp profile
-      try {
-        if (driver) await driver.quit();
-      } catch {}
-      if (tempProfileDir) {
-        try {
-          await deleteDirectoryRecursive(tempProfileDir);
-        } catch {}
-      }
-    }
-  };
-
-  async function deleteDirectoryRecursive(dirPath) {
-    if (!fs.existsSync(dirPath)) return;
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(dirPath, entry.name);
-      try {
-        if (entry.isDirectory()) {
-          await deleteDirectoryRecursive(fullPath);
-        } else {
-          fs.unlinkSync(fullPath);
-        }
-      } catch {}
-    }
-    try {
-      fs.rmdirSync(dirPath);
-    } catch {}
+    console.log("📊 National: Uses fresh login for each job (no master session)");
+    console.log("=".repeat(60) + "\n");
+  } catch (e) {
+    console.error("\n❌ Failed to initialize master session:", e.message);
+    console.error("⚠️  Jobs may require manual login\n");
   }
-
-
-  server.listen(8800, async () => {
-    console.log("Server started on http://localhost:8800");
-
-    // ============================================
-    // INITIALIZE MASTER SESSION
-    // ============================================
-    try {
-      console.log("\n" + "=".repeat(60));
-      console.log("  🚀 INITIALIZING RELIANCE AUTOMATION");
-      console.log("=".repeat(60) + "\n");
-
-      await initializeMasterSession();
-      console.log("✅ Reliance master session initialized successfully\n");
-
-      console.log("\n" + "=".repeat(60));
-      console.log("  ✅ READY TO PROCESS JOBS");
-      console.log("=".repeat(60));
-      console.log(
-        "📊 Reliance Session Status:",
-        JSON.stringify(getSessionStatus(), null, 2)
-      );
-      console.log("📊 National: Uses fresh login for each job (no master session)");
-      console.log("=".repeat(60) + "\n");
-    } catch (e) {
-      console.error("\n❌ Failed to initialize master session:", e.message);
-      console.error("⚠️  Jobs may require manual login\n");
-    }
-  });
-}
-
-main().catch(console.error);
+});

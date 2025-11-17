@@ -1,0 +1,2497 @@
+<html class=" js "><head>
+    
+    <title>Welcome TO IMD</title>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge">
+    <meta name="viewport" content="width=device-width">
+    
+    <link href="/Content/iRPASStyles?v=ia2MtPnmUbsLJiNXCAN9D9YdFag7eeVvsSMPECYQN_c1" rel="stylesheet">
+
+<script src="/bundles/jquery?v=HwRBY4S5DH99yXfDQlKbIANjFCPJHIASKNaGorC3sh41"></script><script src="/bundles/jqueryval?v=FiB9eONGNpl_isWMvSpjSuRp8eqVNzOLMl_DRpWixfY1"></script><link href="/Content/iRPAS/bundle?v=xq_I7b7XLVdFPImdXGJRvydSSqoyFM_3VpWjufVLfnw1" rel="stylesheet"><script src="/bundles/iNube?v=9l_9WxbCAxS9UeG4KfbcFVs9jBMySmWcZ1ZHyzO8XhY1"></script><script src="/bundles/iRPASScripts1?v=MtYwmLBi8sSuxiQz7ad_ch_rDx2by5BdpLtCQ77PNY81"></script><script src="/Scripts/KendoJS/NewKendo.js"></script><script src="/bundles/iRPASScripts2?v=-tToP_EcaSke6T54Zy67nfsnutm2Ux1v1_bSXCEfWkk1"></script><script src="/Scripts/VideoCall/rgil-bridge.js"></script><script type="text/javascript">
+    kendo.culture("en-IN");
+    var isUserOnline = "Online";
+    $(window).bind('beforeunload', function () {
+
+        //toggleBusyIndicator("show");// Commented This line of code because In case of Download Excel, Busy Indicator is not disappearing
+
+    });
+    $(document).ajaxSend(function (event, jqXHR, settings) {
+
+        if (settings.url.toLowerCase().indexOf("api/master") >= 0 || settings.BusyDivID != undefined) {
+            if (settings.BusyDivID != undefined) {
+                if (!settings.BusyDivID.match('^#'))
+                    $("#" + settings.BusyDivID).showBusy();
+                else
+                    $(settings.BusyDivID).showBusy();
+            }
+        }
+        else {
+            toggleBusyIndicator("show");
+        }
+
+
+    });
+
+    $(document).ajaxComplete(function (event, jqXHR, settings) {
+        if (settings.url.toLowerCase().indexOf("api/master") >= 0 || settings.BusyDivID != undefined) {
+            if (settings.BusyDivID != undefined) {
+                if (!settings.BusyDivID.match('^#'))
+                    $("#" + settings.BusyDivID).hideBusy();
+                else
+                    $(settings.BusyDivID).hideBusy();
+            }
+        }
+        else {
+            toggleBusyIndicator("hide");
+        }
+        if (jqXHR.status == 789) {
+            if (jqXHR.statusText != "" && jqXHR.statusText != "error") {
+                writeMultipleMessage("error", jqXHR.statusText, "789");
+            }
+            else {
+                writeMultipleMessage("error", "Some Error has Occurred in the system. Please contact administrator ", "789");
+            }
+        }
+        //
+        if (jqXHR.status == 401) {
+            window.location = '../../Login/IMDLogin';
+            //  location.reload();
+        }
+    });
+    $.ajaxSetup({
+        error: function (jqXHR, exception) {
+
+            if (jqXHR.status === 0 && isUserOnline === "Offline") {
+
+                alert('Not connect.\n Verify Network.');
+
+            }
+            if (jqXHR.status == 789) {
+                if (jqXHR.statusText != "" && jqXHR.statusText != "error") {
+                    writeMultipleMessage("error", jqXHR.statusText, "789");
+                }
+                else {
+                    writeMultipleMessage("error", "Some Error has Occurred in the system. Please contact administrator ", "789");
+                }
+            }
+            // Added by Zeeshan for Redirecting to login page
+            if (jqXHR.status == 401) {
+                window.location = '../../Login/IMDLogin';
+                //  location.reload();
+            }
+        }
+    });
+
+    (function () {
+        isOffline = function () {
+            isUserOnline = "Offline";
+        };
+
+        if (window.addEventListener) {
+            // window.addEventListener("online", isOnline, false);
+            window.addEventListener("offline", isOffline, false);
+        }
+        else {
+            // document.body.ononline = isOnline;
+            // document.body.onoffline = isOffline;
+        }
+    })();
+</script></head>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   
+
+
+
+<body>
+<div id="modal-background" class="">
+</div>
+<div id="divBusyIndicator" class="text_over_image">
+    Please Wait...
+</div>
+<div>
+    <header id="divMenu">
+
+
+
+ 
+ <input id="HdnBaseURL" name="HdnBaseURL" type="hidden" value="https://apilive.violetlms.com">
+ <input id="HdnAPIId" name="HdnAPIId" type="hidden" value="226939d4-f3ca-4358-8303-4bc9c9da6635">
+ <input id="HdnAPISecretKey" name="HdnAPISecretKey" type="hidden" value="kQewcwAGW6I7Yia5iBIxJg==">
+ <input id="HdnUserCode" name="HdnUserCode" type="hidden" value="rfcpolicy">
+ <input id="HdnBaseURLTokenMethod" name="HdnBaseURLTokenMethod" type="hidden" value="/api/v1/token/sso/generate">
+ <input id="HdnBaseURLValidateMethod" name="HdnBaseURLValidateMethod" type="hidden" value="/api/v1/token/sso/validate">
+ 
+
+ 
+ <input id="HdnRMSTokenServiceURL" name="HdnRMSTokenServiceURL" type="hidden" value="https://efinder.reliancegeneral.co.in/TokenManager/api/TokenService/Get">
+ <input id="HdnRMSValidateTokenServiceURL" name="HdnRMSValidateTokenServiceURL" type="hidden" value="http://efinder.reliancegeneral.co.in/RMSVideoApp/RMSCAUserValidation">
+ <input id="HdnRMSSourceSystem" name="HdnRMSSourceSystem" type="hidden" value="Smart Zone">
+ <input id="HdnUserCode" name="HdnUserCode" type="hidden" value="rfcpolicy">
+ 
+<div style="z-index: 900000;">
+    <div id="divtopMenu" style="margin-top: 10px;">
+        <div style="float: left;" class="100002SNHideListItem">
+            
+            <img src="/Images/RLogo.png" style="cursor: pointer;" onclick="https://www.reliancegeneral.co.in/insurance/healthcare-and-wellness/temp/healthcare-articles.aspx">
+            
+        </div> 
+       
+    <div style="margin-left:81%; margin-bottom:2%">
+            <img src="/Images/rel-num.png">
+        <div>
+            <a id="RedirectToResponsiveSmartzone" href="../../Login/Redirect_SmartLogin" style="position: absolute;font-weight:bold;font-size:14px;text-decoration:underline;margin-left: 35px;">Go to new SmartZone</a>
+        </div>
+     </div>
+     
+    <div><img src="/Images/smartzone.png" style="margin-top: -1%;margin-left:3%;position: absolute;width: 20%;"></div>
+
+   
+
+
+    <div id="mainMenuBar" class="mainMenuBar">
+    <div id="topMenu">
+            <div id="leftRelinceImg">
+            </div>
+        </div>
+     
+         
+         
+        <div style="float: right; cursor: pointer;" id="MenuImages">
+                <div id="divMainMarines" data-hovertarget="#divSubMarines" style="float: left;" class="MainMenu marine" cls="MainMenu marine">
+                </div>
+                <div id="divMainPackages" data-hovertarget="#divSubPackages" style="float: left;" class="MainMenu package" cls="MainMenu package">
+                </div>
+                <!-- #T2376-->  <div id="divMainLiability" data-hovertarget="#divSubLiability" style="float: left;" class="MainMenu Liability" cls="MainMenu Liability">
+                                </div>
+                <div id="divMainMisc" data-hovertarget="#divSubMisc" style="float: left;" class="MainMenu misc" cls="MainMenu misc">
+                </div>
+                                <div id="divMainTravels" data-hovertarget="#divSubTravels" style="float: left;" class="MainMenu travel" cls="MainMenu travel">
+                                </div>
+                                <div id="divMainHealths" data-hovertarget="#divSubHealths" style="float: left;" class="MainMenu health" cls="MainMenu health">
+                                </div>
+                                <div id="divMainMotors" data-hovertarget="#divSubMotors" style="float: left;" class="MainMenu motor" cls="MainMenu motor">
+                                </div>
+                <div id="divMainUtility" data-hovertarget="#divSubUtility" style="float: left;" class="MainMenu utilities" cls="MainMenu utilities">
+                </div>
+                        <div id="divMainPay" data-hovertarget="#divSubPay" style="float: left;" class="MainMenu payment" cls="MainMenu payment">
+                        </div>
+                    <div id="divMainUser" data-hovertarget="#divSubUser" style="float: left;" class="MainMenu admin" cls="MainMenu admin">
+                    </div>
+
+            
+        </div>
+    </div>
+    <div id="subMenuBar" class="subMenu" style="z-index: 900000; margin-top: -1%; margin-right: 258px; right: 0px; display: none;">
+        
+        <div id="divSubMotors" class="submenu" data-hoverparenttarget="#divMainMotors" onmouseover="changeSubMenuColor(this)" onmouseout="changeMainMenuBg(this)" style="display: block;">
+                <div style="float: left; border-right: none !important;" class="submenuColumn">
+                <ul>
+                        <li class="submenuheader">Quote</li>
+                                                <li><a href="/Motor/PartialQuoteProducTypes?baseProductCode=JUaWLJS3jRfEuPj%252bncNnsw%253d%253d">Private Car</a></li>
+                                                <li><a href="/Motor/PartialQuoteProducTypes?baseProductCode=qNqXB5%252bwj5cfBNx%252fo5dSgA%253d%253d">Two Wheeler</a></li>
+                                                <li><a href="/Motor/PartialQuoteProducTypes?baseProductCode=kSMwyJlxDJCv4pop9OaBqg%253d%253d">GCV</a></li>
+                                                <li><a href="/Motor/PartialQuoteProducTypes?baseProductCode=Yk6sv5zUGlLAQnBrSDuBuA%253d%253d">PCV</a></li>
+                                                <li><a href="/Motor/PartialQuoteProducTypes?baseProductCode=u6Q0ru04e2Lf%252fCXQeNXCeA%253d%253d">Misc Class-D</a></li>  
+                                                <li><a href="/Motor/PartialQuoteProducTypes?baseProductCode=5qCTUvEsUgkYLvAZ4sQ9pQ%253d%253d">Extended warranty</a></li>  
+
+                </ul>
+            </div>
+        </div>
+        
+            <div id="divSubHealths" class="submenu" data-hoverparenttarget="#divMainHealths" onmouseover="changeSubMenuColor(this)" onmouseout="changeMainMenuBg(this)" style="display: none;">
+                <div style="float: left; border-right: none !important;" class="submenuColumn">
+                    <ul>
+                        <li class="submenuheader">Health</li>
+                                <li><a href="/Login/Redirect_SmartLogin"><span>Healthwise</span></a></li>                                                        <li><a href="/Login/Redirect_SmartLogin"><span>HealthGain</span></a></li>                                                            <li><a href="/Login/Redirect_SmartLogin"><span>Personal Accident</span></a></li>                                                             <li><a href="/Login/Redirect_SmartLogin"><span>Critical Illness</span></a></li>                                                          <li><a href="/Login/Redirect_SmartLogin"><span>Health Infinity</span></a></li>
+                                                          <li><a href="/Login/Redirect_SmartLogin"><span>Arogya Sanjeevani</span></a></li>
+                                                                                                            <li><a href="/Login/Redirect_SmartLogin"><span>Hospicare</span></a></li>
+                                                         <li><a href="/Login/Redirect_SmartLogin"><span>Super Top-Up</span></a></li>
+                                                                             <li><a href="/Login/Redirect_SmartLogin"><span>HealthGain New</span></a></li>
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Health Global</span></a></li>
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Reliance Personal Accident 360Shield </span></a></li>
+                                            </ul>
+                </div>
+            </div>
+                    <div id="divSubTravels" class="submenu" data-hoverparenttarget="#divMainTravels" onmouseover="changeSubMenuColor(this)" onmouseout="changeMainMenuBg(this)" style="display: none;">
+                <div style="float: left;" class="submenuColumn">
+                                        <ul>
+                                            
+                                            <li class="submenuheader">Retail</li>
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Individual</span></a></li>
+
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Family</span></a></li>
+
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Individual and Family Plan</span></a></li>
+
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Student</span></a></li>
+
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Asia</span></a></li>
+
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Schengen</span></a></li>
+
+                                                    <li><a href="/Login/Redirect_SmartLogin"><s3pan>Annual Multi Trip</s3pan></a></li>
+
+                                            
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Senior Citizen (71-90 yrs)</span></a></li>
+
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Senior Citizens (61-70 yrs)</span></a></li>
+
+                                                    <li><a href="/Travel/RetailTravelEndorsement?travelCategory=YnuOoRR%252fAVkjHYsova3%252fMQ%253d%253d">Retail Endorsement</a></li>
+
+                                        </ul>
+
+
+                </div>
+                    <div style="float: left; border-right: none !important;" class="submenuColumn">
+                        <ul>
+                            <li class="submenuheader">Corporate</li>
+                                <li><a href="/Travel/CorporateCertificationCreation?certificatType=DYHZDhhtLB0UG4zCxiR59kgLUcYiBXHlBdIWQo7UDvI%253d&amp;certificatTypeCode=TdMLxGxNzBrPnKkdtlWg%252fg%253d%253d&amp;corpPlanTypeId=yi%252fmje3vrj8NzCLEU50%252bvw%253d%253d">Corporate Flexi(Annual)</a></li>
+                                                            <li><a href="/Travel/CorporateCertificationCreation?certificatType=DYHZDhhtLB0UG4zCxiR59jVN14nac86qPX1165%252bNg0k%253d&amp;certificatTypeCode=TdMLxGxNzBrPnKkdtlWg%252fg%253d%253d&amp;corpPlanTypeId=mB7n53bli7StWncPDPodWw%253d%253d">Corporate Flexi(Short)</a></li>
+                                                                <li><a href="/Travel/CorporateCertificationCreation?certificatType=T2sCI1uHaQtgp%252buB%252bDlzNaOTiDixwTllDU4fxBg0ASI%253d&amp;certificatTypeCode=CN6cHr9ir%252b5t7IidwdKy0Q%253d%253d&amp;corpPlanTypeId=yi%252fmje3vrj8NzCLEU50%252bvw%253d%253d">Corporate AnnualMulti Trip</a></li>
+                                                                <li><a href="/Travel/CorporateCertificationCreation?certificatType=EMy2Gr%252fQpQNTmlVnEC85GNjaN6oB6rCN%252felOt27cEJA%253d&amp;certificatTypeCode=2vJnISzL3dwSmyE6F8NmgA%253d%253d&amp;corpPlanTypeId=mB7n53bli7StWncPDPodWw%253d%253d">Corporate Short Term</a></li>
+                                
+                        </ul>
+                    </div>
+            </div>
+      
+            <div id="divSubPackages" class="submenu" data-hoverparenttarget="#divMainPackages" onmouseover="changeSubMenuColor(this)" onmouseout="changeMainMenuBg(this)" style="display: none;">
+                                <div style="float: left; border-right: none !important;" class="submenuColumn">
+                    <ul>
+                            <li class="submenuheader">Traditional</li>
+  
+                          
+
+                            <li><a href="/Package/TRPackage?Product_Code=CC8NZV%2Fygujp%2Fqu2Dlj2Sw%3D%3D">Shop Keeper</a></li>
+                                                        <li><a href="/Package/TRPackage?Product_Code=EOjDM0AsV1HuaZ8TrQEG%2Fg%3D%3D">House Holder</a></li>
+
+                    </ul>
+                </div>
+            </div>
+            <div id="divSubLiability" class="submenu" data-hoverparenttarget="#divMainLiability" onmouseover="changeSubMenuColor(this)" onmouseout="changeMainMenuBg(this)" style="display: none;">
+                <div style="float: left; border-right: none !important;" class="submenuColumn">
+                    <ul>
+                        <li class="submenuheader">Quotes</li>
+                                    <li><a href="/EmployeeCompensation/EmployeeCompensation?productCode=LkoSkBmiphbj%2Fm%2B9ZBQOfg%3D%3D&amp;Quickquote=true">Employee Compensation</a></li>
+                                    <li><a href="/ProfessionalIdemnity/ProfessionalIdemnity?productCode=62kKNX85OEYapGvdZ72kwA%3D%3D&amp;Quickquote=true">Professional Idemnity</a></li>
+
+                    </ul>
+                </div>
+            </div>
+                                        <div id="divSubServiceReq" class="submenu" data-hoverparenttarget="#divMainServiceReq" onmouseover="changeSubMenuColor(this)" onmouseout="changeMainMenuBg(this)" style="display: none;">               
+                                    <div style="float: left; border-right: none !important; class=" submenucolumn"="">
+                        <ul>
+                            <li class="submenuheader">Service Request</li>
+                                                    <li>
+                                                                                            <a href="#" id="CreateServiceRequest1">Create Service Request</a>
+                            </li>
+                        </ul>
+                    </div>
+            </div>
+
+                                    <div id="divSubMarines" class="submenu" data-hoverparenttarget="#divMainMarines" onmouseover="changeSubMenuColor(this)" onmouseout="changeMainMenuBg(this)" style="display: none;">
+                                            <div style="float: left;" class="submenuColumn">
+                                                <ul>
+                                                    <li class="submenuheader">Reliance Sea Star </li>
+                                                        <li><a href="/SeaStarCertificate/ConditionsPage">Issue Certificate</a></li>
+                                                                                                            <li style="line-height: 14px; padding-bottom: 5px;"><a href="/SeaStarCertificate/SearchMarinePolicy">Update Provisional Certificate</a></li>
+                                                                                                            <li><a href="/SeaStarCertificate/ViewCertificate?MarineCategory=lBNTmcpw4cHacx0CyPAJbJsG70%252fHXbLUagyivWRR0iU%253d">View Certificate</a></li>
+                                                                                                            <li><a href="/SeaStarCertificate/ConvertQuotetoPolicy">Finalise Certificate</a></li>
+                                                                                                            <li style="line-height: 14px; padding-bottom: 5px;"><a href="/SeaStarCertificate/ViewMISMasterReport?MarineCategory=zNXsXE%252b%252baEEK8k6aZyIL4g%253d%253d">Download MIS Report SeaStar</a></li>
+
+                        </ul>
+                    </div>
+                                        <div style="float: left; border-right: none !important;" class="submenuColumn">
+                        <ul>
+                            <li class="submenuheader">Open Cover</li>
+                                    <li><a href="/SeaStarCertificate/OpenCoverList">Issue Certificate</a></li>
+                                                                <li style="line-height: 14px; padding-bottom: 5px;"><a href="/SeaStarCertificate/UpdateProvisionalCertificateOC">Update Provisional Certificate</a></li>
+                                                                <li><a href="/SeaStarCertificate/ViewCertificate?MarineCategory=r5kZ6VTYPDKVY70azJkuhi1tESMtdhD2jqvwX7h4pgY%253d">View Certificate</a></li>
+                                                                <li><a href="/SeaStarCertificate/ConvertQuotetoPolicyOC">Finalise Certificate</a></li>
+                                                            <li style="line-height: 14px; padding-bottom: 5px;"><a href="/SeaStarCertificate/ViewMISMasterReport?MarineCategory=jM9vuZSL%252bYLb7lc6KhAwRw%253d%253d">Download MIS Report Open Cover</a></li>
+                        </ul>
+                    </div>
+            </div>
+                    <div id="divSubUtility" class="submenu" data-hoverparenttarget="#divMainUtility" onmouseover="changeSubMenuColor(this)" onmouseout="changeMainMenuBg(this)" style="display: none;">
+                <div style="float: left;" class="submenuColumn">
+                    <ul>
+                        <li class="submenuheader">My Policy</li>
+                                                
+                                                    <li>
+                                                        <a area="" href="/Policy/ViewPolicySearch">View Policy</a>
+                            </li>
+                                                
+                                                
+                                                <li>
+                                                    <a area="" href="/Healthwise/ViewProposalForm">View Proposal Form</a>
+                            </li>
+                                                
+                        <li><a area="" href="/EmployeeCompensation/ECProposalForm">View ECProposal Form</a></li>
+                        
+                        <li><a area="" href="/Burglary/BurglaryProposalForm">View Burglary Proposal Form</a></li>
+                        
+                        <li><a area="" href="/CPM/CPMProposalForm">View CPM Proposal Form</a></li>
+
+                        
+                        <li><a area="" href="/Fire/FireProposalForm">View Fire Proposal Form</a></li>
+
+                       
+                         <li><a href="/Home/SavvionInbox">Quotes from UW</a></li>
+                        <li><a href="/Policy/SavionQuotesearch">Search Quote</a></li>
+                        
+                        <li><a href="/Admin/ViewFiles">View Files</a></li>
+                        <li><a href="/Policy/EndorsementForIMD">Endorsement</a></li>
+                                <li><a href="/Policy/LinkAadharandPAN" target="_blank">Link Aadhar and PAN</a></li>
+                        <li><a id="RedirectToUploadDocument" href="../../Login/Redirect_SmartLogin?RedirectPage=UploadDocument&amp;TargetSystem=RSZ">Upload Document</a></li>
+                        <li><a href="/Home/SearchEnachProposal">Enach Status</a></li>
+
+                         
+                    </ul>
+                </div>
+                                                        <div style="float: left; height:270px" ;="" class="submenuColumn">
+                    <ul>
+                        <li class="submenuheader">Services</li>
+
+                                                    
+                                                    <li>
+                                                        <a target="_tab" href="Key not found">Training</a>
+                                                    </li>
+
+                                                    <li>
+                                                        <a href="../../Uploads/QC _checklist.xlsx">QC Checklist</a>
+                            </li>
+
+                                <!--<li><a target="_tab" href="http://imd.reliancegeneral.co.in/AgentServices/leadcreation.aspx">Inspection Request</a>
+                                </li>-->
+                        <li>
+                            <a href="/Services/InspectionRequest/btnclaimStatus" target="_blank">Inspection Request / Status</a>
+                                </li>
+                                <li>
+                                    <a href="/Services/ClaimIntimationLink">Claim Intimation</a>
+                                </li>
+                        
+
+                                    <li>
+                                        <a href="/Services/Services/btnOnlinePaymentDetails">Online Payment Details</a>
+                                    </li>
+                                                
+                                                <li><a href="/Services/DailySalesReport?ReportType=BhNDn71tIdFuyLYwAtCVgA%253d%253d">Daily Sales Report</a></li>
+                                    <li>
+                                        <a href="/Services/Services/btnChequeStatus">Cheque Status</a>
+                                    </li>
+                                    <li>
+                                        <a href="/Services/Services/btnclaimStatus">Claim Status</a>
+                                    </li>
+                                    <li>
+                                        <a href="/Services/Services/btnproposalStatus">Proposal Status</a>
+                                    </li>
+                                    <li>
+                                        <a href="/Services/Services/btnbouncedCheques">Bounced Cheques</a>
+                                    </li>
+                                    <li>
+                                        <a href="/Policy/ReValidateQuote">Revalidate Quote</a>
+                                    </li>
+                         
+                             <li><a href="javascript:GetiLearnCTALink()">iLearn CTA Link</a></li>
+                                    <li>
+                                        <a href="/Services/HealthClaimIntimation">Health Claim Intimation</a>
+                                    </li>
+                                     
+                                    <li>
+                                        <a href="/Services/PACIClaimIntimation" style="display: none;">PACI Claim Intimation</a>
+                                    </li>
+                                    
+
+                            </ul>
+
+                        </div>
+                                                <div style="float: left; height:270px" ;="" class="submenuColumn">
+                            <ul>
+                                <li class="submenuheader">Advanced Services</li>
+
+                                    <li>
+                                        <a href="/Services/Services/btnrenewalNotice">Renewal Notice</a>
+                            </li>
+
+                                <li>
+                                    <a href="/Services/Services/btnCommissionStatement">Commission Statement</a>
+                            </li>
+
+                            <li>
+                                <a href="/Services/Services/btnTDSCertificate">TDS Certificate</a>
+                            </li>
+
+
+
+
+                         
+                           
+                           
+                                 
+
+                                
+                         
+                    </ul>
+                </div>
+                            <div style="float: left; border-right: none !important;" class="submenuColumn">
+                    <ul>
+                        <li class="submenuheader">DashBoards</li>
+                            <li>
+                                <a href="/IMDDashBoard/DashBoard/AgentReports?ReportType=1">Business Profile</a>
+                                                                </li>
+                            <li>
+                                <a href="/IMDDashBoard/DashBoard/AgentReports?ReportType=4">Complaints</a>
+                                                                </li>
+                            <li>
+                                <a href="/IMDDashBoard/DashBoard/AgentReports?ReportType=6">Claims</a>
+                                                                </li>
+                            <li>
+                                <a href="/IMDDashBoard/DashBoard/AgentReports?ReportType=7">Others</a>
+                                                                </li>
+                                                    <li>
+                                                        <a target="_tab" href="https://www.reliancegeneral.co.in/Insurance/Agent-Survey-Smartzone.aspx">Training Requirement Survey</a>
+                                                    </li>
+                                                    <li>
+                                                        <a href="/DashBoard/RenewalCalendar">Renewal Calendar</a>
+                                                    </li>
+                                                </ul>
+                                            </div>
+                                                                                       <div style="float: left; border-right: none !important;width: 110px;" class="submenuColumn">
+                            <ul>
+                                <li class="submenuheader">Video Call</li>
+                               
+                                <li><a href="/Customer/CustomerDetails">New request</a></li>
+                                <li><a href="/Customer/VideoCallHistory">See recorded video</a></li>
+                            </ul>
+                        </div>
+
+                </div>
+                            <div id="divSubUtilityCSC" class="submenu" data-hoverparenttarget="#divMainUtilityCSC" onmouseover="changeSubMenuColor(this)" onmouseout="changeMainMenuBg(this)" style="display: none;">
+                                    <div style="float: left;" class="submenuColumn">
+                                        <ul>
+                                            <li class="submenuheader">My Policy</li>
+                                        </ul>
+        </div>
+                                                                    <div style="float: left; height:auto" ;="" class="submenuColumn">
+                                        <ul>
+                                            <li class="submenuheader">Services</li>
+                                            
+                                                                                                                                    <li>
+                                                <a href="/TPRate/TPRateDownload">TP Rate Download</a>
+                                            </li>
+                                            
+                                            <li>
+                                                <a href="/Services/InspectionRequest/btnclaimStatus" target="_blank">Inspection Request / Status</a>
+                                            </li>
+                                            
+                                        </ul>
+                                    </div>
+                                <div style="float: left;" class="submenuColumn">
+                                    <ul>
+                                        <li class="submenuheader">Self Help</li>
+                                        <li><a href="/Services/SelfHelp">Quick Link</a></li>                                                                                 
+                                    </ul>
+                                </div>
+                            </div>
+                            
+
+                                    <div id="divSubPay" class="submenu" data-hoverparenttarget="#divMainPay" onmouseover="changeSubMenuColor(this)" onmouseout="changeMainMenuBg(this)" style="display: none;">
+                                        <div style="float: left; border-right: none !important;" class="submenuColumn">
+                                            <ul>
+
+
+                                                    <li>
+                                                        <a href="/Payment/Payments?pageName=XhIEGvE4S2ipze7xJW7wmIFef%252b42e%252b6H6mk6l%252f76i0s%253d">Pending Quotes</a>
+                                                    </li>
+                                                                                                    <li>
+                                                        <a href="/Payment/Payments?pageName=n2LRTwFTsOX3%252bZmr6yFWPa4DOal1ZktKUztQAZYWf4I%253d">CD Replenshiment</a>
+                                                    </li>
+                                                                                                    <li>
+                                                        <a href="/Payment/TrackTransactionStatus">Track Payment</a>
+                            
+                        </li>
+                                                                    <li>
+                            <a href="/Payment/PaymentLinks">Payment Links</a>
+                        </li>
+                                                                                        </ul>
+            </div>
+        </div>
+                    <div id="divSubUser" class="submenu" data-hoverparenttarget="#divMainUser" onmouseover="changeSubMenuColor(this)" onmouseout="changeMainMenuBg(this)" style="display: none;">
+            <div style="float: left; border-right: none !important;" class="submenuColumn">
+                <ul>
+                    <li class="submenuheader">User Management</li>
+                                <li><a appname="IMD" area="" href="/UserManagement/UsersIMD">Users</a></li>
+                                                    <li><a area="" href="/UserManagement/UserAccSummary">Account Summary</a></li>
+                                                    <li><a area="" href="/UserManagement/ChangePassword">Change Password</a></li>
+                                                    <li><a area="" href="/UserManagement/UserHierarchySummary">Hierarchy Summary</a></li>
+
+                </ul>
+            </div>
+        </div>
+                                    <div id="divSubMisc" class="submenu" data-hoverparenttarget="#divMainMisc" onmouseover="changeSubMenuColor(this)" onmouseout="changeMainMenuBg(this)" style="display: none;">
+                <div style="float: left; border-right: none !important;" class="submenuColumn">
+                    <ul>                       
+                        <li class="submenuheader">Commercial Line Products</li>
+                            <li><a area="" href="/Fire/FireQuote?Quickquote=true&amp;productCode=E7G47nX4TZ7Xh3oeuMzSAA%253d%253d">Standard Fire &amp; Special Perils(SLP)</a></li>
+                                                                                                                                                <li><a area="" href="/CPM/CPMQuote?Quickquote=true&amp;productCode=sfChQRh3DwwWS5ymjvkmOg%253d%253d">CPM</a></li>
+                                                                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Contractors All Risk</span></a></li>
+                                                                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Erection All Risk</span></a></li>
+                                                                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Reliance Bharat Griha Raksha Policy</span></a></li>
+                                                                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Reliance Bharat Sookshma Udyam Suraksha Policy</span></a></li>
+                                                                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Reliance Bharat Laghu Udyam Suraksha Policy</span></a></li>
+
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Reliance Griha Kavach Policy</span></a></li>
+
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Reliance Sookshma Business YourChoice Policy</span></a></li>
+
+                                                    <li><a href="/Login/Redirect_SmartLogin"><span>Reliance Laghu Business YourChoice Policy</span></a></li>
+                                            </ul>
+                                        </div>
+                                    </div>
+                            </div>
+                        </div>
+                    </div>
+
+
+
+<div id="divAdditionalDiscount" style="display: none" title="Additional Discount">
+        <div class="twoColumns">
+            <div class="blocks"><label>Night Parking :</label></div>
+            <div class="blocks">
+                <select>
+                            <option value="1">Road side Parking</option>
+                            <option value="2">Pay &amp; Park</option>
+                            <option value="3">Own Parking Garage</option>
+                            <option value="4">Open within residential compound</option>
+                            <option value="5">Stilt parking</option>
+                </select>
+            </div>
+        </div>
+        <div class="twoColumns">
+            <div class="blocks"><label>Number of Users :</label></div>
+            <div class="blocks">
+                <span style="font-weight: bold; font-size: 11px;">
+                    <input class="k-checkbox " id="NoOfUsersUsingVehicleabc" name="NoOfUsersUsingVehicleabc" type="radio" value="1">
+                    1
+                </span>
+                <span style="font-weight: bold; font-size: 11px;">
+                    <input class="k-checkbox " id="NoOfUsersUsingVehicleabc" name="NoOfUsersUsingVehicleabc" type="radio" value="2">
+                    2
+                </span>
+                <span style="font-weight: bold; font-size: 11px;">
+                    <input class="k-checkbox " id="NoOfUsersUsingVehicleabc" name="NoOfUsersUsingVehicleabc" type="radio" value="3">
+                    &gt;2
+                </span>
+            </div>
+        </div>
+        <div class="twoColumns">
+            <div class="blocks"><label>How many years Driving Experience you have :</label></div> 
+            <div class="blocks">
+                <span style="font-weight: bold; font-size: 11px;">
+                    <input class="k-checkbox " id="HowmanyyearsDrivingExperienceyouhave" name="HowmanyyearsDrivingExperienceyouhave" type="radio" value="1">
+                    <span>&lt;</span>1
+                </span>
+                <span style="font-weight: bold; font-size: 11px;">
+                    <input class="k-checkbox " id="HowmanyyearsDrivingExperienceyouhave" name="HowmanyyearsDrivingExperienceyouhave" type="radio" value="2">
+                    <span>&gt;</span>5
+                </span>
+                <span style="font-weight: bold; font-size: 11px;">
+                    <input class="k-checkbox " id="HowmanyyearsDrivingExperienceyouhave" name="HowmanyyearsDrivingExperienceyouhave" type="radio" value="3">
+                    <span>&gt;</span>10
+                </span>
+            </div>
+        </div>
+        <div class="twoColumns ">
+            <div class="blocks"><label>Do you have multiple vehicles :</label></div>
+            <div class="blocks">
+                <span style="font-weight: bold; font-size: 11px;">
+                    <input class="k-checkbox " id="Doyouhavemultiplevehicles" name="Doyouhavemultiplevehicles" type="radio" value="1">
+                    <span>&gt;</span>1
+                </span>
+                <span style="font-weight: bold; font-size: 11px;">
+                    <input class="k-checkbox " id="Doyouhavemultiplevehicles" name="Doyouhavemultiplevehicles" type="radio" value="2">
+                    <span>&gt;</span>5
+                </span>
+                <span style="font-weight: bold; font-size: 11px;">
+                    <input class="k-checkbox " id="Doyouhavemultiplevehicles" name="Doyouhavemultiplevehicles" type="radio" value="3">
+                    <span>&gt;</span>10
+                </span>
+            </div>
+        </div>
+        <div class="twoColumns">
+            <div class="blocks">
+                <label>Repair at preferred garage :</label>
+            </div>
+            <div class="blocks">
+                <span style="font-weight: bold; font-size: 11px;">
+                    <input class="k-checkbox " id="Repairatpreferredgarage" name="Repairatpreferredgarage" type="radio" value="Yes">
+                    <span>Yes</span>
+                </span>
+                <span style="font-weight: bold; font-size: 11px;">
+                    <input class="k-checkbox " id="Repairatpreferredgarage" name="Repairatpreferredgarage" type="radio" value="No">
+                    <span>No</span>
+                </span>
+            </div>
+        </div>
+</div>
+
+<script type="text/javascript">
+   var userName = 'rfcpolicy';//#T4328
+    //#T4328
+
+    $(document).on('change', '#ddlPolicyTenure', function () {
+        if (userName == '100002SN') {
+            if ($('#HdnProductCode').val() == "2369" && ($('#ddlPolicyTenure').val() == "2" || $('#ddlPolicyTenure').val() == "3")) {
+                $("#additioanlDiscLink").hide();
+            }
+            if ($('#HdnProductCode').val() == "2312" && $('#ddlPolicyTenure').val() == "1") {
+                $("#additioanlDiscLink").show();
+            }
+        }
+        else {
+            $("#additioanlDiscLink").hide();
+        }
+    });
+
+    function openAdditionaDiscountDialog() {
+        $("#divAdditionalDiscount").dialog({
+            height: 275,
+            width: 500,
+            position: { my: "center", at: "top" },
+            modal: true,
+            buttons: {
+                "Ok": function () {
+                    $(this).dialog("close");
+                }
+            },
+          dialogClass: "yes-close",
+        });
+    }
+    //#T4328
+    $(document).ready(function () {
+        
+        var cscuser = 'False';
+
+        if (cscuser == 'True') {
+            $('#divMainUtility').hide();
+            $('#divSubUtility').hide();
+            $('#divMainUtilityCSC').show();
+            $('#divSubUtilityCSC').show();
+        }
+        else {
+            $('#divMainUtility').show();
+            $('#divSubUtility').show();
+            $('#divMainUtilityCSC').hide();
+            $('#divSubUtilityCSC').hide();
+
+        }
+
+        ////#T4328
+        if (userName == '100002SN') {
+            $(".100002SNHideListItem").hide();
+            $("#additioanlDiscLink").show();
+        } else {
+            $(".100002SNHideListItem").show();
+            $("#additioanlDiscLink").hide();
+        }
+    ////#T4328
+
+        $(".MainMenu").mouseenter(subMenuShow);
+        $(".MainMenu").mouseleave(subMenuHide);
+        $("#subMenuBar").mouseenter(function () {
+            $("#subMenuBar").show();
+        }).mouseleave(function () {
+            $("#subMenuBar").hide();
+        });
+        $(".thirdmenu").mouseenter(thirdMenushow);
+        $(".thirdmenu").mouseleave(thirdMenuhide);
+        $("#divThirdMenu").mouseenter(function () {
+            $("#divThirdMenu").show();
+        }).mouseleave(function () {
+            $("#divThirdMenu").hide();
+        });
+
+        const queryStringForPermission = window.location.search;
+        const urlParamsForPermission = new URLSearchParams(queryStringForPermission);
+        var currentURLpath1 = window.location;
+        var ProductCodeForPermission = "";
+        Paramskeys1 = urlParamsForPermission.keys()
+        //values = urlParams.values(),
+        //entries = urlParams.entries();
+
+        for (var key of Paramskeys1)
+        {
+            if (key.toLowerCase() == "productcode" || key.toLowerCase() == "product_code" || key.toLowerCase() == "productscode" || key.toLowerCase() == "productcodes") {
+                ProductCodeForPermission = urlParamsForPermission.get(key);
+            }
+        }
+
+
+        if ((ProductCodeForPermission != "" && ProductCodeForPermission != null && ProductCodeForPermission != undefined) || (currentURLpath1.href.includes("SeaStarCertificate") == true)) {
+            
+            $.ajax({
+                type: "POST",
+                url: '../Home/CheckProductPremission',
+                data: JSON.stringify({ ProductCodeForPermission: ProductCodeForPermission, currentURLpath: currentURLpath1.href }),
+                contentType: "application/json; charset=utf-8",
+                dataType: "json",
+                async: false,
+                success: function (response) {
+                    if (response.result == 'Redirect') {
+                        window.location = response.url;
+                    }
+
+                },
+
+            });
+        }
+
+    });
+    function thirdMenushow() {
+        $("#divThirdMenu").show();
+    }
+
+    function thirdMenuhide() {
+        $("#divThirdMenu").hide();
+    }
+
+    function subMenuShow(evt) {
+        $(".submenu").hide();
+        var value = $("#" + evt.currentTarget.id).attr("data-hovertarget"); //.attributes[1].nodeValue;
+        var id = $("#" + evt.currentTarget.id);
+        var width = $("#" + evt.currentTarget.id).width();
+        var elements = $('#MenuImages').width();
+        var indx = id.index();
+        var marRght = ((elements - (indx * width)) - width) - (indx + (indx + 2));
+        $(value + " ul").each(function () {
+            if ($(this).has("li").length) {
+                $("#subMenuBar").css({ 'margin-right': marRght + 'px', 'right': '0' });
+                $("#subMenuBar").show();
+                $(value).show();
+            }
+            else {
+                $("#subMenuBar").hide();
+            }
+        });
+    }
+
+    function subMenuHide(evt) {
+        $("#subMenuBar").hide();
+    }
+
+
+    function changeSubMenuColor(evt) {
+        var value = $("#" + evt.id).attr("data-hoverparenttarget");
+        var cls = $(value).attr("class");
+        if (cls.indexOf("Hover") == -1) {
+            $(value).removeClass();
+            $(value).addClass(cls + "Hover").removeClass(cls);
+        }
+    }
+
+    function changeMainMenuBg(evt) {
+        var value = $("#" + evt.id).attr("data-hoverparenttarget");
+        var cls = $(value).attr("class");
+        var clas = $(value).attr("cls");
+        $(value).removeClass();
+        $(value).addClass(clas).removeClass(cls);
+    }
+
+    $(document).ready(function () { CheckCurrentUserTokenActiveOrNot() });//#T5848
+    
+    //#T4475
+        CreateServiceRequest1.onclick = CreateServiceRequestCSC; //unLoading();
+        CreateServiceRequest2.onclick = CreateServiceRequestCSC; //unLoading();
+       CreateServiceRequest3.onclick = CreateServiceRequestCSC; //unLoading();
+    function CreateServiceRequestCSC() {
+        try{
+        var appType = 'yLjJXcAxyt8Gc0q1SGj6Ig=='    //Smart Zone
+        var userID = 'Hd1rsbMjMmhVfQa1CdS9CA=='         //100002
+        var calldeskURL = 'https://calldesk.brobotinsurance.com'
+        window.open(calldeskURL + "?AppType=" + appType + "&UserID=" + userID)
+        return false;
+    }
+        catch (e) { alert(e); }
+    };
+//#T4475
+</script>
+<style>
+    a {
+        text-decoration: none;
+    }
+
+    ul {
+        list-style-type: none !important;
+    }
+</style>
+
+
+    </header>
+</div>
+    <div class="subMenuBar" id="divSubMenuBar" style="border-bottom: 2px solid red; background: rgb(255, 255, 255); height: 30px;">
+        <div class="home homediv" onclick="javascript:window.location.href='../../Home/Home?un=Hd1rsbMjMmhVfQa1CdS9CA=='">
+        </div>
+        <div style="float: right; height: 30px; margin-top: -16px; right: 0; margin-right: 30px; color: Black;">
+
+            
+            <div style="float:left;">
+                
+                    <span id="status" style="height: 10px; width: 10px; background-color: #f00; border-radius: 50%; display: none;" data-toggle="tooltip" title="Status for Video Streaming: Green - Connected Red - Not connected Yellow - Busy or Reconnecting "></span>
+                        <button id="btnReady" style="background-color:#f00">Go Online for video calling</button>
+                <span style="float: left; margin-right: 15px;">
+                    Last Login
+                    Date : <span><b>17-11-2025 05:52:02</b></span>
+                </span>
+                Welcome<span style="cursor: pointer;" class="thirdmenu">
+                    <b>
+                        Online
+                    </b>
+                </span><span>
+                    <img src="../../Images/iRPAS/down-arrow.png">
+                </span>
+                   
+            </div>
+            
+            <div id="divLogout" data-hovertarget="#divLogout" style="float: right; margin-left: 15px; margin-top: -5px;cursor:pointer" title="Logout" class="logout-icon" onclick="Logout()">
+            </div>
+        </div>
+    </div>
+    <div id="divThirdMenu" style="display: none;">
+        <ul>
+            
+            
+            
+            <li><a href="/UserManagement/MyProfile">My Profile</a></li>
+            
+              <li style="border-bottom: none !important;" onclick="logoutRank()"><a area="" href="/Home/Logout">Logout</a></li>        </ul>
+    </div>
+<div id="containert" style="height:auto !important">
+    <div id="bodyt">
+
+
+
+<style type="text/css">
+    .divHeader {
+        background-image: url("../../Images/iRPAS/header-image.png");
+        background-repeat: repeat-x;
+        color: White;
+        font-size: 14px;
+        font-weight: bold;
+        height: 33px;
+        text-align: center;
+    }
+
+    .ui-dialog-titlebar {
+        background: #2286BB !important;
+        border-color: transparent !important;
+        color: white;
+    }
+
+    .FameClubClass {
+        position: relative;
+        z-index: 10;
+        display: table;
+        width: 100%;
+        height: 237px;
+    }
+    .toplabel {
+    display: table;
+    margin: 0 0 5px;
+    color : blue;
+    }
+    .FameClubClass::before {
+        position: absolute;
+        content: '';
+        z-index: -1;
+        width: 96%!important;
+        float: right;
+        background-image: url(../../Images/fame.png);
+        height: 237px;
+        opacity: 0.1;
+        background-repeat: no-repeat;
+        background-origin: content-box;
+        background-position-x: 0px;
+        background-size: contain;
+    }   
+    .balancetoqualify {
+        display:table;
+    }
+        .balancetoqualify > div {
+            display:table-cell;
+            padding: 10px 5px 0px 0px;
+        }
+  .AchivementTargetClass {
+        float: left;
+        margin: 10px 0px 0px 10px;
+        width: 93%;
+        display: table;
+        
+    }
+    .WidgetScroll {
+    height: 240px;
+    overflow-y: auto;
+}
+
+
+    .Disclamer {
+    display: table;
+    /* top: 57%; */
+    /* position: absolute; */
+    text-align: left;
+    fit-position: bottom;
+    /* width: 79%; */
+    /* left: 10%; */
+    font-style: italic;
+    font-family: Arial;
+    font-size: 10px;
+    margin: 0px 10px -6px;
+    padding: 10px 0px 5px;
+    }
+ 
+
+    .ui-dialog-header {
+        background: none !important;
+    }
+
+    .fc-event-time {
+        display: none;
+    }
+
+    .fc-mon {
+        background-color: #dce4f1;
+    }
+
+    .fc-tue {
+        background-color: #dce4f1;
+    }
+
+    .fc-wed {
+        background-color: #dce4f1;
+    }
+
+    .fc-thu {
+        background-color: #dce4f1;
+    }
+
+    .fc-fri {
+        background-color: #dce4f1;
+    }
+
+    .fc-sat {
+        background-color: #dce4f1;
+    }
+
+    .holiday {
+        background-color: #fae9d9;
+    }
+
+    .fc-widget-header {
+        background-color: #A3C8EC;
+        border-color: white;
+    }
+
+    .fc-widget-content {
+        border-color: white;
+    }
+
+    .fc-event {
+        background-color: inherit !important;
+    }
+
+    .target {
+        background-color: #c2d697;
+    }
+
+    .fc-today {
+        background-color: #fed85d;
+    }
+
+    .HeadStrip {
+        display: inline-block;
+    }
+
+    .dashboardAccountLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 6%;
+        height: 12%;
+        position: absolute;
+        left: 10%;
+        top: 18%;
+    }
+
+    .dashboardIMDAchievementLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 20%;
+        height: 33%;
+        position: absolute;
+        left: 40%;
+        top: 25%;
+    }
+
+    .dashboardIMDBusinessLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 20%;
+        height: 33%;
+        position: absolute;
+        left: 40%;
+        top: 25%;
+    }
+
+    .dashboardFameClubLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 20%;
+        height: 33%;
+        position: absolute;
+        left: 40%;
+        top: 35%;
+    }
+
+    .dashboardIMDAlertLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 6%;
+        height: 12%;
+        position: absolute;
+        left: 10%;
+        top: 60%;
+    }
+
+    .dashboardIMDScoreLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 6%;
+        height: 12%;
+        position: absolute;
+        left: 42%;
+        top: 60%;
+    }
+
+    .dashboardIMDCalendarLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 6%;
+        height: 12%;
+        position: absolute;
+        left: 78%;
+        top: 65%;
+    }
+
+    .dashboardSubAccountLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 6%;
+        height: 18%;
+        position: absolute;
+        left: 10%;
+        top: 25%;
+    }
+
+    .dashboardIMDSubAlertLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 20%;
+        height: 40%;
+        position: absolute;
+        left: 40%;
+        top: 25%;
+    }
+
+    .dashboardIMDSubScoreLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 6%;
+        height: 18%;
+        position: absolute;
+        left: 42%;
+        top: 75%;
+    }
+
+    .dashboardDEOAccountLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 6%;
+        height: 20%;
+        position: absolute;
+        left: 10%;
+        top: 33%;
+    }
+
+    .dashboardIMDDEOAlertLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 20%;
+        height: 40%;
+        position: absolute;
+        left: 40%;
+        top: 28%;
+    }
+
+    .dashboardIMDDEOCalendarLoader {
+        background: url(../../Images/ajax-loader1.gif) no-repeat;
+        width: 6%;
+        height: 20%;
+        position: absolute;
+        left: 78%;
+        top: 40%;
+    }
+</style>
+
+<script src="/bundles/IMDDashBoard?v=wyteRSVru0d6vuSmKNmMwAem9vu3wVnQHRUsYhVM8bo1"></script>
+
+<link href="/Areas/IMDDashBoard/Styles/IMDDashBoardcss?v=y6LX__SYuM_SWToBQp7pQGqF5bqhXu71EkQ7T2uSJVs1" rel="stylesheet">
+
+<script src="/Areas/CorporatePortal/Scripts/bootstrap.js"></script>
+<link href="/Areas/CorporatePortal/Content/bootstrap.css" rel="stylesheet">
+<script src="/Areas/CorporatePortal/Scripts/bootstrap-dialog.min.js"></script>
+<form action="/" method="post">    <div class="HeadStrip" style="height: 100%;">
+        <div style="background-color: #F3F3F3; border-bottom: solid; border-bottom-color: white; padding-bottom: 3px; width: 100%" id="sm">
+            <strong>Branch Name : </strong><span id="Branch">Chennai I</span>
+            <div style="left: 5%; position: relative; display: inline-table">
+                <strong>Relationship Manager &amp; Contact No:</strong>
+                <span id="ManagerName">Bhuvaneshwari P</span> (<span id="Contact">8655385320</span>) 
+                <div id="clickmail" class="mail" style="position: relative; float: inherit; display: inline-table;"></div>
+                
+                <div style="position: relative; float: inherit; display: none;">
+                    <a href="#" onclick="showmodelpop();">
+                        <img id="ScrapZoomImg" src="/Images/iRPAS/skype.png" class="skype">
+                    </a>
+                    
+
+                </div>
+                <vv style="position: relative; float: inherit; display: inline-table; left: 22%;" class="100002SNHideListItem">
+                    <button type="button" id="btnEscalationMatrix">Escalation Matrix (Sales)</button>
+                    <button type="button" id="btnTatDetails">TAT Details</button>
+                </vv>
+            </div>
+        </div>
+
+    </div>
+    <div id="myModalShowDed" class="modal fade" style="display: none;" data-backdrop="static" data-keyboard="false">
+        <div class="modal-dialog modal-lg" style="width: 700px">
+            <div class="modal-content">
+                <div class="modal-body" id="mdlbody" style="font-size: 17px; height: auto; margin-top: 1px">
+                    <button type="button" class="close" id="Closebutton" data-dismiss="modal" style="display: none">×</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!--Start DashBoard Widgets for IMD Root Level User #T3904-->
+    <!--Start Dashboard widgets for IMD Sub User-->
+    <div>
+        <!-- Start Account Summary widget for IMD Sub User-->
+        <div id="leftPanel" style="margin-top: 5px; width: 28%; height: 269px!important; float: left; display: inline-block; float: left;">
+            <div style="height: 100%; border: none; background-color: none!important;" class="DashBoardPanel">
+                <div class="divHeader HomeTitle" style="background-image: none!important;">
+
+                    <div class="account-sum"></div>
+                    <label class="Titlelbl texalignCenter">ACCOUNT SUMMARY</label>
+                </div>
+                <div style="height: 82%; text-align: left; display: block; background-image: url('../../Images/account.png');">
+                    <div id="divAccountSum" class="" style="padding-left: 14%; padding-top: 5%;">
+
+
+
+
+
+<link href="/Areas/IMDDashBoard/Styles/IMDDashBoardcss?v=y6LX__SYuM_SWToBQp7pQGqF5bqhXu71EkQ7T2uSJVs1" rel="stylesheet">
+
+
+
+    <div class="homePageLeftAlign" style="width: 100%;">
+        <span>
+            <strong>User Status :</strong>
+            
+            
+            <span style="margin-left: 1%; color:#f33900" class="highlightsBarValue"><a href="#" onclick="windowPopUpforLockedUser();"><u></u></a></span>
+        </span>
+    </div>
+    <div class="homePageLeftAlign" style="width: 100%; ">
+        <span>
+            <strong>Locked Reason:</strong><span style="margin-left: 1%;" class="highlightsBarValue"></span>
+        </span>
+    </div>
+    <div id="divlockedUser"></div>
+
+
+
+<div class="homePageLeftAlign" style="width: 100%; ">
+    <span>
+        <strong>No of Marine Master Policies :</strong><span style="margin-left: 1%;" class="highlightsBarValue">0</span>
+    </span>
+</div>
+
+<div class="homePageLeftAlign" style="width: 100%;">
+    <span>
+        <strong>No of Travel Master Policies :</strong><span style="margin-left: 1%;" class="highlightsBarValue">0</span>
+    </span>
+</div>
+
+
+<div class="homePageLeftAlign" style="width: 100%; ">
+    <span>
+        <strong>No of Pending Quotes :</strong><span style="margin-left: 1%;" class="highlightsBarValue">37</span>
+    </span>
+</div>
+<div class="homePageLeftAlign" style="width: 100%; margin-top:0px;">
+    <span><strong style="font-style: italic;"><a href="/Payment/Payments?pageName=XhIEGvE4S2ipze7xJW7wmIFef%252b42e%252b6H6mk6l%252f76i0s%253d">(Click here to view Pending Quotes)</a></strong></span>
+</div>
+<div class="homePageLeftAlign" style="width: 100%;">
+    <span>
+        <strong>Approved/Rejected Quotes :</strong><span class="highlightsBarValue">0</span>/
+        <span style="margin-left: 1%;" class="highlightsBarValue">0</span>
+    </span></div>
+    <div class="homePageLeftAlign" style="width: 100%; margin-top:0px;">
+        <span><strong><a href="/Home/SavvionInbox?BusinessType=Other">(Click here to view Quote From UW)</a></strong></span>
+
+    </div>
+
+    <div class="homePageLeftAlign" style="width: 100%; margin-top:0px;">
+        <span><strong><a href="/Home/SavvionInbox?BusinessType=Endorsement">(Click here to view Quote From UW)</a></strong></span>
+    </div>
+<div class="homePageLeftAlign" style="width: 100%;">
+    <span>
+        <strong>Endorsement Approved/Rejected Quotes :</strong><span class="highlightsBarValue">0</span>
+    </span>/
+    <span style="margin-left: 1%;" class="highlightsBarValue">0</span>
+    </div>
+    <div class="homePageLeftAlign" style="width: 100%; margin-top:0px;">
+        <span><strong><a href="/Home/SavvionInbox?BusinessType=Endorsement">(Click here to view Quote From UW)</a></strong></span>
+
+    </div>
+
+
+
+</div>
+                </div>
+            </div>
+        </div>
+        <!--End Account Summary widget for IMD Sub User-->
+        <!-- Start Alert Widget for IMD Sub User-->
+        <div style="width: 33% !important; display: inline-block; min-height: 263px; float: left; background-color: none; border: none; margin-top: 5px; margin-left: 10px;" id="premium" class="DashBoardPanel">
+            <div class="divHeader HomeTitle" style="background-image: none!important;">
+                <label class="Titlelbl texalignCenter" style="width: 76%">
+                    Alerts &amp; Updates
+                </label>
+            </div>
+            <div style="width: 33% !important; height: 236px; float: left; position: relative; background-image: url('../../Images/alerts.png'); position: absolute;">
+                <div id="divIMDAlert" style="padding-left: 10%;" class="">
+
+
+
+<link href="/Areas/IMDDashBoard/Styles/IMDDashBoardcss?v=y6LX__SYuM_SWToBQp7pQGqF5bqhXu71EkQ7T2uSJVs1" rel="stylesheet">
+
+
+
+<style>
+    ul.slide {
+        margin: 0;
+        padding: 0;
+        height: 68px;
+        list-style-type: none;
+    }
+
+        ul.slide li {
+            list-style-type: none;
+        }
+</style>
+
+
+<img src="/Images/NEW-icon.png" id="Newicon" style="width: 10%; height: 40%; float: right; display:none">
+<ul class="slide"></ul>
+
+    
+
+
+
+
+
+    </div>
+            </div>
+        </div>
+
+        <!-- End Alert Widget for IMD Sub User-->
+        <!-- Start Business Source For IMD Sub User-->
+        <div style="height: 270px; width: 37%; display: inline-block; margin-left: 10px; float: left; margin-top: 5px;">
+            <div style="width: 100% !important; min-height: 263px; float: left; background-color: none; border: none;" id="premium" class="DashBoardPanel">
+                <div class="divHeader HomeTitle" style="background-image: none!important;">
+                    <label class="Titlelbl texalignCenter">BUSINESS SOURCED (FY 2014-2015)</label>
+                </div>
+                <div style="width: 37% !important; height: 236px; background-image: url('../../Images/target.png'); position: absolute;">
+                    <div id="divBusinessSrc" class="">
+
+
+
+<link href="/Areas/IMDDashBoard/Styles/IMDDashBoardcss?v=y6LX__SYuM_SWToBQp7pQGqF5bqhXu71EkQ7T2uSJVs1" rel="stylesheet">
+
+
+
+
+
+
+    <div style="width: 100%; height: 236px;" id="LayoutHome12Div11" class="SubReport ChartDefault">
+    </div>
+
+</div>
+                </div>
+            </div>
+        </div>
+        <!-- end Business Source For IMD Sub User-->
+        <!--Start Diary Widget for IMD Sub User-->
+        <div id="dvDairy" style="width: 28% !important; border: none; margin-top: 10px; display: inline-block; float: left;" class="DashBoardPanel">
+            <div class="divHeader HomeTitle" style="background-image: none!important;">
+                <div class="date" onclick="GetScheduleCalendar()" style="cursor: pointer"></div>
+                <label class="Titlelbl texalignCenter" style="margin-left: 20px;">MY DIARY  </label>
+
+                <a onclick="openDairyPOP()" style="text-decoration: underline; float: right; margin-top: 1%; margin-right: 47px; color: white; font-size: 12px; cursor: pointer; font-style: italic;">Add Task</a>
+
+            </div>
+
+
+            <div style="background-image: url('../../Images/diary.png'); min-height: 60px;">
+                <div id="divDailyTask">
+
+<div>
+        <div style="font-weight:bold;padding:4% 0 0 30%;">17 November 2025</div>
+
+</div>
+
+
+</div>
+
+            </div>
+
+        </div>
+        <!--End Diary Widget for IMD Sub User-->
+        <!--Start ScoreCard Widget for IMD Sub User-->
+        <div style="display: inline-block; width: 33%; float: left; margin-top: 10px; margin-left: 10px;">
+            <div class="divHeader HomeTitle" style="background-image: none!important;">
+                <label class="Titlelbl texalignCenter">SCORE CARD</label>
+            </div>
+            <a href="/IMDDashBoard/DashBoard/AgentReports?ReportType=1" style="text-decoration:underline;float:right;margin-top:-25px;margin-right:40px; color:white;font-style:italic;font-size:12px;">More</a>
+
+            <div style="width: 100%; min-height: 125px; background-image: url('../../Images/score.png');">
+                <div id="divScoreCard" class="">
+
+
+
+
+<link href="/Areas/IMDDashBoard/Styles/IMDDashBoardcss?v=y6LX__SYuM_SWToBQp7pQGqF5bqhXu71EkQ7T2uSJVs1" rel="stylesheet">
+
+
+<div id="divScoreCard" class="ScoreCardMain" style="padding-bottom: 24px;padding-top: 31px;">
+<div style="text-align:center;float:left; padding-bottom:1px;"><strong style="font-family:Arial;font-size:27px;">Growth</strong> (Compared to previous year) : <span id="GrowthPercentageYear" style="font-family:Arial;font-size:17px;">0%</span><span id="smileyGrowth">  <span class="sad-smiley" style="display:inline-block;min-height:24px;"></span></span> </div>
+   <div class="ScoreRowHead">
+       <div class="ScoreRatioHead"></div><div class="ScoreContentHead">YTD</div><div class="ScoreContentHead">MTD</div>
+   </div>
+
+</div>
+
+</div>
+            </div>
+        </div>
+        <!--End ScoreCard Widget for IMD Sub User-->
+
+
+    </div>
+    <div style="clear: both;"></div>
+    <!--End Dashboard Widgets for IMD Sub User-->
+    <!--Start DashBoard widgets for DEO User-->
+    <!--End DashBoard Widgets for DEO User #T3904-->
+</form><div style="clear: both"></div>
+
+
+<div id="emailpop" title="Send Email" style="display: none;">
+<form action="/" method="post">        <label for="to" class="mailalabel">To </label>
+        <input type="text" name="to" id="to" value="" class="mailtext  ui-widget-content ui-corner-all"><br>
+        <label for="cc" class="mailalabel">Cc </label>
+        <input type="text" name="cc" id="cc" value="" class="mailtext ui-widget-content ui-corner-all"><br>
+        <input type="button" id="btngetmail" value="Escalation POC"><br>
+        <label for="subject" class="mailalabel">Subject </label>
+        <input type="text" name="sub" id="sub" value="" class="mailtext ui-widget-content ui-corner-all">
+        <label for="message" class="mailalabel">Message </label>
+        <textarea id="messagebody" class="mailtext ui-widget-content ui-corner-all" style="height: 120px; width: 560px;"></textarea>
+</form></div>
+
+
+<div id="EscalationMatrixpop" title="Escalation Matrix">
+</div>
+
+<div id="TatDetailspop" title="TAT Details">
+</div>
+
+
+<div id="Morealertspop" title="Alerts &amp; Updates">
+</div>
+
+<div id="ScheduleCalendarPop" title="My Calendar" style="z-index: 999999">
+</div>
+
+<div id="MyDairypop" title="My To Do List">
+</div>
+
+<input type="hidden" id="hdncaseval">
+<div id="CallCurrentAlertValueDiv">
+</div>
+
+<script type="text/javascript">
+    //Added for skype ICON
+    //window.onload = function () {
+    //    SkypeCall(); //#T3230
+    //}
+
+    //$("#ScrapZoomImg").on('mouseenter', function (e) {
+    //    var timeout = setTimeout(function () {
+    //        //$('.result').toggleClass('success');
+    //        SkypeCall();
+    //    }, 1000);
+    //    $(e.currentTarget).on('mouseleave', function () {
+    //        clearTimeout(timeout);
+    //    });
+    //});
+
+    function SkypeCall() {
+        //$("#ScrapZoomImg").mouseover(function () {
+        //
+        var result = "";
+        $.ajax({
+            type: "POST",
+            //url: "/Home/GetTime?SIPID=devdas.b.shinde@rcap.co.in",
+            //url: "/Home/GetTime?SIPID=ankit.a.patel@rcap.co.in",  
+            url: "/Home/GetTime?SIPID=" + 'BHUVANESHWARI.KUPPUSAMY@rcap.co.in',
+            dataType: "json",
+            async: false,
+            contentType: "application/json; charset=utf-8",
+            data: {}
+        })//done handler
+        .done(function (data) {
+            //console.log(data);               
+            //alert(data);
+            //if (data != 'Error') {
+            //    $('#time').text(data);
+            //    $('#ScrapZoomImg').attr('src', "Images/" + (data) + ".png");
+            //}
+            result = data;
+        });
+        //});
+        return result;
+    }
+
+    function onSkypeCall(e) {
+        $("#GridescDetails tbody tr").each(function (key, value) {
+            
+            var email = $(this.children[this.children.length - 3].childNodes)["0"].data;
+            var image = $(this.children[this.children.length - 1].children[0].childNodes)
+            if (email != null || email != "") {
+                var emailid = email.split('@')[0] + "@rcap.co.in"; 
+                $.ajax({
+                    type: "POST",      
+                    url: "/Home/GetTime?SIPID=" + emailid,                            
+                    dataType: "json",
+                    async: true,
+                    contentType: "application/json; charset=utf-8",
+                    data: {}
+                })
+                .done(function (data) {               
+                    if (data != 'Error') {
+                        $('#time').text(data);
+                        image.attr('src', "Images/" + (data) + ".png"); 
+                        $(this.children[this.children.length - 3].childNodes)["0"].data = email;
+                    }  
+                  
+                });            
+            }
+        });
+    }
+
+    function emailcorrection(email) {            
+        window.open('/Home/RedirectToSkype?SIPID=' + email.split('@')[0] + "@rcap.co.in", "WindowPopup", 'width=800px,height=800px,top=150,left=250');
+    }
+
+    //showmodelpop = function () {
+    //    
+    //    //window.open('/Home/RedirectToSkype?SIPID=devdas.b.shinde@rcap.co.in', "WindowPopup", 'width=800px,height=800px,top=150,left=250');
+    //    //window.open('/Home/RedirectToSkype?SIPID=ankit.a.patel@rcap.co.in', "WindowPopup", 'width=800px,height=800px,top=150,left=250');
+    //    var data=SkypeCall();
+    //    if (data != 'Error'){
+    //        window.open('/Home/RedirectToSkype?SIPID=' + 'BHUVANESHWARI.KUPPUSAMY@rcap.co.in', "WindowPopup", 'width=800px,height=800px,top=150,left=250');
+    //    }
+    //    else{
+    //        alert('Service not avaliable');
+    //    }
+        
+    //}
+    function showmodelpop() {
+        var data = SkypeCall();
+        if (data != 'Error') {
+            window.open('/Home/RedirectToSkype?SIPID=' + 'BHUVANESHWARI.KUPPUSAMY@rcap.co.in', "WindowPopup", 'width=800px,height=800px,top=150,left=250');
+        }
+        else {
+            alert('Service not avaliable !');
+        }
+    }
+
+    function getUrlParameter(name) {
+
+        name = name.replace(/[\[]/, '\\[').replace(/[\]]/, '\\]');
+
+        var regex = new RegExp('[\\?&]' + name + '=([^&#]*)');
+
+        var results = regex.exec(location.search);
+
+        return results === null ? '' : decodeURIComponent(results[1].replace(/\+/g, ' '));
+
+    };
+
+    //till here
+
+    $(document).ready(function () {
+
+        $("#emailpop").hide();
+        $.ajaxSetup({ cache: false });
+        $("#emailpop").hide();
+        $("#dialog-confirm").hide();
+        $("#mailSuccess").hide();
+        $("#decision").hide();
+        $("#eventContent").hide();
+        $("#evtContent").hide();
+
+        var d = new Date();
+        var targetMonth = ['Jan', 'Feb', 'March', 'April', 'May', 'June', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        $("#targetHeader").text("Achievement for the Month " + targetMonth[d.getMonth()] + " '" + d.getFullYear().toString().substr(2, 2));
+
+
+        //Commented by Sachin as Akshay Requirement - 20-11-2020
+        //$('#myModalShowDed').modal({
+        //    backdrop: 'static',
+        //    // keyboard: false  // to prevent closing with Esc button (if you want this too)
+        //})
+
+        $.ajaxSetup({ cache: false });
+        
+
+        $("#myModalShowDed").modal('hide');
+        if ('' == "true") {
+            sessionStorage.setItem("CustomerDetailPopUp", "true");
+        }
+        else {
+            sessionStorage.setItem("CustomerDetailPopUp", "false");
+        }
+
+        //added to check for loading ASPX in a iFrame
+        $.getJSON('/Home/GetTopAlertspopup', function (data) {
+            
+            var AlertTime = Math.max.apply(Math, data.map(function (o) { return o.AlertTime }));
+            var tempCount = data.length;
+            var tempTextMessage = false;
+            var count = 0;
+            if (tempCount == 1) {
+                if (data[0].Message != "") {
+                    tempTextMessage = true;
+                }
+            }
+            else {
+                for (i = 0; i < data.length; i++) {
+                    if (data[i].Message != "") {
+                        count++;
+                    }
+                }
+            }
+            if (count == data.length) {
+                tempTextMessage = true;
+            }
+            if (data.length > 0) {
+                for (i = 0; i < data.length; i++) {
+                    var frequency = data[i].Frequency;
+                    var lastlogindate = 'Today';
+                    if (frequency == "Every Time Login") {
+                        lastlogindate = "everytime";
+                    }
+                    if (data[i].Selectedfile == "" && data[i].Message != "") {
+                        data.length = data.length - (data.length - 1);
+                    }
+                    //if (data[i].Selectedfile != "")
+                    // {
+                    if ('' == "fromlogin" && lastlogindate != "Today") {
+                        // var frequency = data[i].Frequency;
+                        //added to check for loading ASPX in a iFrame
+                        var html = "";
+                        if (tempTextMessage == true) {
+                            html = "<iframe id='' src='../DocViewer/Viewer.aspx?logintype=Postlogin' height='200' width='650px'>";
+                        }
+                        else {
+                            html = "<iframe id='' src='../DocViewer/Viewer.aspx?logintype=Postlogin' height='490' width='650px'>";
+                        }
+                        $("#mdlbody").append(html); //this line was commented at 80 port - check in again without change - sachin - 26 nov 2020
+                        var logindata = $("#PopupLast").val();
+                        $("#myModalShowDed").modal('show');
+                        if (tempTextMessage == true) {
+                            $("#myModalShowDed").modal('hide');
+                        }
+                        setTimeout(function () {
+                            $("#Closebutton").show();
+                        }, AlertTime);
+                        // }
+                    }
+                    break;
+                }
+            }
+        });
+
+
+        $("#btnEscalationMatrix").click(function () {
+
+            $("#EscalationMatrixpop").load("../Home/EscalationDetails");
+            $("#EscalationMatrixpop").dialog({
+                height: 160,
+                width: 1000,
+                modal: true,
+                close: function () {
+
+                    $(this).dialog("close");
+                }
+            }, "open");
+        });
+
+
+        //-----------------------------------------------//
+        //-------------Added by Saroj for showing Escalation Mail Details in a dialouge box-----------------//
+        $("#btngetmail").click(function () {
+            $("#EscalationDetailspop").load("../Home/EscalationMail");
+
+            $("#EscalationDetailspop").dialog({
+                height: 240,
+                width: 730,
+                modal: true,
+                buttons: {
+
+                    OK: function () {
+
+                        AddtoMail();
+                        $(this).dialog("close");
+                    }
+                },
+                close: function () {
+
+                    $(this).dialog("close");
+                }
+            }, "open");
+        });
+        //---------------------End------------------------------//
+        //-----------TAT Details---------------------------------//
+
+        $("#btnTatDetails").click(function () {
+
+            $("#TatDetailspop").load("../Home/TATDetails");
+
+            $("#TatDetailspop").dialog({
+                height: 250,
+                width: 600,
+                modal: true,
+                close: function () {
+
+                    $(this).dialog("close");
+                }
+            }, "open");
+        });
+
+        //----------------------------------------------------//
+
+        //----my Dairy------sitaram------------------------------------------//
+
+
+
+
+
+
+
+
+
+
+
+        //-------More alerts----------------------------------------------------//
+
+
+
+
+        //----------------------------------------------------------------//
+
+
+
+        $("#clickmail").click(function () {
+            // 
+            var to = $("#to");
+            sub = $("#sub"),
+            messagebody = $("#messagebody"),
+            cc = $("#cc"),
+            allFields = $([]).add(to).add(sub).add(messagebody).add(cc),
+            tips = $(".validateTips");
+            $("#to").val(mailid);
+            $("#emailpop").dialog({
+                height: 600,
+                width: 600,
+                modal: true,
+                buttons: {
+                    "Send Mail": function () {
+                        var bValid = true;
+                        ccText = $("#cc").val();
+                        allFields.removeClass("ui-state-error");
+                        bValid = bValid && checkLength(to, "To address", 7);
+                        bValid = bValid && checkRegexp(to, /^[_a-z0-9-]+(\.[_a-z0-9-]+)*@[a-z0-9-]+(\.[a-z0-9-]+)*(\.[a-z]{2,4})$/);
+                        //-------commented by Saroj for adding multiple email ids to cc-----------------//
+                        // if (ccText != "") {
+                        //  bValid = bValid && checkRegexp(cc, /^[_a-z0-9-]+(\.[_a-z0-9-]+)*@[a-z0-9-]+(\.[a-z0-9-]+)*(\.[a-z]{2,4})$/);
+                        //}
+                        //--------------End-------------------------//
+                        bValid = bValid && checkLength(sub, "Subject", 2);
+                        bValid = bValid && checkLength(messagebody, "Message Body", 2);
+
+
+
+                        if (bValid) {
+                            $.getJSON("/Dashboard/SendMailTo", {
+                                toMailID: $("#to").val(),
+                                ccMailID: $("#cc").val(),
+                                mailSubject: $("#sub").val(),
+                                mailBody: $("#messagebody").val()
+                            }, function (data) {
+                                $("#mailSuccess").html("<div>" + data + "</div>");
+                                $("#mailSuccess").dialog({
+                                    modal: true,
+                                    buttons: {
+                                        "OK": function () {
+                                            $(this).dialog("close");
+                                        }
+                                    },
+                                    close: function () {
+                                        $(this).dialog("close");
+                                    }
+                                }, "open");
+                            });
+                            $(this).dialog("close");
+                            allFields.val('');
+                            tips.val('');
+                            allFields.removeClass("ui-state-error");
+                        }
+                    },
+                    Cancel: function () {
+                        $("#to").val("");
+                        $("#cc").val("");
+                        $("#sub").val("");
+                        $("#messagebody").val("");
+                        tips.val('');
+                        allFields.val('');
+                        allFields.removeClass("ui-state-error");
+                        $(this).dialog("close");
+                    }
+                },
+                close: function () {
+                    $("#to").val("");
+                    $("#cc").val("");
+                    $("#sub").val("");
+                    $("#messagebody").val("");
+                    tips.val('');
+                    allFields.removeClass("ui-state-error");
+                    $(this).dialog("close");
+                }
+            }, "open");
+        });
+
+        //#T3904
+        toggleBusyIndicator("hide");
+        IMDAccountSummary_Ajax();
+        toggleBusyIndicator("hide");
+        IMDAchievement_Ajax();
+        toggleBusyIndicator("hide");
+        IMDBusinessSource_Ajax();
+        toggleBusyIndicator("hide");
+        IMDFameClub_Ajax();
+        toggleBusyIndicator("hide");
+        IMDAlert_Ajax();
+        toggleBusyIndicator("hide");
+        IMDDiary_Ajax();
+        toggleBusyIndicator("hide");
+        IMDScoreCard_Ajax();
+        toggleBusyIndicator("hide");
+        IMDCalendar_Ajax();
+        toggleBusyIndicator("hide");
+        //#T3904
+
+    });
+
+
+    function CallCurrentAlertValue(caseval) {
+        $("#hdncaseval").val(caseval);
+        $("#CallCurrentAlertValueDiv").empty();
+        //$('div#pop-up').dialog({ buttons: [{ text: "Close" , click: function () { $(this).dialog("close"); } }] });
+        $("#CallCurrentAlertValueDiv").dialog({
+            //buttons: {
+            //    "X": function () {
+            //        $(this).dialog("close");
+            //    }
+            //},
+            height: 500,
+            width: 1200,
+            modal: true
+        }, "open");
+        //        $("#CallCurrentAlertValueDiv").dialog({
+        //    modal: true,
+        //    title: 'Renewal Notice Make Live',
+        //    zIndex: 10000,
+        //    autoOpen: true,
+        //    width: 'auto',
+        //    resizable: false,
+        //    buttons: {
+        //        "Ok": function () {
+        //            $(this).dialog("close");
+        //        }
+        //    },
+        //    close: function (event, ui) {
+        //        $(this).remove();
+        //    }
+        //});
+        $("#manuallyAddingtbl").empty();
+        $("#MailingTextBoxdiv").hide();
+        $.ajax({
+            url: '../../Home/OpenAlertBox?caseval=' + caseval,
+            type: 'GET',
+            contentType: 'application/json; charset=utf-8',
+            async: false,
+            success: function (DataVal) {
+                $("#CallCurrentAlertValueDiv").html(DataVal);
+            },
+            error: function () {
+                alert("Error Is occured Please Contuct with Script Administrater");
+            }
+
+        });
+    };
+
+    function openDairyPOP() {
+        $("#MyDairypop").load("../Home/MyDairy");
+
+        $("#MyDairypop").dialog({
+            height: 700,
+            width: 1000,
+            modal: true,
+
+            close: function () {
+
+                $(this).dialog("close");
+            }
+        }, "open");
+    }
+
+    function checkRegexp(o, regexp) {
+        if (!(regexp.test(o.val()))) {
+            o.addClass("ui-state-error");
+            writeMultipleMessage("error", "Please enter a valid mail id", "to");
+            return false;
+        }
+        else {
+            return true;
+        }
+    }
+    function checkLength(o, n, min) {
+        if (o.val().length < min) {
+            o.addClass("ui-state-error");
+            writeMultipleMessage("error", n + " must not be empty", "to");
+            return false;
+        } else {
+            return true;
+        }
+    }
+
+    function MoreAlerts() {
+
+        $("#Morealertspop").load("../Home/AllAlerts");
+
+        $("#Morealertspop").dialog({
+            height: 400,
+            width: 600,
+            modal: true,
+            close: function () {
+
+                $(this).dialog("close");
+            }
+        }, "open");
+    }
+
+    function GetScheduleCalendar() {
+        $("#ScheduleCalendarPop").load("Home/ScheduleCalendar");
+        $("#ScheduleCalendarPop").dialog({
+            height: 700,
+            width: 1200,
+            modal: true
+        }, "open");
+
+    }
+
+    function SetRowColor() {
+        //
+        var grid = $("#CalenderGrid").data("kendoGrid");
+        var data = grid.dataSource.data();
+
+        for (var i = 0; i < data.length; i++) {
+            var uid = data[i].uid;
+            if (data[i].Status == "") {
+                $('#CalenderGrid tbody').find("tr[data-uid=" + uid + "]").addClass("rowgreen");
+            }
+            else if (data[i].Status == "Lost") {
+                $('#CalenderGrid tbody').find("tr[data-uid=" + uid + "]").addClass("rowred");
+            }
+            else {
+                $('#CalenderGrid tbody').find("tr[data-uid=" + uid + "]").addClass("rowblue");
+            }
+        }
+    }
+
+    //#T3904
+    var AjaxFn = (
+        function () {
+            function AjaxRequest_GetMethod(url, data, functName) {
+
+                $.ajax({
+                    type: "GET",
+                    url: url,
+                    dataType: 'html',
+                    //data: data,
+                    async: true,
+                    success: function (data) {
+                        onSuccessFun(data, functName);
+                    },
+                    error: function (err) {
+                    }
+                });
+            };
+            return {
+                AjaxRequest_Get: AjaxRequest_GetMethod
+            };
+        })();
+
+    function onSuccessFun(data, functName) {
+        if (functName == "IMDAccountSummary") {
+            if ('Sub User' == "Root Level User") {
+                $("#divAccountSum").removeClass("dashboardAccountLoader");
+            }
+            if ('Sub User' == "Sub User") {
+                $("#divAccountSum").removeClass("dashboardSubAccountLoader");
+            }
+            if ('Sub User' == "DEO") {
+                $("#divAccountSum").removeClass("dashboardDEOAccountLoader");
+            }
+            $("#divAccountSum").css({ "padding-left": "14%", "padding-top": "5%" });
+            $("#divAccountSum").html(data);
+        }
+
+        if (functName == "IMDAchievement") {
+            $("#divAchieve").removeClass("dashboardIMDAchievementLoader");
+           // 
+            $("#divAchieve").html(data);
+        }
+
+        if (functName == "IMDBusiness") {
+            $("#divBusinessSrc").removeClass("dashboardIMDBusinessLoader");
+            $("#divBusinessSrc").html(data);
+
+        }
+
+        if (functName == "IMDFameClub") {
+            $("#divFameClub").removeClass("dashboardFameClubLoader");
+            $("#divFameClub").html(data);
+
+        }
+
+        if (functName == "IMDAlert") {
+            if ('Sub User' == "Root Level User") {
+                $("#divIMDAlert").removeClass("dashboardIMDAlertLoader");
+            }
+            if ('Sub User' == "Sub User") {
+                $("#divIMDAlert").removeClass("dashboardIMDSubAlertLoader");
+            }
+            if ('Sub User' == "DEO") {
+                $("#divIMDAlert").removeClass("dashboardIMDDEOAlertLoader");
+            }
+            $("#divIMDAlert").html(data);
+
+        }
+
+        if (functName == "IMDDiary") {
+            //
+            $("#divDailyTask").html(data);
+
+        }
+
+        if (functName == "IMDScoreCard") {
+            if ('Sub User' == "Root Level User") {
+                $("#divScoreCard").removeClass("dashboardIMDScoreLoader");
+            }
+            if ('Sub User' == "Sub User") {
+                $("#divScoreCard").removeClass("dashboardIMDSubScoreLoader");
+            }
+            if ('Sub User' == "DEO") {
+                $("#divScoreCard").removeClass("dashboardIMDDEOScoreLoader");
+            }
+            $("#divScoreCard").html(data);
+
+        }
+
+        if (functName == "IMDCalendar") {
+            if ('Sub User' == "Root Level User") {
+                $("#divIMDCalendar").removeClass("dashboardIMDCalendarLoader");
+            }
+            if ('Sub User' == "DEO") {
+                $("#divIMDCalendar").removeClass("dashboardIMDDEOCalendarLoader");
+            }
+
+            $("#divIMDCalendar").html(data);
+
+        }
+    }
+
+
+    function IMDAccountSummary_Ajax() {
+        //
+        if ('Sub User' == "Root Level User") {
+            $("#divAccountSum").addClass("dashboardAccountLoader");
+        }
+        if ('Sub User' == "Sub User") {
+            $("#divAccountSum").addClass("dashboardSubAccountLoader");
+        }
+        if ('Sub User' == "DEO") {
+            $("#divAccountSum").addClass("dashboardDEOAccountLoader");
+        }
+
+        let url = GetCompleteURL("/Home/GetAccountSummary");
+        let data = {};
+        let successFun1 = "IMDAccountSummary";
+        let serrFun2 = "err1";
+        AjaxFn.AjaxRequest_Get(url, "", successFun1);
+        $("#divAccountSum").html(data);
+    }
+
+    function IMDAchievement_Ajax() {
+        $("#divAchieve").addClass("dashboardIMDAchievementLoader");
+        let url = GetCompleteURL("/Home/IMDAchievement");
+        let data = {};
+        let successFun2 = "IMDAchievement";
+        let serrFun2 = "err2";
+        AjaxFn.AjaxRequest_Get(url, "", successFun2);
+        $("#divAchieve").html(data);
+    }
+
+    function IMDBusinessSource_Ajax() {
+
+        $("#divBusinessSrc").addClass("dashboardIMDBusinessLoader");
+        let url = GetCompleteURL("/Home/IMDBusiness");
+        let data = {};
+        let successFun3 = "IMDBusiness";
+        let serrFun3 = "err3";
+        AjaxFn.AjaxRequest_Get(url, "", successFun3);
+        $("#divBusinessSrc").html(data);
+    }
+
+    function IMDFameClub_Ajax() {
+
+        $("#divFameClub").addClass("dashboardFameClubLoader");
+        let url = GetCompleteURL("/Home/IMDFameClub");
+        let data = {};
+        let successFun4 = "IMDFameClub";
+        let serrFun4 = "err4";
+        AjaxFn.AjaxRequest_Get(url, "", successFun4);
+        $("#divFameClub").html(data);
+    }
+
+    function IMDAlert_Ajax() {
+        //
+        if ('Sub User' == "Root Level User") {
+            $("#divIMDAlert").addClass("dashboardIMDAlertLoader");
+        }
+        if ('Sub User' == "Sub User") {
+            $("#divIMDAlert").addClass("dashboardIMDSubAlertLoader");
+        }
+        if ('Sub User' == "DEO") {
+            $("#divIMDAlert").addClass("dashboardIMDDEOAlertLoader");
+        }
+
+        let url = GetCompleteURL("/Home/IMDAlert");
+        let data = {};
+        let successFun5 = "IMDAlert";
+        let serrFun5 = "err5";
+        AjaxFn.AjaxRequest_Get(url, "", successFun5);
+        $("#divIMDAlert").html(data);
+    }
+
+
+
+    function IMDDiary_Ajax() {
+        //
+        let url = GetCompleteURL("/Home/FetchTodayTask");
+        let data = {};
+        let successFun6 = "IMDDiary";
+        let serrFun6 = "err6";
+        AjaxFn.AjaxRequest_Get(url, "", successFun6);
+        $("#divDailyTask").html(data);
+    }
+
+    function IMDScoreCard_Ajax() {
+        //
+        if ('Sub User' == "Root Level User") {
+            $("#divScoreCard").addClass("dashboardIMDScoreLoader");
+        }
+        if ('Sub User' == "Sub User") {
+            $("#divScoreCard").addClass("dashboardIMDSubScoreLoader");
+        }
+        let url = GetCompleteURL("/Home/IMDScoreCard");
+        let data = {};
+        let successFun7 = "IMDScoreCard";
+        let serrFun7 = "err7";
+        AjaxFn.AjaxRequest_Get(url, "", successFun7);
+        $("#divScoreCard").html(data);
+    }
+
+    function IMDCalendar_Ajax() {
+        //
+        if ('Sub User' == "Root Level User") {
+            $("#divIMDCalendar").addClass("dashboardIMDCalendarLoader");
+        }
+        if ('Sub User' == "DEO") {
+            $("#divIMDCalendar").addClass("dashboardIMDDEOCalendarLoader");
+        }
+
+        let url = GetCompleteURL("/Home/IMDCalendar");
+        let data = {};
+        let successFun8 = "IMDCalendar";
+        let serrFun8 = "err8";
+        AjaxFn.AjaxRequest_Get(url, "", successFun8);
+        $("#divIMDCalendar").html(data);
+    }
+    //#T3904
+</script>
+
+        
+    </div>
+    <div id="mainDiv" class="mainDiv">
+        <div id="containerMain" class="containerMain">
+        </div>
+    </div>
+</div>
+
+
+<footer>
+    <div style="clear:both">
+    <div class="footerbar" style="margin-top:100px !important;">
+
+        <div id="footermenu" class="footer" style="margin-top:100px !important;">
+            <div class="footermenubar">
+                <span>
+                    <center>
+                        <label style="margin-left:3.0%; width:60% !important">
+                            This site is compatible with Internet Explorer version 10 and 11, Google Chrome version 42 to 56, and Mozilla Firefox version 38 and above.
+                            
+                    </label></center>
+                </span>
+            </div>
+        </div>
+    </div>
+</div>
+<div style="clear:both">
+    <div class="footerbar" style="margin-top:0px !important;">
+        <div id="footermenu" class="footer">
+            <div class="footermenubar">
+                <span><span>
+                    <center>
+                        <a href="/Home/IMDLogin?Length=5" style="color:Black !important;margin-right:5px !important;">ABOUT US |</a>
+                        <a href="/Home/IMDLogin?Length=5" style="color:Black !important; margin-right:5px !important;">DOWNLOAD |</a>
+                        <a href="/Home/IMDLogin?Length=5" style="color:Black !important; margin-right:5px !important;">CONTACT |</a>
+                        <a href="/Home/IMDLogin?Length=5" style="color:Black !important; margin-right:5px !important;">AGENT LOGIN |</a>
+                        <a href="/Home/IMDLogin?Length=5" style="color:Black !important; margin-right:5px !important;">ARTICLES |</a>
+                        <a href="/Home/IMDLogin?Length=5" style="color:Black !important;">PUBLIC DISCLOSURE</a>
+                    </center>
+                </span></span>
+            </div>
+        </div>
+    </div>
+</div>
+
+</footer>
+<div class="go-top scroll-up-icon">
+</div>
+
+<script type="text/javascript">
+    function Logout() {
+        sessionStorage.clear();
+        //#T5385
+        if ('True' == 'True') {
+            try {
+                logoutRank();
+            }
+            catch (error) {
+                console.log('Error Occured In logoutRank' + error.message);
+            }
+        }//#T5385
+
+        window.location = "../../Home/Logout";
+    }
+    function mainmenu() {
+
+        $(" #nav ul ").css({ display: "none" });
+        $(" #nav li").hover(function () {
+            $(this).find('ul:first').css({ visibility: "visible", display: "none" }).show(400);
+        }, function () {
+            $(this).find('ul:first').css({ visibility: "hidden" });
+        });
+
+    }
+
+
+
+    $(document).ready(function () {
+        $('#divSubMenuBar').css('background', '#FFFFFF');
+        var msie = $.browser == 'msie' && $.browser.version < '8.0';
+        if (msie)
+            $('#divSubMenuBar').css('height', '30px');
+        else
+            $('#divSubMenuBar').css('height', '30px');
+        if ('' == 'true' || '' == 'True') {
+            EnableDisableAllControls("BodySection", false);
+        }
+        mainmenu();
+
+        $("#subMenuBar").hide();
+        $("#divSubMotors").hide();
+        $("#divSubTravels").hide();
+        $("#divSubHealths").hide();
+        $("#divSubMarines").hide();
+        $("#divSubPackages").hide();
+        $("#divSubUtility").hide();
+        $("#divSubPay").hide();
+
+        //In case of Readonly attribute in textbox this function will fire .
+        $('input:text[readonly=readonly]').live({
+            keydown: function (evt) {
+                // Not allowing backspace so it won't allow naigation of page .
+                var charCode = (evt.which) ? evt.which : event.keyCode;
+                if (charCode == 8) {
+                    return false;
+                }
+            }
+
+        });
+    });
+
+    $(window).scroll(function () {
+        if ($(this).scrollTop() > 200) {
+            $('.go-top').fadeIn(200);
+        } else {
+            $('.go-top').fadeOut(200);
+        }
+    });
+
+    // Animate the scroll to top
+    $('.go-top').click(function (event) {
+        event.preventDefault();
+
+        $('html, body').animate({ scrollTop: 0 }, 300);
+    })
+
+</script>
+
+
+<ul id="ulQuickLinks" style="width: 250px; top: 195px; left: -210px;" class="100002SNHideListItem LeftMenu">
+    <li id="QuickLinksHeader" class="LeftMenuHeader" data-parent="ulQuickLinks"><a href="#">Quick Links</a><div class="left-arrow" style="float: right">
+    </div></li>
+    
+    <li>
+        <a href="/Services/ServiceRequest">Create Service Request</a><div class="my-policy-icon" style="float: right">
+    </div></li>
+<li><a href="/Services/ClaimIntimationLink">Claim Intimation</a><div class="my-policy-icon" style="float: right"></div></li>
+
+
+
+
+
+
+    <li><a href="#"></a>
+        <div class="" style="float: right">
+    </div></li>
+    <li><a href="#"></a>
+        <div class="" style="float: right">
+    </div></li>
+    <ul id="ulRecentHistory">
+        <li id="RecentLinksHeader" class="LeftMenuHeader"><a href="#">Recent Links</a><div>
+        </div></li>
+        <li>
+            <a href="#"></a>
+            <div>
+
+        </div></li>
+        <li>
+            <a href="#"></a>
+            <div>
+
+        </div></li>
+        <li>
+            <a href="#"></a>
+            <div>
+
+        </div></li>
+        <li>
+            <a href="#"></a>
+            <div>
+
+        </div></li>
+    </ul>
+</ul>
+
+<style type="text/css">
+    /*.payment-icon {
+        background-image: url('../../Images/iRPAS/all-icons-2.gif');
+        background-repeat: no-repeat;
+        background-position: 0px -84px;
+        height: 23px;
+        width: 36px;
+        margin: 1px 1px 1px 1px;
+    }*/
+</style>
+<script type="text/javascript">
+
+
+    $(document).ready(function () {
+        $("#divMenu a").click(function (e) {
+
+            AddToCookies(e, "IMD");
+
+        });
+        CreateRecentLinks("IMD");
+        $("#ulQuickLinks").SlideMenu({
+            iconSize: "40",
+            top: 195,
+            AnimationTime: 1000,
+            Header: "QuickLinksHeader"
+        });
+        //$("#ulRecentHistory").SlideMenu({
+        //    iconSize: "40",
+        //    top: 300,
+        //    AnimationTime: 1000,
+        //    Header: "RecentLinksHeader"
+        //});
+        //$("#ulQuickLinks li").click(function (e) {
+        //    
+
+
+        //});
+    });
+</script>
+
+
+<style type="text/css">
+    #divThirdMenu {
+        background-color: #d1d4d7;
+        width: 130px;
+        border: 1px solid #1b4883;
+        border-top: none;
+        height: 85px;
+        z-index: 9000;
+        position: absolute;
+        right: 0;
+        margin-right: 30px;
+        margin-top: -8px;
+        display: none;
+    }
+
+        #divThirdMenu li {
+            border-bottom: 2px solid black;
+            font-size: 14px;
+            padding: 5px;
+            padding-left: 30px !important;
+        }
+
+            #divThirdMenu li a {
+                color: #545654 !important;
+            }
+</style>
+<script>
+    //#T5385
+    if ('True' == 'True') {
+
+        function SmartZoneSimulateLogin() {
+            if ('rfcpolicy' !== '') {
+                initRTSComm('rfcpolicy');
+            }
+
+        }
+
+        window.onload = function (e) {
+            let btnReady = document.getElementById('btnReady');
+            let status = document.getElementById('status');
+
+
+            window.addEventListener('agent-online', function (e) {
+                console.log('agent is online');
+                btnReady.removeAttribute("disabled");
+                btnReady.innerText = 'Go Offline for video calling';
+                btnReady.style.backgroundColor = '#0f0';
+            });
+            window.addEventListener('agent-offline', function (e) {
+                console.log('agent is offline');
+                btnReady.removeAttribute("disabled");
+                btnReady.innerText = 'Go Online for video calling';
+                btnReady.style.backgroundColor = '#f00';
+            });
+            window.addEventListener('server-connected', function (e) {
+                //status.innerText = 'Connected';
+                status.style.backgroundColor = '#0f0';
+            });
+            window.addEventListener('server-disconnected', function (e) {
+                //status.innerText = 'Not Connected';
+                status.style.backgroundColor = '#f00';
+            });
+            window.addEventListener('server-reconnecting', function (e) {
+                //status.innerText = 'Reconnecting...';
+                status.style.backgroundColor = '#ff0';
+            });
+
+            window.addEventListener('agent-busy', function (e) {
+                console.log('agent is busy');
+                btnReady.setAttribute("disabled", true);
+                btnReady.innerText = 'Busy';
+                btnReady.style.backgroundColor = '#ff0';
+            });
+
+            window.addEventListener('call-ended', function (e) {
+                console.log('call ended');
+                btnReady.removeAttribute("disabled");
+                btnReady.innerText = 'Go Offline for video calling';
+                btnReady.style.backgroundColor = '#0f0';
+            });
+
+            btnReady.onclick = function (e) {
+                if (btnReady.innerText === 'Go Online for video calling') {
+                    goOnline();
+                } else {
+                    goOffline();
+                }
+
+            };
+        };
+
+        window.onbeforeunload = function (e) {
+            window.removeEventListener('agent-online', function () { });
+            window.removeEventListener('agent-offline', function () { });
+            window.removeEventListener('server-connected', function () { });
+            window.removeEventListener('server-disconnected', function () { });
+            window.removeEventListener('server-reconnecting', function () { });
+        };
+
+        $(window).load(function() {
+            SmartZoneSimulateLogin();
+        });
+        //#T5385
+    }
+</script>
+</body></html>
