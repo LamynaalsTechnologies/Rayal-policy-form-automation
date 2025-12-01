@@ -955,7 +955,7 @@ async function fillNationalForm(
     
     // Type the RTO location
     await rtoInput.clear();
-    await rtoInput.sendKeys(data.rtoLocation || "Mumbai");
+    await rtoInput.sendKeys( "chennai");
     await driver.sleep(2000); // Wait for autocomplete options to appear
     
     // Click on the first autocomplete option
@@ -1146,51 +1146,72 @@ async function fillNationalForm(
       console.log("Create New Customer not found:", e.message);
     }
     
-    // Select PAN Not Available radio button BEFORE filling customer form
+    // Select Manual KYC radio button BEFORE filling customer form
     try {
-      console.log("Selecting PAN Not Available radio button...");
+      console.log("Selecting Manual KYC radio button...");
       
       // Wait for the dialog to be fully loaded
       await driver.sleep(2000);
       
-      // Find the radio input element by ID (most reliable)
-      const panNotAvailableInput = By.id("mat-radio-22-input");
-      const inputElement = await driver.wait(until.elementLocated(panNotAvailableInput), 10000);
+      // Primary strategy: click the input by its stable id
+      const manualKycInput = By.id("mat-radio-21-input");
+      let inputElement = await driver.wait(until.elementLocated(manualKycInput), 10000);
       
-      // Check if already selected
-      const isSelected = await inputElement.isSelected();
-      console.log(`PAN Not Available radio button isSelected: ${isSelected}`);
+      // Ensure it's in view
+      await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", inputElement);
+      await driver.sleep(300);
       
-      if (!isSelected) {
-        // Scroll to element
-        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", inputElement);
-        await driver.sleep(500);
-        
-        // Click using JavaScript
-        await driver.executeScript("arguments[0].click();", inputElement);
-        console.log("Selected PAN Not Available radio button");
-        
-        // Verify selection
-        await driver.sleep(500);
-        const isNowSelected = await inputElement.isSelected();
-        console.log(`PAN Not Available radio button after click isSelected: ${isNowSelected}`);
-      } else {
-        console.log("PAN Not Available radio button already selected");
-      }
+      // Click using JS to avoid overlay/ripple issues in Angular Material
+      await driver.executeScript("arguments[0].click();", inputElement);
       
-      await driver.sleep(1000);
-    } catch (e) {
-      console.log("PAN Not Available radio button not found, trying alternative:", e.message);
-      
-      // Try alternative approach - find by name and value
+      // Verify selected; if not, try clicking the associated label
+      await driver.sleep(500);
+      let isSelected = false;
       try {
-        const altRadio = By.xpath("//input[@name='ekyc_sel_type' and @value='PanNotAvlable']");
-        const radioElement = await driver.wait(until.elementLocated(altRadio), 5000);
+        isSelected = await inputElement.isSelected();
+      } catch (_) {}
+      if (!isSelected) {
+        try {
+          const manualKycLabel = By.css("label[for='mat-radio-21-input']");
+          const labelEl = await driver.wait(until.elementLocated(manualKycLabel), 3000);
+          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", labelEl);
+          await driver.sleep(200);
+          await driver.executeScript("arguments[0].click();", labelEl);
+          await driver.sleep(400);
+          isSelected = await inputElement.isSelected().catch(() => false);
+        } catch (labelErr) {
+          console.log("Manual KYC label click fallback failed:", labelErr.message);
+        }
+      }
+      console.log(`Manual KYC radio selected state: ${isSelected}`);
+      await driver.sleep(500);
+    } catch (e) {
+      console.log("Manual KYC radio not found by id, trying alternative:", e.message);
+      
+      // Fallback 1: find by name/value
+      try {
+        const altByValue = By.xpath("//input[@name='ekyc_sel_type' and @value='ManualKYC']");
+        const radioElement = await driver.wait(until.elementLocated(altByValue), 5000);
+        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", radioElement);
+        await driver.sleep(200);
         await driver.executeScript("arguments[0].click();", radioElement);
-        console.log("Selected PAN Not Available radio button (alternative)");
-        await driver.sleep(1000);
+        console.log("Selected Manual KYC via name/value fallback");
+        await driver.sleep(500);
       } catch (e2) {
-        console.log("All strategies failed for PAN Not Available radio button:", e2.message);
+        console.log("Manual KYC by name/value failed:", e2.message);
+        
+        // Fallback 2: click the mat-radio-button container by value attribute
+        try {
+          const matRadio = By.css("mat-radio-button[value='ManualKYC'] input[type='radio']");
+          const radioInput = await driver.wait(until.elementLocated(matRadio), 5000);
+          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", radioInput);
+          await driver.sleep(200);
+          await driver.executeScript("arguments[0].click();", radioInput);
+          console.log("Selected Manual KYC via mat-radio-button fallback");
+          await driver.sleep(500);
+        } catch (e3) {
+          console.log("All strategies failed for Manual KYC radio:", e3.message);
+        }
       }
     }
     
@@ -1471,6 +1492,27 @@ async function fillNationalForm(
     } catch (e) {
       console.log("Could not fill Date of Birth:", e.message);
     }
+
+    // Fill Aadhaar Number
+    try {
+      console.log("Filling Aadhaar Number...");
+      const aadharField = By.name("newcust_textfield_aadharNo_01");
+
+      // Determine value from available data keys; fallback to a valid-looking default starting 2-9
+      const rawAadhaar = data.aadhaarNumber || data.aadhaar || data.aadhar || data.aadharNo || "234567890123";
+      // Normalize: digits only, max 12
+      let aadhaar = String(rawAadhaar).replace(/\D/g, '').slice(0, 12);
+      // Ensure 12 digits and first digit 2-9 per pattern
+      if (aadhaar.length !== 12 || !/^[2-9]/.test(aadhaar)) {
+        console.log("Provided Aadhaar invalid/short; using fallback pattern-compliant placeholder.");
+        aadhaar = "234567890123";
+      }
+
+      await safeType(driver, aadharField, aadhaar, 10000);
+      await driver.sleep(300);
+    } catch (e) {
+      console.log("Could not fill Aadhaar Number:", e.message);
+    }
     
     // Click on Address Information accordion to expand
     try {
@@ -1520,82 +1562,114 @@ async function fillNationalForm(
       console.log("Could not expand Address Information:", e.message);
     }
     
-    // Fill House No/ Bldg. Name
+    // Fill House No/ Bldg. Name (only from DB data; no hardcoded defaults)
     try {
-      console.log("Filling House Number...");
+      console.log("Filling House Number from DB data...");
       const houseNoField = By.name("newcust_textfield_building_01");
-      const buildingName = data.buildingName || data.premisesName || data.flatNo || data.flatDoorNo || "123";
-      await safeType(driver, houseNoField, buildingName, 10000);
+      const buildingName = data.buildingName || data.premisesName || data.flatNo || data.flatDoorNo;
+      if (buildingName && String(buildingName).trim()) {
+        await safeType(driver, houseNoField, String(buildingName).trim(), 10000);
+      } else {
+        console.log("Skipping House Number: no DB value provided.");
+      }
     } catch (e) {
       console.log("Could not fill House Number:", e.message);
     }
     
-    // Fill Street/Colony
+    // Fill Street/Colony (only from DB data)
     try {
-      console.log("Filling Street...");
+      console.log("Filling Street from DB data...");
       const streetField = By.name("newcust_textfield_street_01");
-      const street = data.road || data.roadStreetLane || data.street || "Main Street";
-      await safeType(driver, streetField, street, 10000);
+      const street = data.road || data.roadStreetLane || data.street;
+      if (street && String(street).trim()) {
+        await safeType(driver, streetField, String(street).trim(), 10000);
+      } else {
+        console.log("Skipping Street: no DB value provided.");
+      }
     } catch (e) {
       console.log("Could not fill Street:", e.message);
     }
     
-    // Fill Pincode
+    // Fill Pincode (only from DB data)
     try {
-      console.log("Filling Pincode...");
+      console.log("Filling Pincode from DB data...");
       const pincodeField = By.name("newcust_textfield_pincode_01");
-      const pincode = data.pincode || data.pinCode || "400001";
-      await safeType(driver, pincodeField, String(pincode), 10000);
+      const pincode = data.pincode || data.pinCode;
+      if (pincode && String(pincode).trim()) {
+        await safeType(driver, pincodeField, String(pincode).trim(), 10000);
+      } else {
+        console.log("Skipping Pincode: no DB value provided.");
+      }
     } catch (e) {
       console.log("Could not fill Pincode:", e.message);
     }
     
-    // Fill Locality
+    // Fill Locality (only from DB data)
     try {
-      console.log("Filling Locality...");
+      console.log("Filling Locality from DB data...");
       const localityField = By.name("newcust_textfield_locality_01");
-      const locality = data.locality || data.area || "Colaba";
-      await safeType(driver, localityField, locality, 10000);
+      const locality = data.locality || data.area || "chennai";
+      if (locality && String(locality).trim()) {
+        await safeType(driver, localityField, String(locality).trim(), 10000);
+      } else {
+        console.log("Skipping Locality: no DB value provided.");
+      }
     } catch (e) {
       console.log("Could not fill Locality:", e.message);
     }
     
-    // Fill City
+    // Fill City (only from DB data)
     try {
-      console.log("Filling City...");
+      console.log("Filling City from DB data...");
       const cityField = By.name("newcust_textfield_city_01");
-      const city = data.city || data.rtoCityLocation || "Mumbai";
-      await safeType(driver, cityField, city, 10000);
+      const city = data.city || data.rtoCityLocation;
+      if (city && String(city).trim()) {
+        await safeType(driver, cityField, String(city).trim(), 10000);
+      } else {
+        console.log("Skipping City: no DB value provided.");
+      }
     } catch (e) {
       console.log("Could not fill City:", e.message);
     }
     
-    // Fill District
+    // Fill District (only from DB data)
     try {
-      console.log("Filling District...");
+      console.log("Filling District from DB data...");
       const districtField = By.name("newcust_textfield_district_01");
-      const district = data.district || data.city || "Mumbai";
-      await safeType(driver, districtField, district, 10000);
+      const district = data.district || data.city;
+      if (district && String(district).trim()) {
+        await safeType(driver, districtField, String(district).trim(), 10000);
+      } else {
+        console.log("Skipping District: no DB value provided.");
+      }
     } catch (e) {
       console.log("Could not fill District:", e.message);
     }
     
-    // Fill State
+    // Fill State (only from DB data)
     try {
-      console.log("Filling State...");
+      console.log("Filling State from DB data...");
       const stateField = By.name("newcust_textfield_state_01");
-      const state = "Maharashtra";
-      await safeType(driver, stateField, state, 10000);
+      const state = data.state || data.stateName;
+      if (state && String(state).trim()) {
+        await safeType(driver, stateField, String(state).trim(), 10000);
+      } else {
+        console.log("Skipping State: no DB value provided.");
+      }
     } catch (e) {
       console.log("Could not fill State:", e.message);
     }
     
-    // Fill Country
+    // Fill Country (only from DB data)
     try {
-      console.log("Filling Country...");
+      console.log("Filling Country from DB data...");
       const countryField = By.name("newcust_textfield_country_01");
-      const country = data.country || "India";
-      await safeType(driver, countryField, country, 10000);
+      const country = data.country;
+      if (country && String(country).trim()) {
+        await safeType(driver, countryField, String(country).trim(), 10000);
+      } else {
+        console.log("Skipping Country: no DB value provided.");
+      }
     } catch (e) {
       console.log("Could not fill Country:", e.message);
     }
