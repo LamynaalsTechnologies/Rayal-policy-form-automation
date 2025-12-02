@@ -169,7 +169,7 @@ const runPolicyJob = async (job) => {
     // Normalize company name - check both Companyname and company fields, convert to lowercase
     const companyName = (job.formData.Companyname || job.formData.company || "reliance").toLowerCase();
     const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
-    
+
     console.log(
       `\n[${queueName}] Processing ${companyName} form for: ${job.formData.firstName} ${job.formData.lastName}`
     );
@@ -470,18 +470,22 @@ db.once("open", async () => {
       dob: data?.dateOfBirth?.$date
         ? moment(data.dateOfBirth.$date).format("DD-MM-YYYY")
         : data?.dateOfBirth
-        ? moment(data.dateOfBirth).format("DD-MM-YYYY")
-        : "",
+          ? moment(data.dateOfBirth).format("DD-MM-YYYY")
+          : "",
       gender: data?.gender,
       // Father details
       fatherTitle: data?.fatherTitle || "Mr.",
       fatherName: data?.fatherName,
       // Address details
       flatNo: data?.flatDoorNo,
+      flatDoorNo: data?.flatDoorNo, // Added to match onlinePolicy schema
       floorNo: data?.floorNo,
       premisesName: data?.buildingName,
+      buildingName: data?.buildingName, // Added to match onlinePolicy schema
       blockNo: data?.blockName || data?.blockNo,
+      blockName: data?.blockName, // Added to match onlinePolicy schema
       road: data?.roadStreetLane || data?.road,
+      roadStreetLane: data?.roadStreetLane, // Added to match onlinePolicy schema
       areaAndLocality: data?.areaAndLocality || data?.area || data?.locality || "",
       state: data?.state == "TAMILNADU" ? "30" : data?.state == "KARNATAKA" ? "26" : "30",
       pinCode: data?.pincode,
@@ -499,16 +503,16 @@ db.once("open", async () => {
       manufacturingMonth: data?.manufacturingMonth,
       engineNumber: data?.engineNumber,
       chassisNumber: data?.chassisNumber,
-      purchaseDate: data?.purchaseDate?.$date 
+      purchaseDate: data?.purchaseDate?.$date
         ? moment(data.purchaseDate.$date).format("DD-MM-YYYY")
         : data?.purchaseDate
-        ? moment(data.purchaseDate).format("DD-MM-YYYY")
-        : "",
+          ? moment(data.purchaseDate).format("DD-MM-YYYY")
+          : "",
       registrationDate: data?.registrationDate?.$date
         ? moment(data.registrationDate.$date).format("DD-MM-YYYY")
         : data?.registrationDate
-        ? moment(data.registrationDate).format("DD-MM-YYYY")
-        : "",
+          ? moment(data.registrationDate).format("DD-MM-YYYY")
+          : "",
       // Coverage options
       zeroDepreciation: data?.zeroDepreciation,
       tppdRestrict: data?.tppdRestrict,
@@ -526,7 +530,7 @@ db.once("open", async () => {
       // Company name mapping - check both 'company' and 'Companyname' fields, normalize to lowercase
       Companyname: data?.Companyname || (data?.company ? data.company.toLowerCase() : "reliance")
     };
-    
+
     console.log(
       "formData: ******* ******* ******* ******* ******* ******* ",
       formData
@@ -757,9 +761,8 @@ app.get("/api/jobs", async (req, res) => {
       status: job.status,
       failureType: job.failureType || null, // "LoginFormError" or "PostSubmissionError"
       attempts: job.attempts,
-      customerName: `${job.formData?.firstName || ""} ${
-        job.formData?.lastName || ""
-      }`.trim(),
+      customerName: `${job.formData?.firstName || ""} ${job.formData?.lastName || ""
+        }`.trim(),
       mobile: job.formData?.mobile,
       hasErrors: job.errorLogs && job.errorLogs.length > 0,
       errorCount: job.errorLogs ? job.errorLogs.length : 0,
