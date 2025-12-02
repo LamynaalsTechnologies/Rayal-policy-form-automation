@@ -2095,7 +2095,7 @@ async function fillNationalForm(
       // 1. Expand the section
       const paHeader = By.xpath("//mat-expansion-panel-header[.//h4[contains(., 'Compulsory PA for Owner Driver')]]");
       const paPanel = await driver.wait(until.elementLocated(paHeader), 10000);
-      
+
       const isExpanded = await driver.executeScript("return arguments[0].getAttribute('aria-expanded') === 'true';", paPanel);
       if (!isExpanded) {
         await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", paPanel);
@@ -2108,38 +2108,38 @@ async function fillNationalForm(
       // 2. Disable the toggle
       // Use a robust locator for the switch button inside the panel
       try {
-          const toggleButton = await driver.wait(until.elementLocated(By.xpath("//mat-expansion-panel[.//h4[contains(., 'Compulsory PA')]]//button[@role='switch']")), 5000);
-          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", toggleButton);
-          
-          const isCheckedStr = await toggleButton.getAttribute("aria-checked");
-          console.log(`Compulsory PA toggle aria-checked: ${isCheckedStr}`);
-          
-          if (isCheckedStr === 'true') {
-              console.log("Compulsory PA is enabled. Disabling it...");
-              await toggleButton.click();
-              
-              // 3. Handle Confirmation Popup
-              console.log("Waiting for confirmation popup...");
-              try {
-                  // Use the specific name provided by the user
-                  const closeBtn = await driver.wait(until.elementLocated(By.name("alert_btn_data_01")), 5000);
-                  await driver.wait(until.elementIsVisible(closeBtn), 5000);
-                  await closeBtn.click();
-                  console.log("Clicked Close on Compulsory PA confirmation.");
-              } catch (popupError) {
-                  console.log("Confirmation popup Close button (alert_btn_data_01) not found:", popupError.message);
-                  // Fallback to text search just in case
-                  try {
-                      const closeBtnText = await driver.wait(until.elementLocated(By.xpath("//button[contains(., 'Close')]")), 2000);
-                      await closeBtnText.click();
-                      console.log("Clicked Close (text fallback).");
-                  } catch (e) {}
-              }
-          } else {
-              console.log("Compulsory PA is already disabled.");
+        const toggleButton = await driver.wait(until.elementLocated(By.xpath("//mat-expansion-panel[.//h4[contains(., 'Compulsory PA')]]//button[@role='switch']")), 5000);
+        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", toggleButton);
+
+        const isCheckedStr = await toggleButton.getAttribute("aria-checked");
+        console.log(`Compulsory PA toggle aria-checked: ${isCheckedStr}`);
+
+        if (isCheckedStr === 'true') {
+          console.log("Compulsory PA is enabled. Disabling it...");
+          await toggleButton.click();
+
+          // 3. Handle Confirmation Popup
+          console.log("Waiting for confirmation popup...");
+          try {
+            // Use the specific name provided by the user
+            const closeBtn = await driver.wait(until.elementLocated(By.name("alert_btn_data_01")), 5000);
+            await driver.wait(until.elementIsVisible(closeBtn), 5000);
+            await closeBtn.click();
+            console.log("Clicked Close on Compulsory PA confirmation.");
+          } catch (popupError) {
+            console.log("Confirmation popup Close button (alert_btn_data_01) not found:", popupError.message);
+            // Fallback to text search just in case
+            try {
+              const closeBtnText = await driver.wait(until.elementLocated(By.xpath("//button[contains(., 'Close')]")), 2000);
+              await closeBtnText.click();
+              console.log("Clicked Close (text fallback).");
+            } catch (e) { }
           }
+        } else {
+          console.log("Compulsory PA is already disabled.");
+        }
       } catch (toggleErr) {
-          console.log("Could not find Compulsory PA toggle button:", toggleErr.message);
+        console.log("Could not find Compulsory PA toggle button:", toggleErr.message);
       }
 
     } catch (e) {
@@ -3045,13 +3045,12 @@ async function fillNationalForm(
       stage: "login-form", // Indicate this is a login form error
       postSubmissionFailed: false,
     };
+  } finally {
+    // Cleanup: Always close browser and delete cloned profile
+    if (jobBrowser) {
+      await cleanupNationalJobBrowser(jobBrowser);
+    }
   }
-  // finally {
-  // Cleanup: Always close browser and delete cloned profile
-  // if (jobBrowser) {
-  //   await cleanupNationalJobBrowser(jobBrowser);
-  // }
-  // }
 }
 
 // Main execution function for standalone script
