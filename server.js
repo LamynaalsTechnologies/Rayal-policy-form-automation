@@ -184,7 +184,7 @@ const runPolicyJob = async (job) => {
       fillFormPromise = fillNationalForm({
         ...job.formData,
         username: "9999839907", // Always use this username for National
-        password: "Rayal$2025", // Always use this password for National
+        password: "Rayal$20565", // Always use this password for National
         _jobId: job._id, // Pass job ID for error logging
         _jobIdentifier: jobIdentifier,
         _attemptNumber: job.attempts + 1, // Current attempt number
@@ -193,8 +193,8 @@ const runPolicyJob = async (job) => {
     } else {
       // Reliance form (default)
       fillFormPromise = fillRelianceForm({
-        username: "TNAGAR2W",
-        password: "Pass@123",
+        username: "rfcpolicy",
+        password: "Pass@1234",
         ...job.formData,
         _jobId: job._id, // Pass job ID for error logging
         _jobIdentifier: jobIdentifier,
@@ -460,8 +460,8 @@ db.once("open", async () => {
     const captchaId = data?._id;
 
     let formData = {
-      username: "TNAGAR2W",
-      password: "Pass@123",
+      username: "rfcpolicy",
+      password: "Pass@1234",
       // Proposer details
       proposerTitle: data?.proposerTitle || "Mr.",
       firstName: data?.fullName || data?.firstName,

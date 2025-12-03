@@ -190,7 +190,7 @@ async function deleteDirectoryRecursive(dirPath) {
   }
   try {
     fs.rmdirSync(dirPath);
-  } catch {}
+  } catch { }
 }
 
 /**
@@ -316,7 +316,7 @@ async function loginOnClonedBrowser(driver, jobId, credentials) {
     // Clean up captcha file
     try {
       fs.unlinkSync(filePath);
-    } catch (e) {}
+    } catch (e) { }
 
     if (!captchaText) {
       console.error(`❌ [${jobId}] Failed to extract captcha text`);
@@ -550,7 +550,8 @@ async function checkAndRecoverClonedSession(driver, jobId, credentials) {
 }
 
 async function fillRelianceForm(
-  data = { username: "TNAGAR2W", password: "Pass@123" }
+  // data = { username: "TNAGAR2W", password: "Pass@123" }
+  data = { username: "rfcpolicy", password: "Pass@123" }
 ) {
   const jobId = `${data.firstName || "Job"}_${Date.now()}`;
   let jobBrowser = null;
@@ -576,8 +577,8 @@ async function fillRelianceForm(
     // === STEP 1: Check if cloned session is expired ===
     // This detects if we cloned an expired session and attempts to login on cloned browser
     const credentials = {
-      username: data.username || "TNAGAR2W",
-      password: data.password || "Pass@123",
+      username: data.username || "rfcpolicy",
+      password: data.password || "Pass@1234",
     };
 
     const sessionValid = await checkAndRecoverClonedSession(
@@ -974,7 +975,7 @@ async function fillRelianceForm(
         await driver.sleep(500);
 
         // Type the search text and trigger events
-        const vehicleSearchText =  data.vehicleModel 
+        const vehicleSearchText = data.vehicleModel
           ? `${data.vehicleMake} ${data.vehicleModel}`
           : "tvs scooty zest";
         await vehicleMakeInput.sendKeys(vehicleSearchText);
@@ -1088,7 +1089,7 @@ async function fillRelianceForm(
           // Try to set values directly using JavaScript
           const manufacturingYear = data.manufacturingYear || 2025;
           const manufacturingMonth = data.manufacturingMonth || "10";
-          
+
           await driver.executeScript(`
             // Try to set manufacturing year
             var yearDropdown = document.getElementById('Manufacturing_YearVehicle');
@@ -1310,7 +1311,7 @@ async function fillRelianceForm(
         console.log("Setting IDV value (initial) from formData...");
         const idv = Number(String(data.idv || '').replace(/[^0-9]/g, '')) || 0;
         if (idv > 0) {
-        await driver.executeScript(`
+          await driver.executeScript(`
             try {
               var desired = ${idv};
               // Prefer total #IDVVehicle; fallback to #ActualIDVVehicle
@@ -1545,9 +1546,9 @@ async function fillRelianceForm(
                 until.elementLocated(
                   By.css("span[aria-owns='ddlTPPDLimit_listbox']")
                 ),
-          10000
-        );
-        await driver.executeScript(
+                10000
+              );
+              await driver.executeScript(
                 "arguments[0].scrollIntoView({block: 'center'});",
                 tppdDropdown
               );
@@ -1570,7 +1571,7 @@ async function fillRelianceForm(
                     2000
                   );
                   break;
-                } catch {}
+                } catch { }
               }
 
               if (optionEl) {
@@ -1619,16 +1620,16 @@ async function fillRelianceForm(
         // === FINANCIER FIELDS HANDLING ===
         // Fill financier details BEFORE "Is Registration Address Same" checkbox
         console.log("Handling financier fields...");
-        
+
         if (data.hasFinancier) {
           console.log("Vehicle has financier, checking VehicleHypothicated checkbox...");
-          
+
           try {
             const vehicleHypothicatedCheckbox = await driver.wait(
               until.elementLocated(By.id("VehicleHypothicated")),
               10000
             );
-            
+
             // Check if already checked
             const isAlreadyChecked = await vehicleHypothicatedCheckbox.isSelected();
             if (!isAlreadyChecked) {
@@ -1637,7 +1638,7 @@ async function fillRelianceForm(
             } else {
               console.log("VehicleHypothicated checkbox already checked");
             }
-            
+
             // Trigger the VehicleHypothicate() function to show financier fields
             await driver.executeScript(`
               if (typeof VehicleHypothicate === 'function') {
@@ -1696,7 +1697,7 @@ async function fillRelianceForm(
             // Fill Financier Name - Enter text and select FIRST result
             if (data.financierName) {
               console.log(`Filling financier name: ${data.financierName}`);
-              
+
               // Force field to be visible and enabled
               await driver.executeScript(`
                 var input = document.getElementById('AutoFinancierName');
@@ -1715,12 +1716,12 @@ async function fillRelianceForm(
                   }
                 }
               `);
-              
+
               const financierNameInput = await driver.wait(
                 until.elementLocated(By.id("AutoFinancierName")),
                 10000
               );
-              
+
               await driver.executeScript(
                 "arguments[0].scrollIntoView({block: 'center'});",
                 financierNameInput
@@ -1732,7 +1733,7 @@ async function fillRelianceForm(
               await driver.sleep(300);
               await driver.executeScript("arguments[0].click();", financierNameInput);
               await driver.sleep(300);
-              
+
               await financierNameInput.sendKeys(data.financierName);
               await driver.sleep(1500);
 
@@ -1744,7 +1745,7 @@ async function fillRelianceForm(
                 input.dispatchEvent(new Event('change', { bubbles: true }));
               `, financierNameInput);
               console.log(`Typed financier name: ${data.financierName}`);
-              
+
               // Wait for autocomplete dropdown
               await driver.sleep(3000);
 
@@ -1759,15 +1760,15 @@ async function fillRelianceForm(
                 await driver.executeScript("arguments[0].click();", firstItem);
                 console.log("✅ Selected FIRST financier name from dropdown");
                 selected = true;
-              } catch(e) {
+              } catch (e) {
                 console.log("Dropdown not visible, trying keyboard selection...");
-                try { 
-                  await financierNameInput.sendKeys(Key.ARROW_DOWN); 
-                  await driver.sleep(300); 
+                try {
+                  await financierNameInput.sendKeys(Key.ARROW_DOWN);
+                  await driver.sleep(300);
                   await financierNameInput.sendKeys(Key.ENTER);
                   console.log("✅ Selected FIRST financier via keyboard");
                   selected = true;
-                } catch(e2) {
+                } catch (e2) {
                   console.log("Keyboard failed, trying Kendo API...");
                   await driver.executeScript(`
                     try {
@@ -1800,8 +1801,16 @@ async function fillRelianceForm(
             // Fill Financier Address
             if (data.financierAddress) {
               console.log(`Filling financier address: ${data.financierAddress}`);
+
+              // SAVE the financier name value BEFORE touching the address field
+              const savedFinancierName = await driver.executeScript(`
+                var finNameField = document.getElementById('AutoFinancierName');
+                return finNameField ? finNameField.value : '';
+              `);
+              console.log(`💾 Saved financier name before address fill: ${savedFinancierName}`);
+
               await driver.sleep(1500);
-              
+
               // Force address field to be visible and enabled
               await driver.executeScript(`
                 var input = document.getElementById('FinancierAddressVehicle');
@@ -1820,12 +1829,12 @@ async function fillRelianceForm(
                   }
                 }
               `);
-              
+
               const financierAddressInput = await driver.wait(
                 until.elementLocated(By.id("FinancierAddressVehicle")),
                 10000
               );
-              
+
               await driver.executeScript(
                 "arguments[0].scrollIntoView({block: 'center'});",
                 financierAddressInput
@@ -1839,12 +1848,27 @@ async function fillRelianceForm(
                 el.removeAttribute('disabled');
                 el.value = '';
               `, financierAddressInput);
-              
+
               await driver.sleep(500);
               await financierAddressInput.sendKeys(data.financierAddress);
               console.log(`✅ Filled financier address: ${data.financierAddress}`);
+
+              // RESTORE financier name immediately after typing address
+              await driver.executeScript(`
+                var finNameField = document.getElementById('AutoFinancierName');
+                var savedName = arguments[0];
+                if (finNameField && savedName && !finNameField.value) {
+                  finNameField.value = savedName;
+                  var widget = $(finNameField).data('kendoAutoComplete');
+                  if (widget) {
+                    widget.value(savedName);
+                  }
+                  console.log('🔄 Restored financier name after address input');
+                }
+              `, savedFinancierName);
+
               await driver.sleep(800);
-              
+
               // Trigger events WITHOUT blur to prevent form refresh/hiding fields
               await driver.executeScript(`
                 var el = arguments[0];
@@ -1852,10 +1876,30 @@ async function fillRelianceForm(
                 el.dispatchEvent(new Event('change', { bubbles: true }));
                 // DO NOT trigger blur() as it may cause form to refresh and hide other fields
               `, financierAddressInput);
-              await driver.sleep(1000);
-              
-              // Re-trigger VehicleHypothicate() to ensure all financier fields remain visible
+
+              // RESTORE financier name again after triggering events
               await driver.executeScript(`
+                var finNameField = document.getElementById('AutoFinancierName');
+                var savedName = arguments[0];
+                if (finNameField && savedName && !finNameField.value) {
+                  finNameField.value = savedName;
+                  var widget = $(finNameField).data('kendoAutoComplete');
+                  if (widget) {
+                    widget.value(savedName);
+                  }
+                  console.log('🔄 Restored financier name after address events');
+                }
+              `, savedFinancierName);
+
+              await driver.sleep(1000);
+
+              // Re-trigger VehicleHypothicate() to ensure all financier fields remain visible
+              // BUT preserve the financier name value before calling it
+              await driver.executeScript(`
+                // Save the current financier name value BEFORE VehicleHypothicate
+                var finNameField = document.getElementById('AutoFinancierName');
+                var savedFinancierName = finNameField ? finNameField.value : '';
+                
                 if (typeof VehicleHypothicate === 'function') {
                   try {
                     VehicleHypothicate();
@@ -1863,9 +1907,19 @@ async function fillRelianceForm(
                     console.log('Error re-triggering VehicleHypothicate:', e);
                   }
                 }
+                
+                // Immediately restore the financier name value AFTER VehicleHypothicate
+                if (finNameField && savedFinancierName) {
+                  finNameField.value = savedFinancierName;
+                  // Also update the Kendo widget if present
+                  var widget = $(finNameField).data('kendoAutoComplete');
+                  if (widget) {
+                    widget.value(savedFinancierName);
+                  }
+                }
               `);
               await driver.sleep(1000);
-              
+
               // Re-ensure all form fields are still visible after address fill
               await driver.executeScript(`
                 // Ensure financier name field and its container are visible
@@ -1926,10 +1980,10 @@ async function fillRelianceForm(
                 }
               `);
               await driver.sleep(500);
-              
+
               // Wait for any loaders to disappear that might have been triggered
               await waitForLoaderToDisappear(driver);
-              
+
               // Verify financier name field is still visible and restore if needed
               try {
                 // First, get the current value to preserve it (use original as fallback)
@@ -1943,12 +1997,12 @@ async function fillRelianceForm(
                   // If we can't get the value, use the original from data
                   currentFinNameValue = data.financierName || '';
                 }
-                
+
                 // If value is empty, use original from data
                 if (!currentFinNameValue && data.financierName) {
                   currentFinNameValue = data.financierName;
                 }
-                
+
                 const financierNameField = await driver.findElement(By.id("AutoFinancierName"));
                 const isFinNameVisible = await financierNameField.isDisplayed();
                 if (!isFinNameVisible) {
@@ -2029,7 +2083,7 @@ async function fillRelianceForm(
                   }
                 `, data.financierName || '');
               }
-              
+
               // Verify critical fields are still present and visible
               try {
                 const vehicleMakeField = await driver.findElement(By.id("VehicleDetailsMakeModel"));
@@ -2059,7 +2113,7 @@ async function fillRelianceForm(
             } else {
               console.log("No financier address provided");
             }
-            
+
             console.log("✅ Financier details filled successfully");
           } catch (err) {
             console.log("❌ Error handling financier fields:", err.message);
@@ -2457,7 +2511,7 @@ async function fillRelianceForm(
       postSubmissionFailed: false,
     };
   }
-   finally {
+  finally {
     // Cleanup: Always close browser and delete cloned profile
     if (jobBrowser) {
       await cleanupJobBrowser(jobBrowser);
