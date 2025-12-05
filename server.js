@@ -184,7 +184,7 @@ const runPolicyJob = async (job) => {
       fillFormPromise = fillNationalForm({
         ...job.formData,
         username: "9999839907", // Always use this username for National
-        password: "Rayal$20565", // Always use this password for National
+        password: "Rayal$2025", // Always use this password for National
         _jobId: job._id, // Pass job ID for error logging
         _jobIdentifier: jobIdentifier,
         _attemptNumber: job.attempts + 1, // Current attempt number
@@ -493,6 +493,9 @@ db.once("open", async () => {
       mobile: data?.mobileNumber,
       email: data?.email,
       aadhar: data?.aadhar,
+      // Document uploads (from S3)
+      aadharCard: data?.aadharCard, // { fileName, key, location }
+      panCard: data?.panCard, // { fileName, key, location }
       // Vehicle details
       vehicleMake: data?.vehicleMake,
       vehicleModel: data?.vehicleModel,

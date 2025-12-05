@@ -2711,263 +2711,71 @@ async function fillRelianceForm(
                 
                 await driver.sleep(2000);
 
-                // === STEP 2: Handle Angular file upload (ngf-drop/ngf-select) ===
-                console.log("Looking for upload input field...");
-                
+                // === STEP 2: Look for file input and upload ===
+                console.log("Looking for file input element...");
                 try {
-                  // Download Aadhar from S3 first
-                  const tempFilePath = `/tmp/aadhar_${Date.now()}.pdf`;
-                  console.log(`Downloading Aadhar from S3: ${data.aadharCard.location}`);
-                  
-                  await new Promise((resolve, reject) => {
-                    const file = fs.createWriteStream(tempFilePath);
-                    https.get(data.aadharCard.location, (response) => {
-                      response.pipe(file);
-                      file.on('finish', () => {
-                        file.close();
-                        console.log(`✅ File downloaded to: ${tempFilePath}`);
-                        resolve();
-                      });
-                    }).on('error', (err) => {
-                      fs.unlink(tempFilePath, () => {});
-                      reject(err);
-                    });
-                  });
+                  const fileInput = await driver.wait(
+                    until.elementLocated(By.css("input[type='file']")),
+                    10000
+                  );
+                  console.log("✅ Found file input element");
 
-                  // Find file input - try multiple selectors
-                  let fileInput = null;
-                  
+                  // Download the file from S3 and upload it
                   try {
-                    // Primary: Find any file input on page
-                    fileInput = await driver.wait(
-                      until.elementLocated(By.css("input[type='file']")),
-                      10000
-                    );
-                    console.log("✅ Found file input element");
-                  } catch (e1) {
-                    console.log("⚠️  Direct file input not found, trying ngf-select click method...");
+                    const tempFilePath = `/tmp/aadhar_${Date.now()}.pdf`;
                     
-                    // Fallback: Click the "Click to browse files" link which triggers file select
-                    try {
-                      const browseLink = await driver.wait(
-                        until.elementLocated(
-                          By.xpath("//a[contains(text(), 'Click to browse')]")
-                        ),
-                        5000
-                      );
-                      
-                      // Get the parent upload div
-                      const uploadDiv = await driver.findElement(
-                        By.css("div[ngf-drop][ngf-select]")
-                      );
-                      
-                      // Look for file input within or related to this div
-                      const fileInputInDiv = await uploadDiv.findElement(
-                        By.css("input[type='file']")
-                      ).catch(() => null);
-                      
-                      if (fileInputInDiv) {
-                        fileInput = fileInputInDiv;
-                        console.log("✅ Found file input within upload div");
-                      }
-                    } catch (e2) {
-                      console.log("⚠️  Browse link method failed");
-                    }
-                  }
-
-                  if (fileInput) {
-                    console.log(`📤 Uploading file: ${data.aadharCard.fileName}`);
+                    console.log(`� Downloading Aadhar from S3: ${data.aadharCard.location}`);
                     
-                    // Send the file path to the input
-                    try {
-                      await fileInput.sendKeys(tempFilePath);
-                      console.log(`✅ File sent to input: ${data.aadharCard.fileName}`);
-                    } catch (sendErr) {
-                      console.log(`⚠️  sendKeys failed: ${sendErr.message}`);
-                      // Try JavaScript approach
-                      await driver.executeScript(`
-                        arguments[0].value = '${tempFilePath}';
-                        var event = new Event('change', { bubbles: true });
-                        arguments[0].dispatchEvent(event);
-                      `, fileInput);
-                      console.log(`✅ File set via JavaScript`);
-                    }
-                    
-                    await driver.sleep(4000);
-                    console.log(`✅ File upload completed: ${data.aadharCard.fileName}`);
-                  } else {
-                    console.log(`⚠️  Could not find file input element`);
-                    console.log(`📌 Document available at: ${data.aadharCard.location}`);
-                  }
-
-                  // Cleanup temp file
-                  try {
-                    fs.unlinkSync(tempFilePath);
-                    console.log("🧹 Temp file cleaned up");
-                  } catch (cleanupErr) {
-                    console.log("⚠️  Could not delete temp file");
-                  }
-
-                  // === STEP 3: Upload PAN Card (file2) if available ===
-                  if (data.panCard) {
-                    console.log("Found PAN card, uploading...");
-                    
-                    try {
-                      const tempPanPath = `/tmp/pan_${Date.now()}.pdf`;
-                      console.log(`Downloading PAN from S3: ${data.panCard.location}`);
-                      
-                      await new Promise((resolve, reject) => {
-                        const file = fs.createWriteStream(tempPanPath);
-                        https.get(data.panCard.location, (response) => {
-                          response.pipe(file);
-                          file.on('finish', () => {
-                            file.close();
-                            console.log(`✅ PAN file downloaded to: ${tempPanPath}`);
-                            resolve();
-                          });
-                        }).on('error', (err) => {
-                          fs.unlink(tempPanPath, () => {});
-                          reject(err);
+                    // Download file from S3
+                    await new Promise((resolve, reject) => {
+                      const file = fs.createWriteStream(tempFilePath);
+                      https.get(data.aadharCard.location, (response) => {
+                        response.pipe(file);
+                        file.on('finish', () => {
+                          file.close();
+                          console.log(`✅ File downloaded to: ${tempFilePath}`);
+                          resolve();
                         });
+                      }).on('error', (err) => {
+                        fs.unlink(tempFilePath, () => {});
+                        reject(err);
                       });
+                    });
 
-                      // Find file input for PAN (file2) - try multiple selectors
-                      let panFileInput = null;
-                      
-                      try {
-                        // Look for all file inputs - get the second one for PAN
-                        const fileInputs = await driver.findElements(By.css("input[type='file']"));
-                        if (fileInputs.length >= 2) {
-                          panFileInput = fileInputs[1]; // Second file input
-                          console.log("✅ Found PAN file input element (second input)");
-                        } else if (fileInputs.length === 1) {
-                          // If only one input, try to find by specific selector or name
-                          panFileInput = await driver.wait(
-                            until.elementLocated(By.css("input[type='file'][name*='file2']")),
-                            5000
-                          ).catch(() => fileInputs[0]);
-                          console.log("✅ Found PAN file input (reusing single input)");
-                        }
-                      } catch (e) {
-                        console.log("⚠️  PAN file input not found, skipping...");
-                      }
+                    // Upload the file using sendKeys
+                    console.log("📤 Uploading file to document input...");
+                    await fileInput.sendKeys(tempFilePath);
+                    console.log(`✅ File upload initiated: ${data.aadharCard.fileName}`);
+                    await driver.sleep(3000);
 
-                      if (panFileInput) {
-                        console.log(`📤 Uploading PAN file: ${data.panCard.fileName}`);
-                        
-                        try {
-                          await panFileInput.sendKeys(tempPanPath);
-                          console.log(`✅ PAN file sent to input: ${data.panCard.fileName}`);
-                        } catch (sendErr) {
-                          console.log(`⚠️  PAN sendKeys failed: ${sendErr.message}`);
-                          await driver.executeScript(`
-                            arguments[0].value = '${tempPanPath}';
-                            var event = new Event('change', { bubbles: true });
-                            arguments[0].dispatchEvent(event);
-                          `, panFileInput);
-                          console.log(`✅ PAN file set via JavaScript`);
-                        }
-                        
-                        await driver.sleep(4000);
-                        console.log(`✅ PAN file upload completed: ${data.panCard.fileName}`);
-                      }
-
-                      // Cleanup PAN temp file
-                      try {
-                        fs.unlinkSync(tempPanPath);
-                        console.log("🧹 PAN temp file cleaned up");
-                      } catch (cleanupErr) {
-                        console.log("⚠️  Could not delete PAN temp file");
-                      }
-
-                    } catch (panErr) {
-                      console.log(`⚠️ PAN upload error: ${panErr.message}`);
-                    }
-                  }
-
-                  // === STEP 4: Click SUBMIT button ===
-                  console.log("Looking for SUBMIT button...");
-                  try {
-                    let submitButton = null;
-
-                    // Try multiple selector methods for the submit button
+                    // Clean up temp file
                     try {
-                      // Method 1: Find by ng-click attribute
-                      submitButton = await driver.wait(
-                        until.elementLocated(By.css("button[ng-click='uploadFilesToAPI()']")),
-                        5000
-                      );
-                      console.log("✅ Found SUBMIT button (ng-click method)");
-                    } catch (e1) {
-                      try {
-                        // Method 2: Find by button text "SUBMIT"
-                        submitButton = await driver.wait(
-                          until.elementLocated(By.xpath("//button[contains(text(), 'SUBMIT')]")),
-                          5000
-                        );
-                        console.log("✅ Found SUBMIT button (text method)");
-                      } catch (e2) {
-                        try {
-                          // Method 3: Find by class "btn-main"
-                          submitButton = await driver.wait(
-                            until.elementLocated(By.css("button.btn-main")),
-                            5000
-                          );
-                          console.log("✅ Found SUBMIT button (class method)");
-                        } catch (e3) {
-                          console.log("⚠️  SUBMIT button not found with any method");
-                        }
-                      }
+                      fs.unlinkSync(tempFilePath);
+                      console.log("🧹 Temp file cleaned up");
+                    } catch (cleanupErr) {
+                      console.log("⚠️  Could not delete temp file:", cleanupErr.message);
                     }
 
-                    if (submitButton) {
-                      // Wait for button to be enabled (ng-show will show it when files are uploaded)
-                      await driver.sleep(2000);
-                      
-                      try {
-                        // Scroll button into view
-                        await driver.executeScript(
-                          "arguments[0].scrollIntoView({block: 'center'});",
-                          submitButton
-                        );
-                        await driver.sleep(500);
-                        
-                        // Click the button
-                        await submitButton.click();
-                        console.log("✅ Clicked SUBMIT button");
-                      } catch (clickErr) {
-                        // Fallback to JavaScript click
-                        await driver.executeScript("arguments[0].click();", submitButton);
-                        console.log("✅ Clicked SUBMIT button (via JavaScript)");
-                      }
-
-                      await driver.sleep(3000);
-                      console.log("✅ SUBMIT completed successfully");
-                      
-                      // Wait indefinitely after submit - don't close driver
-                      console.log("⏳ Waiting indefinitely after submit (driver won't close)...");
-                      await new Promise(() => {
-                        // Never resolve - keeps browser open
-                      });
-                    } else {
-                      console.log("❌ SUBMIT button could not be located");
-                    }
-
-                  } catch (submitErr) {
-                    console.log(`⚠️  Submit button error: ${submitErr.message}`);
+                  } catch (downloadErr) {
+                    console.log(`⚠️ Could not download/upload file: ${downloadErr.message}`);
+                    console.log(`📌 Document available at: ${data.aadharCard.location}`);
+                    console.log(`📝 Manual upload may be required`);
                   }
 
-                } catch (uploadErr) {
-                  console.log(`⚠️ Upload error: ${uploadErr.message}`);
+                } catch (fileInputErr) {
+                  console.log(`⚠️ Could not find file input: ${fileInputErr.message}`);
+                  console.log(`📌 Document available at: ${data.aadharCard.location}`);
+                  console.log(`📝 Manual upload may be required`);
                 }
               } else {
-                console.log("❌ UPLOAD DOCUMENT div not found");
+                console.log("❌ UPLOAD DOCUMENT div not found - tried all selectors");
               }
             } else {
-              console.log("⚠️ No Aadhar card found in database");
+              console.log("⚠️ No Aadhar card document found in database");
             }
           } catch (err) {
             console.log("Error uploading document:", err.message);
+            throw err;
           }
 
           console.log("✅ All new flow steps completed successfully!");
