@@ -1,7 +1,37 @@
+// Load environment variables FIRST before any other configuration
+require("dotenv").config();
+
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { Server } = require("socket.io");
+const AWS = require("aws-sdk");
+
+// Configure AWS S3
+console.log(`🔧 AWS Config - Bucket: ${process.env.AWS_BUCKET_NAME}, AccessKey: ${process.env.AWS_S3_ACCESSKEY_ID ? 'SET' : 'MISSING'}`);
+const s3 = new AWS.S3({
+  accessKeyId: process.env.AWS_S3_ACCESSKEY_ID,
+  secretAccessKey: process.env.AWS_S3_SECRET_ACCESSKEY,
+  region: "ap-south-1"
+});
+
+// Helper function to generate presigned URL for S3 downloads
+const getPresignedUrl = async (key) => {
+  if (!key) return null;
+  try {
+    const params = {
+      Bucket: process.env.AWS_BUCKET_NAME,
+      Key: key,
+      Expires: 3600 // URL valid for 1 hour
+    };
+    const url = await s3.getSignedUrlPromise('getObject', params);
+    console.log(`✅ Generated presigned URL for: ${key}`);
+    return url;
+  } catch (err) {
+    console.error(`❌ Error generating presigned URL for ${key}:`, err.message);
+    return null;
+  }
+};
 const {
   getDriver,
   openNewTab,
@@ -20,7 +50,6 @@ const { fillRelianceForm } = require("./relianceForm");
 const { fillNationalForm } = require("./national");
 const { extractCaptchaText } = require("./Captcha");
 // National uses fresh login for each job, no master session needed
-require("dotenv").config();
 const express = require("express");
 const multer = require("multer");
 const mongoose = require("mongoose");
@@ -194,7 +223,7 @@ const runPolicyJob = async (job) => {
       // Reliance form (default)
       fillFormPromise = fillRelianceForm({
         username: "rfcpolicy",
-        password: "Pass@1234",
+        password: "Pass@123",
         ...job.formData,
         _jobId: job._id, // Pass job ID for error logging
         _jobIdentifier: jobIdentifier,
@@ -459,9 +488,23 @@ db.once("open", async () => {
     // Get the Captcha document _id for reference
     const captchaId = data?._id;
 
+    // Generate presigned URLs for document downloads
+    let aadharPresignedUrl = null;
+    let panPresignedUrl = null;
+    
+    if (data?.aadharCard?.key) {
+      aadharPresignedUrl = await getPresignedUrl(data.aadharCard.key);
+      console.log(`📄 Aadhar presigned URL generated: ${aadharPresignedUrl ? 'YES' : 'NO'}`);
+    }
+    
+    if (data?.panCard?.key) {
+      panPresignedUrl = await getPresignedUrl(data.panCard.key);
+      console.log(`📄 PAN presigned URL generated: ${panPresignedUrl ? 'YES' : 'NO'}`);
+    }
+
     let formData = {
       username: "rfcpolicy",
-      password: "Pass@1234",
+      password: "Pass@123",
       // Proposer details
       proposerTitle: data?.proposerTitle || "Mr.",
       firstName: data?.fullName || data?.firstName,
@@ -493,9 +536,15 @@ db.once("open", async () => {
       mobile: data?.mobileNumber,
       email: data?.email,
       aadhar: data?.aadhar,
-      // Document uploads (from S3)
-      aadharCard: data?.aadharCard, // { fileName, key, location }
-      panCard: data?.panCard, // { fileName, key, location }
+      // Document uploads (from S3) - with presigned URLs for download
+      aadharCard: data?.aadharCard ? {
+        ...data.aadharCard,
+        presignedUrl: aadharPresignedUrl
+      } : null,
+      panCard: data?.panCard ? {
+        ...data.panCard,
+        presignedUrl: panPresignedUrl
+      } : null,
       // Vehicle details
       vehicleMake: data?.vehicleMake,
       vehicleModel: data?.vehicleModel,
