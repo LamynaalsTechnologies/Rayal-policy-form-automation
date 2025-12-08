@@ -2975,29 +2975,42 @@ async function fillNationalForm(
       console.log("Confirmation popup OK button not found or not needed:", e.message);
     }
 
-    // Click Send Quotation button
+    // Proceed For Payment Flow
     try {
-      console.log("Clicking Send Quotation button...");
-      const sendQuotationButton = By.xpath("//span[contains(., 'Send Quotation')]/ancestor::button");
-      await safeClick(driver, sendQuotationButton, 10000);
+      console.log("Clicking Proceed For Payment button...");
+      const proceedPaymentButton = By.xpath("//button[@name='main_btn_convert_01'] | //span[contains(., 'Proceed For payment')]/ancestor::button");
+      await safeClick(driver, proceedPaymentButton, 10000);
       await driver.sleep(2000);
       await waitForPortalLoaderToDisappear(driver);
-    } catch (e) {
-      console.log("Send Quotation button not found:", e.message);
-    }
 
-    // Close the quotation popup
-    try {
-      console.log("Closing quotation popup...");
-      const closePopupButton = By.xpath("//span[contains(., 'Close')]/ancestor::button");
-      await safeClick(driver, closePopupButton, 5000);
+      console.log("Selecting Payment Option (Value 5)...");
+      // Find radio button with value="5"
+      const paymentRadio = By.xpath("//input[@type='radio' and @value='5']");
+      try {
+        const radioElement = await driver.wait(until.elementLocated(paymentRadio), 5000);
+        // Use JS click for reliability with hidden/styled radio inputs
+        await driver.executeScript("arguments[0].click();", radioElement);
+        console.log("Clicked payment radio button (value=5)");
+      } catch (radioError) {
+        console.log("Could not find or click payment radio button (value=5):", radioError.message);
+      }
       await driver.sleep(1000);
+
+      console.log("Clicking Send Payment Link button...");
+      const sendLinkButton = By.xpath("//button[@name='vQuote_btn_sendPayLink_01'] | //span[contains(., 'Send Payment Link')]/ancestor::button");
+      await safeClick(driver, sendLinkButton, 5000);
+      await driver.sleep(2000);
+      await waitForPortalLoaderToDisappear(driver);
+
+      console.log("Waiting for confirmation popup and clicking Close...");
+      // Both buttons have the same name, so we must distinguish by text content "Close"
+      const closeButton = By.xpath("//button[@name='alert_btn_data_01' and .//span[contains(text(), 'Close')]]");
+      await safeClick(driver, closeButton, 10000);
+      await driver.sleep(1000);
+
     } catch (e) {
-      console.log("Close button for quotation popup not found or already closed:", e.message);
+      console.log("Proceed For Payment flow failed:", e.message);
     }
-
-
-
 
     console.log(`✅ [${jobId}] National Insurance form automation completed successfully!`);
 
