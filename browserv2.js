@@ -99,7 +99,15 @@ function copyDirectoryRecursive(source, destination) {
     if (fs.statSync(sourcePath).isDirectory()) {
       copyDirectoryRecursive(sourcePath, destPath);
     } else {
-      fs.copyFileSync(sourcePath, destPath);
+      try {
+        fs.copyFileSync(sourcePath, destPath);
+      } catch (err) {
+        if (err.code === 'EBUSY' || err.code === 'EPERM') {
+          console.warn(`   ⚠️ Skipped locked file: ${file}`);
+        } else {
+          throw err;
+        }
+      }
     }
   });
 }

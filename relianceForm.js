@@ -3948,6 +3948,82 @@ async function fillRelianceForm(
 
                                   await driver.sleep(3000);
 
+                                  // === Payment Link Flow (Conditional) ===
+                                  console.log(`Debug Paymentmethod: '${data.Paymentmethod}'`);
+
+                                  if (data.Paymentmethod && data.Paymentmethod.toLowerCase() === 'link') {
+                                    console.log("👉 Payment Method is LINK. Handling Send Payment Link flow...");
+                                    try {
+                                      // 1. Open Dropdown
+                                      // User provided: <span unselectable="on" class="k-dropdown-wrap k-state-default">
+                                      console.log("Opening Payment Type dropdown...");
+                                      const dropdown = await driver.wait(
+                                        until.elementLocated(By.css(".k-dropdown-wrap")),
+                                        10000
+                                      );
+                                      await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", dropdown);
+                                      await driver.sleep(500);
+                                      await dropdown.click();
+                                      await driver.sleep(1000);
+
+                                      // 2. Select "Send Payment Link" Option
+                                      // User provided: Sent Payment Link option
+                                      console.log("Selecting 'Send Payment Link'...");
+                                      const linkOption = await driver.wait(
+                                        until.elementLocated(By.xpath("//li[contains(text(), 'Send Payment Link')]")),
+                                        5000
+                                      );
+                                      await linkOption.click();
+                                      console.log("✅ Selected 'Send Payment Link' from dropdown");
+                                      await driver.sleep(2000);
+
+                                      // 3. Confirm Popup (OK Button)
+                                      // User provided: <button ...><span class="ui-button-text">Ok</span></button>
+                                      console.log("Waiting for OK popup...");
+                                      try {
+                                        const okButton = await driver.wait(
+                                          until.elementLocated(By.xpath("//span[text()='Ok']/parent::button")),
+                                          10000
+                                        );
+                                        await driver.wait(until.elementIsVisible(okButton), 5000);
+                                        await okButton.click();
+                                        console.log("✅ Clicked OK on popup");
+                                      } catch (okErr) {
+                                        console.log("⚠️ OK button not found via primary XPath, trying alternative...");
+                                        try {
+                                          const okBtnAlt = await driver.findElement(By.css("button.ui-button span.ui-button-text"));
+                                          if ((await okBtnAlt.getText()) === 'Ok') {
+                                            await okBtnAlt.click();
+                                            console.log("✅ Clicked OK via CSS selector");
+                                          }
+                                        } catch (e) {
+                                          console.log("⚠️ Could not click OK button: " + e.message);
+                                        }
+                                      }
+                                      await driver.sleep(2000);
+
+                                      // 4. Click Yes Button (SendMail)
+                                      // User provided: <input type="button" class="buttonSmall" value="Yes" onclick="SendMail(this)">
+                                      console.log("Waiting for Yes (SendMail) button...");
+                                      try {
+                                        const yesButton = await driver.wait(
+                                          until.elementLocated(By.css("input[value='Yes'][onclick*='SendMail']")),
+                                          10000
+                                        );
+                                        await driver.wait(until.elementIsVisible(yesButton), 5000);
+                                        await yesButton.click();
+                                        console.log("✅ Clicked Yes (Send Mail) button");
+                                      } catch (yesErr) {
+                                        console.log("⚠️ Yes button not found: " + yesErr.message);
+                                      }
+
+                                    } catch (linkFlowErr) {
+                                      console.log("❌ Error in Payment Link flow: " + linkFlowErr.message);
+                                    }
+                                  } else {
+                                    console.log(`👉 Payment Method is '${data.Paymentmethod || 'wallet'}'. Skipping Link flow.`);
+                                  }
+
                                   // === STEP 11: Enter amount in currency input ===
                                   // DISABLED: Not filling amount field as per requirement
                                   /*
@@ -4105,7 +4181,7 @@ async function fillRelianceForm(
             makePaymentButton
           );
           await driver.sleep(500);
-
+ 
           try {
             await makePaymentButton.click();
           } catch {
@@ -4116,7 +4192,7 @@ async function fillRelianceForm(
           }
           console.log("Clicked Make Payment button!");
           await driver.sleep(3000);
-
+ 
           // Check the policy checkbox (using dynamic ID pattern)
           console.log("Looking for policy checkbox...");
           try {
@@ -4134,7 +4210,7 @@ async function fillRelianceForm(
           } catch (err) {
             console.log("Could not find policy checkbox:", err.message);
           }
-
+ 
           // Check TP Declaration checkbox
           console.log("Looking for TP Declaration checkbox...");
           try {
@@ -4150,23 +4226,23 @@ async function fillRelianceForm(
             //   "arguments[0].click();",
             //   tpDeclarationCheckbox
             // );
-
+ 
             const checkbox = await driver.findElement(By.id("TPDeclaration"));
             const isChecked = await checkbox.isSelected();
-
+ 
             if (!isChecked) {
               await checkbox.click();
               console.log("✅ TP Declaration checkbox checked");
             } else {
               console.log("☑️ Already checked");
             }
-
+ 
             console.log("Checked TP Declaration checkbox!");
             await driver.sleep(1000);
           } catch (err) {
             console.log("Could not find TP Declaration checkbox:", err.message);
           }
-
+ 
           // Click Pay button
           console.log("Looking for Pay button...");
           const payButton = await driver.wait(
@@ -4180,7 +4256,7 @@ async function fillRelianceForm(
             payButton
           );
           await driver.sleep(500);
-
+ 
           try {
             await payButton.click();
           } catch {
@@ -4188,7 +4264,7 @@ async function fillRelianceForm(
           }
           console.log("Clicked Pay button!");
           await driver.sleep(3000);
-
+ 
           // Handle Payment Type dropdown
           console.log("Handling Payment Type dropdown...");
           try {
@@ -4203,7 +4279,7 @@ async function fillRelianceForm(
               paymentTypeDropdown
             );
             await driver.sleep(1000);
-
+ 
             // Select "Send Payment Link" option
             const sendPaymentLinkOption = await driver.wait(
               until.elementLocated(
@@ -4220,7 +4296,7 @@ async function fillRelianceForm(
           } catch (err) {
             console.log("Could not handle Payment Type dropdown:", err.message);
           }
-
+ 
           // Click Add button
           console.log("Looking for Add button...");
           try {
@@ -4237,7 +4313,7 @@ async function fillRelianceForm(
               addButton
             );
             await driver.sleep(500);
-
+ 
             try {
               await addButton.click();
             } catch {
@@ -4245,7 +4321,7 @@ async function fillRelianceForm(
             }
             console.log("Clicked Add button!");
             await driver.sleep(2000);
-
+ 
             // Click OK button in modal
             console.log("Looking for OK button in modal...");
             const okButton = await driver.wait(
@@ -4260,7 +4336,7 @@ async function fillRelianceForm(
           } catch (err) {
             console.log("Could not handle Add button flow:", err.message);
           }
-
+ 
           // Click Yes button
           console.log("Looking for Yes button...");
           try {
@@ -4288,7 +4364,7 @@ async function fillRelianceForm(
             );
             await okButton.click();
             console.log("✅ Clicked OK button");
-
+ 
             try {
               await yesButton.click();
             } catch {
@@ -4299,32 +4375,32 @@ async function fillRelianceForm(
           } catch (err) {
             console.log("Could not find Yes button:", err.message);
           }
-
+ 
           // try {
           //   // Wait for the popup container to be visible
           //   const popup = await driver.wait(
           //     until.elementLocated(By.css(".k-window")),
           //     10000
           //   );
-
+ 
           //   // Wait until it’s displayed
           //   await driver.wait(async () => {
           //     return await popup.isDisplayed();
           //   }, 5000);
-
+ 
           //   // Find the "Yes" button inside the popup
           //   const yesButton = await popup.findElement(
           //     By.css('input[value="Yes"]')
           //   );
-
+ 
           //   // Click it
           //   await yesButton.click();
-
+ 
           //   console.log("✅ Clicked 'Yes' on Contact Details popup");
           // } catch (err) {
           //   console.error("❌ Failed to click 'Yes':", err.message);
           // }
-
+ 
           console.log("All post-calculation elements handled successfully!");
           */
         } catch (err) {
@@ -4499,9 +4575,9 @@ async function fillRelianceForm(
   }
   finally {
     // Cleanup: Always close browser and delete cloned profile
-    if (jobBrowser) {
-      await cleanupJobBrowser(jobBrowser);
-    }
+    // if (jobBrowser) {
+    //   await cleanupJobBrowser(jobBrowser);
+    // }
   }
 }
 

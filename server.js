@@ -876,6 +876,8 @@ db.once("open", async () => {
       // Discount mapping (normalize multiple possible fields from Mongo)
       discount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
       ODDiscount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
+      // Payment Method
+      Paymentmethod: data?.Paymentmethod,
       // Company name mapping - check both 'company' and 'Companyname' fields, normalize to lowercase
       Companyname: data?.Companyname || (data?.company ? data.company.toLowerCase() : "reliance")
     };

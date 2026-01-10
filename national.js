@@ -976,7 +976,7 @@ async function fillNationalForm(
     await driver.wait(until.elementIsEnabled(makeInput), 15000);
 
     await makeInput.clear();
-    await makeInput.sendKeys( "BAJAJ");
+    await makeInput.sendKeys("BAJAJ");
     await driver.sleep(2000); // Wait for autocomplete options to appear
 
     // Click on the first autocomplete option
@@ -1018,7 +1018,7 @@ async function fillNationalForm(
     await driver.wait(until.elementIsEnabled(variantInput), 15000);
 
     await variantInput.clear();
-    await variantInput.sendKeys( "SINGLE DISC - BLUETOOTH (2024-2025)");
+    await variantInput.sendKeys("SINGLE DISC - BLUETOOTH (2024-2025)");
     await driver.sleep(2000); // Wait for autocomplete options to appear
 
     // Click on the first autocomplete option
@@ -1049,7 +1049,7 @@ async function fillNationalForm(
     try {
       const idvField = By.name("pc_text_idv_01");
       const idvValue = data.idv || data.idvValue || data.insuredDeclaredValue;
-      
+
       if (idvValue) {
         await safeType(driver, idvField, String(idvValue), 10000);
         console.log(`✅ Filled IDV value: ${idvValue}`);
@@ -1135,24 +1135,24 @@ async function fillNationalForm(
     try {
       // Wait for IDV field to be populated
       await driver.sleep(2000);
-      
+
       // Find IDV input field by name
       const idvField = By.name("pc_text_idv_01");
       const idvInput = await driver.wait(until.elementLocated(idvField), 10000);
-      
+
       // Wait for the field to have a value
       await driver.wait(async () => {
         const value = await idvInput.getAttribute('value');
         return value && value.trim() !== '';
       }, 15000);
-      
+
       // Get the IDV value
       idvValue = await idvInput.getAttribute('value');
       console.log(`✅ [${jobId}] IDV value extracted: ${idvValue}`);
-      
+
       // Store IDV in data object for later use
       data.idv = idvValue;
-      
+
     } catch (idvError) {
       console.log(`⚠️ [${jobId}] Could not extract IDV value:`, idvError.message);
       // Continue execution even if IDV extraction fails
@@ -1938,6 +1938,44 @@ async function fillNationalForm(
       }
     }
 
+    // === HANDLE DYNAMIC LOCALITY FIELD ===
+    try {
+      console.log("Checking for dynamic 'Locality Name' field after first click...");
+      // Check for the new field
+      const localityNameField = By.name("newcust_textfield_locality_name_01");
+
+      // Wait a bit to see if it appears (it might take a moment after the first click)
+      // reducing timeout as we don't want to wait long if it doesn't appear
+      const localityInput = await driver.wait(until.elementLocated(localityNameField), 5000);
+
+      // If we found it, try to interact
+      if (await localityInput.isDisplayed()) {
+        console.log("⚠️ Locality Name field appeared! Filling it...");
+        const localityName = data.locality || data.area || "Sample Locality";
+        await localityInput.clear();
+        await localityInput.sendKeys(localityName);
+        console.log(`Filled Locality Name with: ${localityName}`);
+
+        await driver.sleep(1000);
+
+        // Click Create Customer button again
+        console.log("Clicking Create Customer button AGAIN...");
+        const createCustBtnAgain = await driver.wait(until.elementLocated(By.name("newCust_btn_createCust_01")), 5000);
+        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", createCustBtnAgain);
+        await driver.sleep(500);
+
+        try {
+          await createCustBtnAgain.click();
+        } catch (e) {
+          await driver.executeScript("arguments[0].click();", createCustBtnAgain);
+        }
+        console.log("Clicked Create Customer button again.");
+        await driver.sleep(3000);
+      }
+    } catch (e) {
+      console.log("Locality Name field did not appear (proceeding):", e.message);
+    }
+
     // === HANDLE CUSTOMER DETAILS AFTER SUBMIT ===
     console.log("Handling customer details after submit...");
 
@@ -2082,43 +2120,131 @@ async function fillNationalForm(
     // Select Year of Manufacture
     try {
       console.log("Selecting Year of Manufacture...");
-      const yearLocators = [
-        By.xpath("//div[@id='mat-select-value-29']/ancestor::mat-select"),
-        By.id("mat-select-29"),
-        By.xpath("//mat-form-field[.//mat-label[contains(., 'Year of Manufacture')]]//mat-select"),
-        By.xpath("//mat-label[contains(., 'Year of Manufacture')]/ancestor::mat-form-field//mat-select"),
-        By.css("mat-select[formcontrolname*='year']"),
-        By.css("mat-select[name*='year']"),
-      ];
       let yearSelected = false;
-
       const manufacturingYear = data.manufacturingYear || data.manufacturingyear || "2025";
       const yearString = String(manufacturingYear);
 
-      for (const locator of yearLocators) {
-        try {
-          await safeSelectOption(driver, locator, yearString, 12000);
-          console.log(`Selected Year of Manufacture using locator: ${locator.toString()}`);
-          yearSelected = true;
-          break;
-        } catch (selectionError) {
-          console.log(`Year of Manufacture selection failed for ${locator.toString()}: ${selectionError.message}`);
+      // STRATEGY 1: Datepicker (based on user feedback with name mcy_text_yom_01)
+      try {
+        console.log("Checking for Year of Manufacture Datepicker (mcy_text_yom_01)...");
+        // Look for the input to verify existence
+        const datepickerInput = await driver.findElements(By.name("mcy_text_yom_01"));
+
+        if (datepickerInput.length > 0) {
+          console.log("Found Datepicker input. Attempting to open calendar...");
+          // Use specific toggle button associated with this input
+          // Often interactions work better on the button directly
+          // Try to find the sibling mat-datepicker-toggle button
+          const toggleButton = await driver.executeScript(`
+                var input = document.getElementsByName('mcy_text_yom_01')[0];
+                if (!input) return null;
+                // Go up to find mat-form-field-infix or flex, then find mat-datepicker-toggle
+                var container = input.closest('.mat-mdc-form-field-flex') || input.closest('.mat-form-field-flex');
+                if (!container) return null;
+                var btn = container.querySelector('mat-datepicker-toggle button');
+                return btn;
+            `);
+
+          if (toggleButton) {
+            await driver.wait(until.elementIsVisible(toggleButton), 5000);
+            await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", toggleButton);
+            await driver.sleep(500);
+
+            try {
+              await toggleButton.click();
+            } catch (clickErr) {
+              await driver.executeScript("arguments[0].click();", toggleButton);
+            }
+            console.log("Clicked Datepicker toggle button.");
+
+            // Wait for calendar to be visible
+            await driver.wait(until.elementLocated(By.css("mat-calendar")), 5000);
+            await driver.sleep(500); // Animation buffer
+
+            // Look for the specific year cell (Best: Button with aria-label)
+            let yearCell;
+            try {
+              yearCell = await driver.wait(
+                until.elementLocated(By.xpath(`//button[contains(@class, 'mat-calendar-body-cell') and @aria-label='${yearString}']`)),
+                3000
+              );
+              console.log(`Found year ${yearString} button by aria-label.`);
+            } catch (e) {
+              console.log("Year button by aria-label not found, trying text content...");
+              yearCell = await driver.wait(
+                until.elementLocated(By.xpath(`//span[contains(@class, 'mat-calendar-body-cell-content') and contains(text(), '${yearString}')]`)),
+                3000
+              );
+            }
+
+            await driver.wait(until.elementIsVisible(yearCell), 5000);
+            await driver.sleep(500);
+
+            try {
+              await yearCell.click();
+            } catch (cellClickErr) {
+              await driver.executeScript("arguments[0].click();", yearCell);
+            }
+            console.log(`Selected year ${yearString} from Datepicker.`);
+            yearSelected = true;
+          } else {
+            console.log("Datepicker toggle button not found via JS.");
+          }
+        }
+      } catch (datepickerError) {
+        console.log("Datepicker interaction failed:", datepickerError.message);
+      }
+
+      // STRATEGY 2: Dropdown / Select (Fallback)
+      if (!yearSelected) {
+        console.log("Falling back to Dropdown/Select for Year of Manufacture...");
+        const yearLocators = [
+          By.name("mcy_dropdown_year_01"),
+          By.name("mcy_dropdown_manYear_01"),
+          By.name("mcy_dropdown_manufacturingYear_01"),
+          By.xpath("//div[@id='mat-select-value-29']/ancestor::mat-select"),
+          By.xpath("//mat-form-field[.//mat-label[contains(., 'Year of Manufacture')]]//mat-select"),
+          By.xpath("//mat-select[contains(@aria-label, 'Year')]"),
+          By.xpath("//mat-select[contains(@aria-labelledby, 'Year')]"),
+          By.css("mat-select[formcontrolname*='year']"),
+          By.css("mat-select[name*='year']"),
+        ];
+
+        for (const locator of yearLocators) {
+          try {
+            try {
+              await driver.wait(until.elementLocated(locator), 1000);
+            } catch (e) {
+              continue;
+            }
+
+            await safeSelectOption(driver, locator, yearString, 5000);
+            console.log(`Selected Year of Manufacture using locator: ${locator.toString()}`);
+            yearSelected = true;
+            break;
+          } catch (selectionError) {
+            // Ignore
+          }
         }
       }
 
+      // STRATEGY 3: Direct Click Fallback for Dropdown
       if (!yearSelected) {
         console.log(`Year dropdown fallback: trying direct option click for ${yearString}...`);
         try {
           const trigger = await driver.wait(
             until.elementLocated(By.xpath("//mat-form-field[.//mat-label[contains(., 'Year of Manufacture')]]//mat-select")),
-            5000
+            3000
           );
-          await driver.executeScript("arguments[0].click();", trigger);
+
+          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", trigger);
           await driver.sleep(500);
+          await driver.executeScript("arguments[0].click();", trigger);
+          await driver.sleep(1000);
 
           const yearOption = await driver.wait(
-            until.elementLocated(By.xpath(`//div[contains(@class,'cdk-overlay-pane')]//mat-option[.//span[normalize-space(.)='${yearString}']]`)),
-            5000
+            until.elementLocated(By.xpath(`//mat-option[contains(., '${yearString}')]`)),
+            3000
           );
           await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", yearOption);
           await driver.executeScript("arguments[0].click();", yearOption);
@@ -3108,9 +3234,9 @@ async function fillNationalForm(
     };
   } finally {
     // Cleanup: Always close browser and delete cloned profile
-    if (jobBrowser) {
-      await cleanupNationalJobBrowser(jobBrowser);
-    }
+    // if (jobBrowser) {
+    //   await cleanupNationalJobBrowser(jobBrowser);
+    // }
   }
 }
 
