@@ -425,7 +425,7 @@ async function captureErrorScreenshot(
 }
 
 async function fillNationalForm(
-  data = { username: "9999839907", password: "Rayal$2025" }
+  data = { username: "9364646564", password: "Pond@2123" }
 ) {
   const jobId = data._jobIdentifier || `national_${Date.now()}`;
   let jobBrowser = null;
@@ -602,13 +602,13 @@ async function fillNationalForm(
       // Fill username
       console.log(`[${jobId}] Looking for username field...`);
       const usernameField = By.name("log_txtfield_iUsername_01");
-      await safeType(driver, usernameField, data.username || "9999839907", 10000);
+      await safeType(driver, usernameField, data.username || "9364646564", 10000);
       console.log(`[${jobId}] Filled username`);
 
       // Fill password
       console.log(`[${jobId}] Looking for password field...`);
       const passwordField = By.name("log_pwd_iPassword_01");
-      await safeType(driver, passwordField, data.password || "Rayal$2025", 10000);
+      await safeType(driver, passwordField, data.password || "Pond@2123", 10000);
       console.log(`[${jobId}] Filled password`);
 
       // Click login button
@@ -955,7 +955,7 @@ async function fillNationalForm(
 
     // Type the RTO location
     await rtoInput.clear();
-    await rtoInput.sendKeys("chennai");
+    await rtoInput.sendKeys("Chennai - North West");
     await driver.sleep(2000); // Wait for autocomplete options to appear
 
     // Click on the first autocomplete option
@@ -976,7 +976,7 @@ async function fillNationalForm(
     await driver.wait(until.elementIsEnabled(makeInput), 15000);
 
     await makeInput.clear();
-    await makeInput.sendKeys(data.make || "Honda");
+    await makeInput.sendKeys( "BAJAJ");
     await driver.sleep(2000); // Wait for autocomplete options to appear
 
     // Click on the first autocomplete option
@@ -997,10 +997,10 @@ async function fillNationalForm(
     await driver.wait(until.elementIsEnabled(modelInput), 15000);
 
     await modelInput.clear();
-    await modelInput.sendKeys("SHINE 100 (2023-2025)"); // Default model - Honda SHINE model variant
+    await modelInput.sendKeys("PULSAR 150 (2024-2025)"); // Default model - Honda SHINE model variant
     await driver.sleep(2000); // Wait for autocomplete options to appear
 
-    // Click on the first autocomplete option
+    // Click on the first autocomplete optionm
     try {
       const modelOption = await driver.wait(until.elementLocated(By.css("mat-option")), 5000);
       await modelOption.click();
@@ -1018,7 +1018,7 @@ async function fillNationalForm(
     await driver.wait(until.elementIsEnabled(variantInput), 15000);
 
     await variantInput.clear();
-    await variantInput.sendKeys(data.variant || "Standard");
+    await variantInput.sendKeys( "SINGLE DISC - BLUETOOTH (2024-2025)");
     await driver.sleep(2000); // Wait for autocomplete options to appear
 
     // Click on the first autocomplete option
@@ -1040,6 +1040,25 @@ async function fillNationalForm(
       await driver.sleep(500);
     } catch (e) {
       console.log("Could not fill percentage field:", e.message);
+    }
+
+    await driver.sleep(1000);
+
+    // Fill IDV value from data (if provided)
+    console.log("Filling IDV value from data...");
+    try {
+      const idvField = By.name("pc_text_idv_01");
+      const idvValue = data.idv || data.idvValue || data.insuredDeclaredValue;
+      
+      if (idvValue) {
+        await safeType(driver, idvField, String(idvValue), 10000);
+        console.log(`✅ Filled IDV value: ${idvValue}`);
+        await driver.sleep(500);
+      } else {
+        console.log("No IDV value provided in data, skipping...");
+      }
+    } catch (e) {
+      console.log("Could not fill IDV field:", e.message);
     }
 
     await driver.sleep(1000);
@@ -1108,6 +1127,35 @@ async function fillNationalForm(
       } catch (e2) {
         console.log("All strategies failed for Generate Quick Quote button:", e2.message);
       }
+    }
+
+    // Extract IDV value after quote generation
+    console.log("Extracting IDV value after quote generation...");
+    let idvValue = null;
+    try {
+      // Wait for IDV field to be populated
+      await driver.sleep(2000);
+      
+      // Find IDV input field by name
+      const idvField = By.name("pc_text_idv_01");
+      const idvInput = await driver.wait(until.elementLocated(idvField), 10000);
+      
+      // Wait for the field to have a value
+      await driver.wait(async () => {
+        const value = await idvInput.getAttribute('value');
+        return value && value.trim() !== '';
+      }, 15000);
+      
+      // Get the IDV value
+      idvValue = await idvInput.getAttribute('value');
+      console.log(`✅ [${jobId}] IDV value extracted: ${idvValue}`);
+      
+      // Store IDV in data object for later use
+      data.idv = idvValue;
+      
+    } catch (idvError) {
+      console.log(`⚠️ [${jobId}] Could not extract IDV value:`, idvError.message);
+      // Continue execution even if IDV extraction fails
     }
 
     // === POST-QUOTE INTERACTIONS ===
@@ -1964,7 +2012,7 @@ async function fillNationalForm(
       const colorField = By.name("mcy_dropdown_color_01");
       const colorInput = await driver.wait(until.elementLocated(colorField), 10000);
       await colorInput.clear();
-      await colorInput.sendKeys("Black");
+      await colorInput.sendKeys("Blue");
       await driver.sleep(1500); // Wait for autocomplete
 
       try {

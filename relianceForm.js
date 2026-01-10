@@ -578,6 +578,438 @@ async function checkAndRecoverClonedSession(driver, jobId, credentials) {
   }
 }
 
+/**
+ * Create Brisk Certificate by calling the API
+ * @param {Object} data - Form data containing customer and vehicle information
+ * @returns {Promise<Object>} - API response
+ */
+async function createBriskCertificate(data) {
+  return new Promise((resolve, reject) => {
+    // Helper function to format date from MongoDB date object or ISO string
+    const formatDate = (dateValue, fallback = "01-01-2000") => {
+      if (!dateValue) return fallback;
+      try {
+        let date;
+        if (dateValue.$date) {
+          date = new Date(dateValue.$date);
+        } else if (typeof dateValue === 'string') {
+          date = new Date(dateValue);
+        } else if (dateValue instanceof Date) {
+          date = dateValue;
+        } else {
+          return fallback;
+        }
+
+        // Check if date is valid
+        if (isNaN(date.getTime())) {
+          console.warn("Invalid date detected, using fallback:", fallback);
+          return fallback;
+        }
+
+        // Format as MM-DD-YYYY
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const year = date.getFullYear();
+        return `${month}-${day}-${year}`;
+      } catch (e) {
+        console.error("Error formatting date:", e.message);
+        return fallback;
+      }
+    };
+
+    // Prepare the payload
+    const payload = {
+      CustomerName: data.customerName || `${data.fullName || data.firstName || "TESTING"} ${data.surname || data.lastName || ""}`.trim(),
+      MobileNo: data.mobileNumber || data.mobile || data.mobileNo || "6789054367",
+      EmailID: data.email || data.emailID || "test@gmail.com",
+      City: data.city || "CHENNAI",
+      State: getStateName(data.state) || "TAMIL NADU",
+      CustomerGender: "Male",
+      NomineeName: data.nomineeName || "FERNANDO",
+      NomineeGender: "Male",
+      Relation: data.nomineeRelation || data.relation || "Brother",
+      Make: data.vehicleMake || data.make || "DACUS",
+      Model: data.vehicleModel || data.model || "GOLD PLUS",
+      EngineNo: data.engineNumber || data.engineNo || "674r56732",
+      ChassisNo: data.chassisNumber || data.chassisNo || "567r74w",
+      RegistrationNo: data.registrationNo || data.registrationNumber || "tyu66456",
+      PaymentMode: data.paymentMode || "FromWallet",
+      Address_Line1: data.addressLine1 || data.address_Line1 || `${data.flatDoorNo || data.flatNo || "TEST"} ${data.buildingName || data.premisesName || "ADDR 1"}`.trim(),
+      Address_Line2: data.addressLine2 || data.address_Line2 || `${data.roadStreetLane || data.road || "TEST"} ${data.areaAndLocality || data.area || "ADDR 2"}`.trim(),
+      PlanName: data.planName || "TWHRN30K3S244",
+      CustomerDOB: data.dob || data.customerDOB || formatDate(data.dateOfBirth, "01-01-2000"),
+      loginid: data.loginid || "masterwallet@gmail.com",
+      VehicleType: data.vehicleType || "TW",
+      Gstno: data.gstno || data.Gstno || "",
+      Flaxprice: String(data.paCoverAmount || data.flaxprice || data.Flaxprice || "244"),
+      policyType: data.policyType || "cpa/rsa"
+    };
+
+    console.log("📤 Sending Brisk Certificate request with payload:", JSON.stringify(payload, null, 2));
+
+    const postData = JSON.stringify(payload);
+
+    // Extract userId from data (handle both string and MongoDB ObjectId format)
+    const userId = data.userId?.$oid || data.userId || '65a343220a6016a8f93424e7';
+
+    const options = {
+      hostname: '192.168.1.7',
+      port: 8080,
+      path: '/api/createBriskCertificate',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+        'clientid': userId,
+        'userid': userId
+      }
+    };
+
+    const req = http.request(options, (res) => {
+      let responseData = '';
+
+      res.on('data', (chunk) => {
+        responseData += chunk;
+      });
+
+      res.on('end', () => {
+        console.log(`📥 Brisk API Response Status: ${res.statusCode}`);
+        console.log(`📥 Brisk API Response: ${responseData}`);
+
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try {
+            const parsedResponse = JSON.parse(responseData);
+
+            // Check if API returned an error
+            if (parsedResponse.error === true) {
+              reject(new Error(parsedResponse.message || "API returned an error"));
+              return;
+            }
+
+            // Extract the important data
+            const result = {
+              success: true,
+              message: parsedResponse.message,
+              policyId: parsedResponse.data?.policyId,
+              downloadUrl: parsedResponse.data?.downloadUrl,
+              fullResponse: parsedResponse
+            };
+
+            console.log(`✅ Brisk Certificate created - Policy ID: ${result.policyId}`);
+            console.log(`📄 Download URL: ${result.downloadUrl}`);
+
+            resolve(result);
+          } catch (e) {
+            console.error("❌ Error parsing response:", e.message);
+            resolve({ success: true, raw: responseData });
+          }
+        } else {
+          reject(new Error(`API returned status ${res.statusCode}: ${responseData}`));
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      console.error("❌ Error calling Brisk API:", error.message);
+      reject(error);
+    });
+
+    req.write(postData);
+    req.end();
+  });
+}
+
+/**
+ * Download PDF from Brisk API response URL and save to file
+ * @param {string} downloadUrl - URL to download the PDF from
+ * @param {string} policyId - Policy ID to use for filename
+ * @returns {Promise<string>} - Path to the downloaded file
+ */
+async function downloadBriskPDF(downloadUrl, policyId) {
+  return new Promise((resolve, reject) => {
+    if (!downloadUrl) {
+      reject(new Error("No download URL provided"));
+      return;
+    }
+
+    // Create downloads directory if it doesn't exist
+    const downloadsDir = path.join(__dirname, 'brisk_certificates');
+    if (!fs.existsSync(downloadsDir)) {
+      fs.mkdirSync(downloadsDir, { recursive: true });
+    }
+
+    // Generate filename
+    const filename = `${policyId || 'certificate_' + Date.now()}.pdf`;
+    const filepath = path.join(downloadsDir, filename);
+
+    console.log(`📥 Downloading PDF from: ${downloadUrl}`);
+    console.log(`💾 Saving to: ${filepath}`);
+
+    // Determine if URL is HTTPS or HTTP
+    const protocol = downloadUrl.startsWith('https') ? https : http;
+
+    const file = fs.createWriteStream(filepath);
+
+    protocol.get(downloadUrl, (response) => {
+      // Check if response is successful
+      if (response.statusCode !== 200) {
+        fs.unlinkSync(filepath); // Delete the file
+        reject(new Error(`Failed to download PDF. Status: ${response.statusCode}`));
+        return;
+      }
+
+      // Pipe the response to file
+      response.pipe(file);
+
+      file.on('finish', () => {
+        file.close();
+        console.log(`✅ PDF downloaded successfully: ${filepath}`);
+        resolve(filepath);
+      });
+
+      file.on('error', (err) => {
+        fs.unlinkSync(filepath); // Delete the file on error
+        reject(err);
+      });
+    }).on('error', (err) => {
+      if (fs.existsSync(filepath)) {
+        fs.unlinkSync(filepath); // Delete the file on error
+      }
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Merge Reliance and Brisk PDFs, upload to AWS, and update policy
+ * @param {string} reliancePdfPath - Path to Reliance PDF file
+ * @param {string} briskPdfPath - Path to Brisk PDF file
+ * @param {Object} data - Policy data containing _id and other info
+ * @returns {Promise<Object>} - Returns merged PDF info with AWS URL
+ */
+async function mergePDFsAndUpload(reliancePdfPath, briskPdfPath, data) {
+  const FormData = require('form-data');
+  const axios = require('axios');
+
+  try {
+    console.log('📄 Starting PDF merge process...');
+    console.log(`📄 Reliance PDF: ${reliancePdfPath}`);
+    console.log(`📄 Brisk PDF: ${briskPdfPath}`);
+
+    // Check if both files exist
+    if (!fs.existsSync(reliancePdfPath)) {
+      throw new Error(`Reliance PDF not found: ${reliancePdfPath}`);
+    }
+    if (!fs.existsSync(briskPdfPath)) {
+      throw new Error(`Brisk PDF not found: ${briskPdfPath}`);
+    }
+
+    // Read both PDFs as buffers
+    const reliancePdfBuffer = fs.readFileSync(reliancePdfPath);
+    const briskPdfBuffer = fs.readFileSync(briskPdfPath);
+
+    console.log(`✅ Reliance PDF loaded: ${reliancePdfBuffer.length} bytes`);
+    console.log(`✅ Brisk PDF loaded: ${briskPdfBuffer.length} bytes`);
+
+    // Create FormData and append both PDFs
+    const formData = new FormData();
+    formData.append('files', reliancePdfBuffer, {
+      filename: 'reliance.pdf',
+      contentType: 'application/pdf'
+    });
+    formData.append('files', briskPdfBuffer, {
+      filename: 'brisk.pdf',
+      contentType: 'application/pdf'
+    });
+
+    // Call merge-pdf API
+    console.log('🔄 Calling merge-pdf API...');
+    const mergeResponse = await axios.post(
+      'http://192.168.1.7:3010/api/merge-pdf',
+      formData,
+      {
+        headers: {
+          ...formData.getHeaders(),
+          'clientid': data.userId?.$oid || data.userId || '65a343220a6016a8f93424e7',
+          'userid': data.userId?.$oid || data.userId || '65a343220a6016a8f93424e7'
+        },
+        responseType: 'arraybuffer' // Expect PDF buffer in response
+      }
+    );
+
+    console.log('✅ PDFs merged successfully');
+
+    // Save merged PDF temporarily
+    const mergedPdfPath = path.join(__dirname, 'temp_merged', `merged_${Date.now()}.pdf`);
+    const mergedDir = path.dirname(mergedPdfPath);
+    if (!fs.existsSync(mergedDir)) {
+      fs.mkdirSync(mergedDir, { recursive: true });
+    }
+    fs.writeFileSync(mergedPdfPath, mergeResponse.data);
+    console.log(`💾 Merged PDF saved temporarily: ${mergedPdfPath}`);
+
+    // Upload merged PDF to AWS S3
+    console.log('☁️  Uploading merged PDF to AWS S3...');
+    const policyId = data.policyId || data._id?.$oid || data._id || `policy_${Date.now()}`;
+    const s3Key = `MergedPolicies/${policyId}_merged.pdf`;
+
+    const uploadParams = {
+      Bucket: process.env.AWS_BUCKET_NAME,
+      Key: s3Key,
+      Body: fs.readFileSync(mergedPdfPath),
+      ContentType: 'application/pdf',
+      ACL: 'private' // or 'public-read' depending on your needs
+    };
+
+    const s3UploadResult = await s3.upload(uploadParams).promise();
+    console.log(`✅ Merged PDF uploaded to S3: ${s3UploadResult.Location}`);
+
+    // Update online policy schema with merged PDF URL using MongoDB directly
+    console.log('📝 Updating online policy schema (Direct MongoDB)...');
+
+    // Debug: Log all available keys in data object
+    console.log('🔍 DEBUG: Available keys in data:', Object.keys(data));
+    console.log('🔍 DEBUG: data._id:', data._id);
+    console.log('🔍 DEBUG: data.policyId:', data.policyId);
+    console.log('🔍 DEBUG: typeof data._id:', typeof data._id);
+
+    // Extract policy ID - handle MongoDB ObjectId properly
+    let policyIdForUpdate;
+    if (data._id) {
+      // If _id is already a MongoDB ObjectId, use it directly
+      policyIdForUpdate = data._id;
+    } else if (data.policyId) {
+      policyIdForUpdate = data.policyId;
+    }
+
+    console.log('🔍 DEBUG: Updating policy with ID:', policyIdForUpdate);
+
+    if (!policyIdForUpdate) {
+      console.error('❌ ERROR: No valid policy ID found in data object!');
+      console.error('❌ Cannot update policy without ID. Skipping update...');
+      return {
+        success: true,
+        mergedPdfUrl: s3UploadResult.Location,
+        s3Key: s3Key,
+        fileName: `${policyId}_merged.pdf`,
+        warning: 'Policy not updated - no ID found'
+      };
+    }
+
+    try {
+      const { MongoClient } = require('mongodb');
+      const mongoUrl = process.env.MONGODB_URI || 'mongodb://localhost:27017/rayal';
+
+      console.log('🔌 Connecting to MongoDB...');
+      console.log('🔗 MongoDB URL:', mongoUrl.replace(/\/\/([^:]+):([^@]+)@/, '//*****:*****@')); // Hide credentials in log
+
+      const client = new MongoClient(mongoUrl);
+      await client.connect();
+      console.log('✅ Connected to MongoDB');
+
+      const db = client.db(); // Use database from connection string
+      const collection = db.collection('onlinePolicy');
+
+      // Update the policy document
+      const result = await collection.updateOne(
+        { _id: policyIdForUpdate },
+        {
+          $set: {
+            mergedPolicyPdf: {
+              fileName: `${policyId}_merged.pdf`,
+              key: s3Key,
+              location: s3UploadResult.Location
+            },
+            updatedAt: new Date()
+          }
+        }
+      );
+
+      await client.close();
+      console.log('✅ MongoDB connection closed');
+
+      if (result.matchedCount === 0) {
+        console.warn('⚠️  No policy found with the given ID');
+      } else if (result.modifiedCount === 0) {
+        console.warn('⚠️  Policy found but not modified (maybe already up to date)');
+      } else {
+        console.log('✅ Online policy updated with merged PDF');
+        console.log(`📊 Matched: ${result.matchedCount}, Modified: ${result.modifiedCount}`);
+      }
+
+    } catch (updateError) {
+      console.error('⚠️  Failed to update policy via MongoDB:', updateError.message);
+      console.error('Stack:', updateError.stack);
+    }
+
+    // Clean up temporary merged PDF
+    try {
+      fs.unlinkSync(mergedPdfPath);
+      console.log('🗑️  Temporary merged PDF deleted');
+    } catch (cleanupError) {
+      console.warn('⚠️  Could not delete temporary file:', cleanupError.message);
+    }
+
+    return {
+      success: true,
+      mergedPdfUrl: s3UploadResult.Location,
+      s3Key: s3Key,
+      fileName: `${policyId}_merged.pdf`
+    };
+
+  } catch (error) {
+    console.error('❌ Error in mergePDFsAndUpload:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Helper function to convert state code to state name
+ * @param {string} stateCode - State code (e.g., "30")
+ * @returns {string} - State name
+ */
+function getStateName(stateCode) {
+  const stateMap = {
+    "30": "KARNATAKA",
+    "33": "TAMIL NADU",
+    "29": "KERALA",
+    "32": "TELANGANA",
+    "28": "ANDHRA PRADESH",
+    "27": "MAHARASHTRA",
+    "07": "DELHI",
+    "19": "WEST BENGAL",
+    "10": "BIHAR",
+    "09": "UTTAR PRADESH",
+    "24": "GUJARAT",
+    "23": "MADHYA PRADESH",
+    "22": "CHHATTISGARH",
+    "21": "ODISHA",
+    "20": "JHARKHAND",
+    "18": "ASSAM",
+    "06": "HARYANA",
+    "03": "PUNJAB",
+    "02": "HIMACHAL PRADESH",
+    "01": "JAMMU AND KASHMIR",
+    "35": "ANDAMAN AND NICOBAR ISLANDS",
+    "31": "LAKSHADWEEP",
+    "34": "PUDUCHERRY",
+    "04": "CHANDIGARH",
+    "26": "DADRA AND NAGAR HAVELI AND DAMAN AND DIU",
+    "25": "GOA",
+    "05": "UTTARAKHAND",
+    "36": "LADAKH",
+    "11": "SIKKIM",
+    "12": "ARUNACHAL PRADESH",
+    "13": "NAGALAND",
+    "14": "MANIPUR",
+    "15": "MIZORAM",
+    "16": "TRIPURA",
+    "17": "MEGHALAYA",
+    "08": "RAJASTHAN"
+  };
+  return stateMap[stateCode] || "TAMIL NADU";
+}
+
 async function fillRelianceForm(
   // data = { username: "TNAGAR2W", password: "Pass@123" }
   data = { username: "rfcpolicy", password: "Pass@123" }
@@ -2225,11 +2657,11 @@ async function fillRelianceForm(
               10000
             );
             await driver.wait(until.elementIsVisible(successMessage), 5000);
-            
+
             // Get the text content which includes proposal and quote numbers
             const messageText = await successMessage.getText();
             console.log(`📋 Success message: ${messageText}`);
-            
+
             // Extract proposal number using regex: "R" followed by numbers
             const proposalMatch = messageText.match(/R\d+/);
             if (proposalMatch) {
@@ -2249,7 +2681,7 @@ async function fillRelianceForm(
 
           // === NEW FLOW: Navigate to View Policy ===
           console.log("Navigating to View Policy...");
-          
+
           try {
             // Hover over Utility menu
             const utilityMenu = await driver.wait(
@@ -2279,7 +2711,7 @@ async function fillRelianceForm(
             console.log("✅ Clicked 'View Policy' link");
             await driver.sleep(3000);
             console.log("⚠️  View Policy opens on same page (no new tab)");
-            
+
           } catch (err) {
             console.log("❌ Error navigating to View Policy:", err.message);
             throw err;
@@ -2290,11 +2722,11 @@ async function fillRelianceForm(
           try {
             // Wait a bit for page to fully load
             await driver.sleep(2000);
-            
+
             // Search input: id="txtSearchText" (inside div id="idproposalno")
             console.log("Looking for search input with id='txtSearchText'...");
             let policySearchInput = null;
-            
+
             try {
               // Primary: id="txtSearchText"
               policySearchInput = await driver.wait(
@@ -2356,14 +2788,14 @@ async function fillRelianceForm(
             // Find and click Search button
             console.log("Looking for search button...");
             let searchButton = null;
-            
+
             try {
               // Try to find button near the search input
               const parentDiv = await driver.executeScript(
                 "return arguments[0].closest('[id*=\"proposal\"], [class*=\"search\"], form, div');",
                 policySearchInput
               );
-              
+
               if (parentDiv) {
                 const buttons = await driver.findElements(By.css("button"));
                 if (buttons.length > 0) {
@@ -2433,7 +2865,7 @@ async function fillRelianceForm(
             // Try multiple click methods
             let clickSuccess = false;
             console.log("Attempting to click search button...");
-            
+
             // Method 0: Call the onclick function directly (GetPolicySearchDetails)
             try {
               await driver.executeScript(`
@@ -2448,7 +2880,7 @@ async function fillRelianceForm(
               clickSuccess = true;
             } catch (clickErr0) {
               console.log(`⚠️  Method 0 failed: ${clickErr0.message}`);
-              
+
               // Method 1: Regular click
               try {
                 await searchButton.click();
@@ -2456,7 +2888,7 @@ async function fillRelianceForm(
                 clickSuccess = true;
               } catch (clickErr1) {
                 console.log(`⚠️  Method 1 failed: ${clickErr1.message}`);
-                
+
                 // Method 2: JavaScript click
                 try {
                   await driver.executeScript("arguments[0].click();", searchButton);
@@ -2464,7 +2896,7 @@ async function fillRelianceForm(
                   clickSuccess = true;
                 } catch (clickErr2) {
                   console.log(`⚠️  Method 2 failed: ${clickErr2.message}`);
-                  
+
                   // Method 3: Submit form
                   try {
                     await driver.executeScript(`
@@ -2480,7 +2912,7 @@ async function fillRelianceForm(
                     clickSuccess = true;
                   } catch (clickErr3) {
                     console.log(`⚠️  Method 3 failed: ${clickErr3.message}`);
-                    
+
                     // Method 4: Press Enter on input field
                     try {
                       await policySearchInput.sendKeys(Key.ENTER);
@@ -2493,15 +2925,15 @@ async function fillRelianceForm(
                 }
               }
             }
-            
+
             if (clickSuccess) {
               console.log("✅ Search button click executed successfully");
             } else {
               console.log("❌ WARNING: Could not click search button with any method");
             }
-            
+
             await driver.sleep(2000);
-            
+
             // Wait for search results to load - look for DO KYC link or policy details
             try {
               console.log("⏳ Waiting for search results to load...");
@@ -2531,18 +2963,18 @@ async function fillRelianceForm(
             if (!fs.existsSync(screenshotsDir)) {
               fs.mkdirSync(screenshotsDir, { recursive: true });
             }
-            
+
             // Take screenshot
             const screenshot = await driver.takeScreenshot();
             const timestamp = Date.now();
             const screenshotPath = `./screenshots/debug_before_kyc_${timestamp}.png`;
             fs.writeFileSync(screenshotPath, screenshot, 'base64');
             console.log(`📷 Screenshot saved: ${screenshotPath}`);
-            
+
             // Get page source
             const pageSource = await driver.getPageSource();
             console.log(`📄 Page length: ${pageSource.length} characters`);
-            
+
             // Look for all links on page
             const allLinks = await driver.findElements(By.tagName("a"));
             console.log(`🔗 Total links on page: ${allLinks.length}`);
@@ -2551,7 +2983,7 @@ async function fillRelianceForm(
               const linkHref = await allLinks[i].getAttribute("href");
               console.log(`   Link ${i}: "${linkText}" -> ${linkHref}`);
             }
-            
+
             // Search page source for KYC keyword
             if (pageSource.includes("KYC")) {
               console.log("✅ Page contains 'KYC' keyword");
@@ -2561,7 +2993,7 @@ async function fillRelianceForm(
             } else {
               console.log("❌ Page does NOT contain 'KYC' keyword!");
             }
-            
+
             console.log("📸 === END DEBUG INFO ===\n");
           } catch (debugErr) {
             console.log("⚠️  Debug error:", debugErr.message);
@@ -2574,7 +3006,7 @@ async function fillRelianceForm(
             // Get current window handles before clicking
             const windowsBeforeKyc = await driver.getAllWindowHandles();
             console.log(`📊 Windows BEFORE DO KYC click: ${windowsBeforeKyc.length}`);
-            
+
             // Wait for and click the DO KYC link - with multiple fallbacks
             let doKycLink = null;
             try {
@@ -2620,17 +3052,17 @@ async function fillRelianceForm(
                 }
               }
             }
-            
+
             if (!doKycLink) {
               throw new Error("DO KYC link not found after search");
             }
-            
+
             await driver.wait(until.elementIsVisible(doKycLink), 5000);
-            
+
             // Get the href for logging
             const kycUrl = await doKycLink.getAttribute("href");
             console.log(`🔗 DO KYC URL: ${kycUrl}`);
-            
+
             // Click the link (this will open new tab)
             try {
               await doKycLink.click();
@@ -2638,14 +3070,14 @@ async function fillRelianceForm(
               await driver.executeScript("arguments[0].click();", doKycLink);
             }
             console.log("✅ Clicked DO KYC link");
-            
+
             // Wait for new tab to open
             await driver.sleep(4000);
 
             // Check for new window/tab
             const windowsAfterKyc = await driver.getAllWindowHandles();
             console.log(`📊 Windows AFTER DO KYC click: ${windowsAfterKyc.length}`);
-            
+
             if (windowsAfterKyc.length > windowsBeforeKyc.length) {
               // Find the newly opened window
               const newWindow = windowsAfterKyc.find(handle => !windowsBeforeKyc.includes(handle));
@@ -2671,30 +3103,30 @@ async function fillRelianceForm(
             // Check if we have Aadhar card document from database
             // Use presignedUrl (generated by backend) for downloading, not location
             let aadharDownloadUrl = data.aadharCard?.presignedUrl;
-            
+
             // If presignedUrl is not available, generate it using the S3 key
             if (!aadharDownloadUrl && data.aadharCard?.key) {
               console.log(`📥 No presignedUrl found, generating from key: ${data.aadharCard.key}`);
               aadharDownloadUrl = await getPresignedUrl(data.aadharCard.key);
             }
-            
+
             // Fallback to location URL if presigned URL generation fails
             if (!aadharDownloadUrl) {
               aadharDownloadUrl = data.aadharCard?.location;
               console.log(`⚠️ Using location URL as fallback (may not work): ${aadharDownloadUrl}`);
             }
-            
+
             if (data.aadharCard && aadharDownloadUrl) {
               console.log(`📄 Found Aadhar document in database: ${data.aadharCard.fileName}`);
               console.log(`📍 Document presignedUrl: ${data.aadharCard.presignedUrl ? 'YES' : 'NO'}`);
               console.log(`📍 Document key: ${data.aadharCard.key || 'NOT SET'}`);
               console.log(`📍 Document location: ${data.aadharCard.location}`);
               console.log(`📥 Using URL: ${aadharDownloadUrl.substring(0, 100)}...`);
-              
+
               // === STEP 1: Click "UPLOAD DOCUMENT" div ===
               console.log("Finding UPLOAD DOCUMENT div with ng-click='selectDoc(upload)'...");
               let uploadDocDiv = null;
-              
+
               try {
                 // Primary selector: ng-click directive with selectDoc('upload')
                 uploadDocDiv = await driver.wait(
@@ -2745,7 +3177,7 @@ async function fillRelianceForm(
                   uploadDocDiv
                 );
                 await driver.sleep(500);
-                
+
                 // Click the div
                 try {
                   await uploadDocDiv.click();
@@ -2754,12 +3186,12 @@ async function fillRelianceForm(
                   await driver.executeScript("arguments[0].click();", uploadDocDiv);
                   console.log("✅ Clicked UPLOAD DOCUMENT div (via JavaScript)");
                 }
-                
+
                 await driver.sleep(2000);
 
                 // === STEP 2: Handle Angular file upload (ngf-drop/ngf-select) ===
                 console.log("Looking for upload input field...");
-                
+
                 try {
                   // Helper function to download file from S3 with proper Windows path
                   const downloadFileFromS3 = (url, originalFileName) => {
@@ -2769,12 +3201,12 @@ async function fillRelianceForm(
                       if (!fs.existsSync(tempDir)) {
                         fs.mkdirSync(tempDir, { recursive: true });
                       }
-                      
+
                       console.log(`📥 Downloading from: ${url}`);
                       console.log(`📄 Original filename: ${originalFileName}`);
-                      
+
                       const protocol = url.startsWith('https') ? https : http;
-                      
+
                       protocol.get(url, (response) => {
                         // Handle redirects
                         if (response.statusCode === 301 || response.statusCode === 302) {
@@ -2783,11 +3215,11 @@ async function fillRelianceForm(
                           downloadFileFromS3(redirectUrl, originalFileName).then(resolve).catch(reject);
                           return;
                         }
-                        
+
                         // Get content-type to determine proper extension
                         const contentType = response.headers['content-type'] || '';
                         console.log(`📋 Content-Type: ${contentType}`);
-                        
+
                         // Map content-type to extension
                         let ext = '.jpg'; // default
                         if (contentType.includes('pdf')) {
@@ -2813,33 +3245,33 @@ async function fillRelianceForm(
                               if (urlExt && ['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(urlExt)) {
                                 ext = urlExt;
                               }
-                            } catch (e) {}
+                            } catch (e) { }
                           }
                         }
-                        
+
                         const tempFileName = `upload_${Date.now()}${ext}`;
                         const tempFilePath = path.join(tempDir, tempFileName);
                         console.log(`📁 Saving as: ${tempFilePath} (extension: ${ext})`);
-                        
+
                         const file = fs.createWriteStream(tempFilePath);
                         response.pipe(file);
-                        
+
                         file.on('finish', () => {
                           file.close();
                           // Check file size
                           const stats = fs.statSync(tempFilePath);
                           console.log(`✅ File downloaded: ${tempFilePath} (${stats.size} bytes)`);
-                          
+
                           if (stats.size === 0) {
                             reject(new Error('Downloaded file is empty'));
                             return;
                           }
-                          
+
                           resolve(tempFilePath);
                         });
-                        
+
                         file.on('error', (err) => {
-                          fs.unlink(tempFilePath, () => {});
+                          fs.unlink(tempFilePath, () => { });
                           reject(err);
                         });
                       }).on('error', (err) => {
@@ -2852,7 +3284,7 @@ async function fillRelianceForm(
                   console.log(`📥 Downloading Aadhar from S3...`);
                   console.log(`📥 URL: ${aadharDownloadUrl.substring(0, 100)}...`);
                   const tempFilePath = await downloadFileFromS3(aadharDownloadUrl, data.aadharCard.fileName);
-                  
+
                   // Verify file exists and get absolute path
                   if (!fs.existsSync(tempFilePath)) {
                     throw new Error(`Downloaded file not found at: ${tempFilePath}`);
@@ -2861,10 +3293,10 @@ async function fillRelianceForm(
                   console.log(`📁 Absolute file path: ${absoluteFilePath}`);
 
                   // === Upload to BOTH Identity Verification (file1) AND Address Verification (file2) ===
-                  
+
                   // === UPLOAD TO IDENTITY VERIFICATION (file1) ===
                   console.log("📤 === UPLOADING TO IDENTITY VERIFICATION (file1) ===");
-                  
+
                   // Find Identity Verification upload div by looking for the label text
                   let file1Div = null;
                   try {
@@ -2898,16 +3330,16 @@ async function fillRelianceForm(
                     // Scroll to file1 div
                     await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", file1Div);
                     await driver.sleep(500);
-                    
+
                     // Click to trigger file input creation
                     console.log("Clicking Identity Verification upload area...");
                     await driver.executeScript("arguments[0].click();", file1Div);
                     await driver.sleep(1500);
-                    
+
                     // Find all file inputs on page
                     let fileInputs = await driver.findElements(By.css("input[type='file']"));
                     console.log(`Found ${fileInputs.length} file input(s) after clicking file1 div`);
-                    
+
                     // If no inputs found, create one via JavaScript
                     if (fileInputs.length === 0) {
                       console.log("No file inputs found, trying to create one...");
@@ -2924,14 +3356,14 @@ async function fillRelianceForm(
                       await driver.sleep(500);
                       fileInputs = await driver.findElements(By.css("input[type='file']"));
                     }
-                    
+
                     let file1Uploaded = false;
-                    
+
                     // Try each file input until one works
                     for (let i = 0; i < fileInputs.length && !file1Uploaded; i++) {
                       const fileInput = fileInputs[i];
                       console.log(`Trying file input ${i}...`);
-                      
+
                       try {
                         // Make input visible and interactable
                         await driver.executeScript(`
@@ -2947,32 +3379,32 @@ async function fillRelianceForm(
                           input.style.zIndex = '99999';
                         `, fileInput);
                         await driver.sleep(300);
-                        
+
                         // Try sendKeys
                         await fileInput.sendKeys(absoluteFilePath);
                         console.log(`✅ IDENTITY VERIFICATION (file1) uploaded via input[${i}]: ${data.aadharCard.fileName}`);
                         file1Uploaded = true;
-                        
+
                         // Dispatch change event to trigger Angular
                         await driver.executeScript(`
                           var event = new Event('change', { bubbles: true });
                           arguments[0].dispatchEvent(event);
                         `, fileInput);
-                        
+
                       } catch (sendErr) {
                         console.log(`Input[${i}] sendKeys failed: ${sendErr.message}`);
                       }
                     }
-                    
+
                     if (!file1Uploaded) {
                       console.log("⚠️  Could not upload to file1 via any input, trying Angular scope method...");
-                      
+
                       // Try Angular scope method as last resort
                       try {
                         const fileContent = fs.readFileSync(absoluteFilePath);
                         const base64Content = fileContent.toString('base64');
                         const mimeType = absoluteFilePath.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg';
-                        
+
                         await driver.executeScript(`
                           var uploadDiv = arguments[0];
                           var byteString = atob('${base64Content}');
@@ -3005,7 +3437,7 @@ async function fillRelianceForm(
                         console.log(`⚠️  Angular scope method failed: ${angularErr.message}`);
                       }
                     }
-                    
+
                     // Wait for Angular to process file1
                     await driver.sleep(3000);
                     console.log("✅ File1 upload attempt complete");
@@ -3020,7 +3452,7 @@ async function fillRelianceForm(
 
                   // === UPLOAD TO ADDRESS VERIFICATION (file2) ===
                   console.log("📤 === UPLOADING TO ADDRESS VERIFICATION (file2) ===");
-                  
+
                   // Find Address Verification upload div
                   let file2Div = null;
                   try {
@@ -3056,23 +3488,23 @@ async function fillRelianceForm(
                     // Scroll to file2 div
                     await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", file2Div);
                     await driver.sleep(500);
-                    
+
                     // Click to trigger file input
                     console.log("Clicking Address Verification upload area...");
                     await driver.executeScript("arguments[0].click();", file2Div);
                     await driver.sleep(1500);
-                    
+
                     // Find file inputs
                     let fileInputs = await driver.findElements(By.css("input[type='file']"));
                     console.log(`Found ${fileInputs.length} file input(s) after clicking file2 div`);
-                    
+
                     let file2Uploaded = false;
-                    
+
                     // Try each file input (prefer the last one as it's likely the newest)
                     for (let i = fileInputs.length - 1; i >= 0 && !file2Uploaded; i--) {
                       const fileInput = fileInputs[i];
                       console.log(`Trying file input ${i} for file2...`);
-                      
+
                       try {
                         await driver.executeScript(`
                           var input = arguments[0];
@@ -3087,30 +3519,30 @@ async function fillRelianceForm(
                           input.style.zIndex = '99999';
                         `, fileInput);
                         await driver.sleep(300);
-                        
+
                         await fileInput.sendKeys(absoluteFilePath);
                         console.log(`✅ ADDRESS VERIFICATION (file2) uploaded via input[${i}]: ${data.aadharCard.fileName}`);
                         file2Uploaded = true;
-                        
+
                         // Dispatch change event
                         await driver.executeScript(`
                           var event = new Event('change', { bubbles: true });
                           arguments[0].dispatchEvent(event);
                         `, fileInput);
-                        
+
                       } catch (sendErr) {
                         console.log(`Input[${i}] sendKeys failed for file2: ${sendErr.message}`);
                       }
                     }
-                    
+
                     if (!file2Uploaded) {
                       console.log("⚠️  Could not upload to file2 via any input, trying Angular scope method...");
-                      
+
                       try {
                         const fileContent = fs.readFileSync(absoluteFilePath);
                         const base64Content = fileContent.toString('base64');
                         const mimeType = absoluteFilePath.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg';
-                        
+
                         await driver.executeScript(`
                           var uploadDiv = arguments[0];
                           var byteString = atob('${base64Content}');
@@ -3141,7 +3573,7 @@ async function fillRelianceForm(
                         console.log(`⚠️  Angular scope method failed for file2: ${angularErr.message}`);
                       }
                     }
-                    
+
                     await driver.sleep(3000);
                     console.log("✅ File2 upload attempt complete");
                   } else {
@@ -3200,7 +3632,7 @@ async function fillRelianceForm(
                         console.log("⚠️  SUBMIT button exists but is not visible yet, waiting...");
                         await driver.sleep(3000);
                       }
-                      
+
                       try {
                         // Scroll button into view
                         await driver.executeScript(
@@ -3208,7 +3640,7 @@ async function fillRelianceForm(
                           submitButton
                         );
                         await driver.sleep(500);
-                        
+
                         // Click the button
                         await submitButton.click();
                         console.log("✅ Clicked SUBMIT button");
@@ -3221,7 +3653,7 @@ async function fillRelianceForm(
                       // Wait for API response
                       console.log("⏳ Waiting for API response after SUBMIT...");
                       await driver.sleep(5000);
-                      
+
                       // Check for success message or next step
                       try {
                         // Look for success indicators
@@ -3231,7 +3663,7 @@ async function fillRelianceForm(
                         if (successIndicators.length > 0) {
                           console.log("✅ Upload success indicator found!");
                         }
-                        
+
                         // Also check for any error messages
                         const errorIndicators = await driver.findElements(
                           By.xpath("//*[contains(@class, 'error') or contains(@class, 'alert-danger')]")
@@ -3249,21 +3681,21 @@ async function fillRelianceForm(
                       }
 
                       console.log("✅ SUBMIT completed successfully");
-                      
+
                       // Wait for API response - increased wait time
                       console.log("⏳ Waiting for API response after SUBMIT (10 seconds)...");
                       await driver.sleep(10000);
-                      
+
                       // === STEP 4: Wait for and Click PROCEED button ===
                       console.log("Looking for PROCEED button...");
                       let proceedButton = null;
                       let proceedAttempts = 0;
                       const maxProceedAttempts = 10;
-                      
+
                       while (!proceedButton && proceedAttempts < maxProceedAttempts) {
                         proceedAttempts++;
                         console.log(`PROCEED button search attempt ${proceedAttempts}/${maxProceedAttempts}...`);
-                        
+
                         try {
                           // Try ng-click selector
                           proceedButton = await driver.findElement(By.css("button[ng-click='redirectToURL()']"));
@@ -3290,13 +3722,13 @@ async function fillRelianceForm(
                             }
                           }
                         }
-                        
+
                         if (!proceedButton) {
                           console.log("PROCEED button not visible yet, waiting 2 seconds...");
                           await driver.sleep(2000);
                         }
                       }
-                      
+
                       if (proceedButton) {
                         console.log("✅ PROCEED button found, clicking...");
                         await driver.executeScript(
@@ -3304,7 +3736,7 @@ async function fillRelianceForm(
                           proceedButton
                         );
                         await driver.sleep(500);
-                        
+
                         try {
                           await proceedButton.click();
                           console.log("✅ Clicked PROCEED button");
@@ -3312,62 +3744,62 @@ async function fillRelianceForm(
                           await driver.executeScript("arguments[0].click();", proceedButton);
                           console.log("✅ Clicked PROCEED button (via JavaScript)");
                         }
-                        
+
                         // Wait for navigation after PROCEED click
                         console.log("⏳ Waiting for navigation after PROCEED click (5 seconds)...");
                         await driver.sleep(5000);
-                        
+
                         // === STEP 5: Handle tabs ===
                         console.log("Checking for new tabs...");
                         const allHandles = await driver.getAllWindowHandles();
                         console.log(`Found ${allHandles.length} window handle(s)`);
-                        
+
                         if (allHandles.length > 1) {
                           // Close current tab (new one opened by PROCEED)
                           await driver.close();
                           console.log("✅ Closed new tab");
-                          
+
                           // Switch to original tab (first one)
                           await driver.switchTo().window(allHandles[0]);
                           console.log("✅ Switched back to original tab");
                         }
-                        
+
                         await driver.sleep(2000);
-                        
+
                         // === STEP 6: Navigate to Pending Quotes ===
                         console.log("Navigating to Pending Quotes page...");
                         try {
                           // Method 1: Try direct URL navigation (most reliable)
-                            const currentUrl = await driver.getCurrentUrl();
-                            const baseUrl = currentUrl.split('/').slice(0, 3).join('/');
-                            const pendingQuotesUrl = baseUrl + '/Payment/Payments?pageName=XhIEGvE4S2ipze7xJW7wmIFef%252b42e%252b6H6mk6l%252f76i0s%253d';
-                            
-                            console.log(`Navigating to: ${pendingQuotesUrl}`);
-                            await driver.get(pendingQuotesUrl);
-                            console.log("✅ Navigated to Pending Quotes via URL");
-                            await driver.sleep(3000);
-                            
-                            // Fallback: If URL navigation didn't work, try menu approach
-                            const pageSource = await driver.getPageSource();
-                            if (!pageSource.includes('Pending') && !pageSource.includes('pending')) {
-                              console.log("URL navigation may not have worked, trying menu approach...");
-                              
-                              const paymentMenu = await driver.wait(
-                                until.elementLocated(By.css("div#divMainPay, div.MainMenu.payment, div[data-hovertarget='#divSubPay']")),
-                                10000
-                              );
-                              
-                              // Scroll to payment menu
-                              await driver.executeScript(
-                                "arguments[0].scrollIntoView({block: 'center'});",
-                                paymentMenu
-                              );
-                              await driver.sleep(500);
-                              
-                              // Try multiple hover/click methods
-                              try {
-                                // Method A: JavaScript mouseover event
-                                await driver.executeScript(`
+                          const currentUrl = await driver.getCurrentUrl();
+                          const baseUrl = currentUrl.split('/').slice(0, 3).join('/');
+                          const pendingQuotesUrl = baseUrl + '/Payment/Payments?pageName=XhIEGvE4S2ipze7xJW7wmIFef%252b42e%252b6H6mk6l%252f76i0s%253d';
+
+                          console.log(`Navigating to: ${pendingQuotesUrl}`);
+                          await driver.get(pendingQuotesUrl);
+                          console.log("✅ Navigated to Pending Quotes via URL");
+                          await driver.sleep(3000);
+
+                          // Fallback: If URL navigation didn't work, try menu approach
+                          const pageSource = await driver.getPageSource();
+                          if (!pageSource.includes('Pending') && !pageSource.includes('pending')) {
+                            console.log("URL navigation may not have worked, trying menu approach...");
+
+                            const paymentMenu = await driver.wait(
+                              until.elementLocated(By.css("div#divMainPay, div.MainMenu.payment, div[data-hovertarget='#divSubPay']")),
+                              10000
+                            );
+
+                            // Scroll to payment menu
+                            await driver.executeScript(
+                              "arguments[0].scrollIntoView({block: 'center'});",
+                              paymentMenu
+                            );
+                            await driver.sleep(500);
+
+                            // Try multiple hover/click methods
+                            try {
+                              // Method A: JavaScript mouseover event
+                              await driver.executeScript(`
                                   var menu = arguments[0];
                                   var event = new MouseEvent('mouseover', {
                                     'view': window,
@@ -3376,10 +3808,10 @@ async function fillRelianceForm(
                                   });
                                   menu.dispatchEvent(event);
                                 `, paymentMenu);
-                                await driver.sleep(1000);
-                                
-                                // Show submenu if hidden
-                                await driver.executeScript(`
+                              await driver.sleep(1000);
+
+                              // Show submenu if hidden
+                              await driver.executeScript(`
                                   var subMenu = document.querySelector('#divSubPay, .SubMenu');
                                   if (subMenu) {
                                     subMenu.style.display = 'block';
@@ -3387,177 +3819,179 @@ async function fillRelianceForm(
                                     subMenu.style.opacity = '1';
                                   }
                                 `);
-                                await driver.sleep(500);
-                              } catch (hoverErr) {
-                                console.log(`Hover failed: ${hoverErr.message}`);
-                              }
-                              
-                              // Try actions API
-                              try {
-                                await driver.actions().move({ origin: paymentMenu }).perform();
-                                console.log("✅ Hovered over Payment menu");
-                                await driver.sleep(1500);
-                              } catch (actionsErr) {
-                                console.log(`Actions hover failed: ${actionsErr.message}`);
-                              }
-                              
-                              // Find and click Pending Quotes link
-                              console.log("Looking for Pending Quotes link...");
-                              let pendingQuotesLink = null;
-                              
-                              try {
-                                pendingQuotesLink = await driver.findElement(
-                                  By.xpath("//a[contains(text(), 'Pending Quotes')]")
-                                );
-                              } catch (e) {
-                                pendingQuotesLink = await driver.findElement(
-                                  By.css("a[href*='Pending'], a[href*='pending']")
-                                );
-                              }
-                              
-                              if (pendingQuotesLink) {
-                                // Get the href and navigate directly
-                                const href = await pendingQuotesLink.getAttribute('href');
-                                if (href) {
-                                  await driver.get(href);
-                                  console.log("✅ Navigated to Pending Quotes via link href");
-                                } else {
-                                  await driver.executeScript("arguments[0].click();", pendingQuotesLink);
-                                  console.log("✅ Clicked Pending Quotes via JavaScript");
-                                }
+                              await driver.sleep(500);
+                            } catch (hoverErr) {
+                              console.log(`Hover failed: ${hoverErr.message}`);
+                            }
+
+                            // Try actions API
+                            try {
+                              await driver.actions().move({ origin: paymentMenu }).perform();
+                              console.log("✅ Hovered over Payment menu");
+                              await driver.sleep(1500);
+                            } catch (actionsErr) {
+                              console.log(`Actions hover failed: ${actionsErr.message}`);
+                            }
+
+                            // Find and click Pending Quotes link
+                            console.log("Looking for Pending Quotes link...");
+                            let pendingQuotesLink = null;
+
+                            try {
+                              pendingQuotesLink = await driver.findElement(
+                                By.xpath("//a[contains(text(), 'Pending Quotes')]")
+                              );
+                            } catch (e) {
+                              pendingQuotesLink = await driver.findElement(
+                                By.css("a[href*='Pending'], a[href*='pending']")
+                              );
+                            }
+
+                            if (pendingQuotesLink) {
+                              // Get the href and navigate directly
+                              const href = await pendingQuotesLink.getAttribute('href');
+                              if (href) {
+                                await driver.get(href);
+                                console.log("✅ Navigated to Pending Quotes via link href");
+                              } else {
+                                await driver.executeScript("arguments[0].click();", pendingQuotesLink);
+                                console.log("✅ Clicked Pending Quotes via JavaScript");
                               }
                             }
-                            
-                            console.log("✅ On Pending Quotes page");
-                            
-                            await driver.sleep(5000);
-                            
-                            // === STEP 8: Find and click the proposal checkbox ===
-                            console.log("Looking for proposal checkbox...");
-                            
-                            // Extract proposal number from data if available
-                            let proposalNumber = data.proposalNumber || data.proposal_number;
-                            console.log(`Searching for proposal: ${proposalNumber}`);
-                            
-                            try {
-                              // Try to find checkbox by proposal number in onclick attribute
-                              let proposalCheckbox = null;
-                              
-                              if (proposalNumber) {
-                                try {
-                                  proposalCheckbox = await driver.wait(
-                                    until.elementLocated(By.xpath(`//input[@type='checkbox' and contains(@onclick, '${proposalNumber}')]`)),
-                                    10000
-                                  );
-                                  console.log(`✅ Found proposal checkbox for: ${proposalNumber}`);
-                                } catch (e) {
-                                  console.log(`⚠️  Could not find checkbox with proposal number: ${proposalNumber}`);
-                                }
-                              }
-                              
-                              // If not found by proposal number, try to find by ID pattern
-                              if (!proposalCheckbox) {
-                                const checkboxes = await driver.findElements(
-                                  By.xpath("//input[@type='checkbox' and starts-with(@id, 'chkR')]")
+                          }
+
+                          console.log("✅ On Pending Quotes page");
+
+                          await driver.sleep(5000);
+
+                          // === STEP 8: Find and click the proposal checkbox ===
+                          console.log("Looking for proposal checkbox...");
+
+                          // Extract proposal number from data if available
+                          let proposalNumber = data.proposalNumber || data.proposal_number;
+                          console.log(`Searching for proposal: ${proposalNumber}`);
+
+                          try {
+                            // Try to find checkbox by proposal number in onclick attribute
+                            let proposalCheckbox = null;
+
+                            if (proposalNumber) {
+                              try {
+                                proposalCheckbox = await driver.wait(
+                                  until.elementLocated(By.xpath(`//input[@type='checkbox' and contains(@onclick, '${proposalNumber}')]`)),
+                                  10000
                                 );
-                                if (checkboxes.length > 0) {
-                                  proposalCheckbox = checkboxes[0]; // Get first matching checkbox
-                                  console.log("✅ Found first proposal checkbox");
-                                }
+                                console.log(`✅ Found proposal checkbox for: ${proposalNumber}`);
+                              } catch (e) {
+                                console.log(`⚠️  Could not find checkbox with proposal number: ${proposalNumber}`);
                               }
-                              
-                              if (proposalCheckbox) {
+                            }
+
+                            // If not found by proposal number, try to find by ID pattern
+                            if (!proposalCheckbox) {
+                              const checkboxes = await driver.findElements(
+                                By.xpath("//input[@type='checkbox' and starts-with(@id, 'chkR')]")
+                              );
+                              if (checkboxes.length > 0) {
+                                proposalCheckbox = checkboxes[0]; // Get first matching checkbox
+                                console.log("✅ Found first proposal checkbox");
+                              }
+                            }
+
+                            if (proposalCheckbox) {
+                              await driver.executeScript(
+                                "arguments[0].scrollIntoView({block: 'center'});",
+                                proposalCheckbox
+                              );
+                              await driver.sleep(500);
+
+                              await proposalCheckbox.click();
+                              console.log("✅ Clicked proposal checkbox");
+
+                              await driver.sleep(2000);
+
+                              // === STEP 9: Check TP Declaration checkbox ===
+                              console.log("Looking for TP Declaration checkbox...");
+                              try {
+                                const tpDeclaration = await driver.wait(
+                                  until.elementLocated(By.css("input#TPDeclaration1")),
+                                  5000
+                                );
+
                                 await driver.executeScript(
                                   "arguments[0].scrollIntoView({block: 'center'});",
-                                  proposalCheckbox
+                                  tpDeclaration
                                 );
                                 await driver.sleep(500);
-                                
-                                await proposalCheckbox.click();
-                                console.log("✅ Clicked proposal checkbox");
-                                
-                                await driver.sleep(2000);
-                                
-                                // === STEP 9: Check TP Declaration checkbox ===
-                                console.log("Looking for TP Declaration checkbox...");
+
+                                await tpDeclaration.click();
+                                console.log("✅ Checked TP Declaration");
+
+                                await driver.sleep(1500);
+
+                                // === STEP 10: Click Pay button ===
+                                console.log("Looking for Pay button...");
                                 try {
-                                  const tpDeclaration = await driver.wait(
-                                    until.elementLocated(By.css("input#TPDeclaration1")),
+                                  const payButton = await driver.wait(
+                                    until.elementLocated(By.css("input#Paymentbtn")),
                                     5000
                                   );
-                                  
+
                                   await driver.executeScript(
                                     "arguments[0].scrollIntoView({block: 'center'});",
-                                    tpDeclaration
+                                    payButton
                                   );
                                   await driver.sleep(500);
-                                  
-                                  await tpDeclaration.click();
-                                  console.log("✅ Checked TP Declaration");
-                                  
-                                  await driver.sleep(1500);
-                                  
-                                  // === STEP 10: Click Pay button ===
-                                  console.log("Looking for Pay button...");
+
+                                  await payButton.click();
+                                  console.log("✅ Clicked Pay button");
+
+                                  await driver.sleep(3000);
+
+                                  // === STEP 11: Enter amount in currency input ===
+                                  // DISABLED: Not filling amount field as per requirement
+                                  /*
+                                  console.log("Looking for amount input field...");
                                   try {
-                                    const payButton = await driver.wait(
-                                      until.elementLocated(By.css("input#Paymentbtn")),
-                                      5000
-                                    );
-                                    
-                                    await driver.executeScript(
-                                      "arguments[0].scrollIntoView({block: 'center'});",
-                                      payButton
-                                    );
-                                    await driver.sleep(500);
-                                    
-                                    await payButton.click();
-                                    console.log("✅ Clicked Pay button");
-                                    
-                                    await driver.sleep(3000);
-                                    
-                                    // === STEP 11: Enter amount in currency input ===
-                                    console.log("Looking for amount input field...");
+                                    // First, try to get the amount from the table row
+                                    let amountToEnter = "";
+
+                                    // Find the selected row and get amount
                                     try {
-                                      // First, try to get the amount from the table row
-                                      let amountToEnter = "";
-                                      
-                                      // Find the selected row and get amount
-                                      try {
-                                        const amountCell = await driver.findElement(
-                                          By.xpath("//tr[contains(@class, 'selected')]//td[contains(@class, 'amount') or contains(@data-field, 'amount')]")
-                                        );
-                                        amountToEnter = await amountCell.getText();
-                                        console.log(`Found amount from table: ${amountToEnter}`);
-                                      } catch (e) {
-                                        // Try alternative: Get from data object
-                                        if (data.premium || data.amount || data.totalPremium) {
-                                          amountToEnter = String(data.premium || data.amount || data.totalPremium);
-                                          console.log(`Using amount from data: ${amountToEnter}`);
-                                        }
+                                      const amountCell = await driver.findElement(
+                                        By.xpath("//tr[contains(@class, 'selected')]//td[contains(@class, 'amount') or contains(@data-field, 'amount')]")
+                                      );
+                                      amountToEnter = await amountCell.getText();
+                                      console.log(`Found amount from table: ${amountToEnter}`);
+                                    } catch (e) {
+                                      // Try alternative: Get from data object
+                                      if (data.premium || data.amount || data.totalPremium || data.flaxprice || data.Flaxprice) {
+                                        amountToEnter = String(data.premium || data.amount || data.totalPremium || data.flaxprice || data.Flaxprice);
+                                        console.log(`Using amount from data: ${amountToEnter}`);
                                       }
-                                      
-                                      // Clean amount string (remove currency symbols, commas)
-                                      amountToEnter = amountToEnter.replace(/[₹,\s]/g, '').trim();
-                                      
-                                      if (amountToEnter) {
-                                        const amountInput = await driver.wait(
-                                          until.elementLocated(By.css("input#txtTotalAmountPaidCurrency")),
-                                          5000
-                                        );
-                                        
-                                        await driver.executeScript(
-                                          "arguments[0].scrollIntoView({block: 'center'});",
-                                          amountInput
-                                        );
-                                        await driver.sleep(500);
-                                        
-                                        // Click on the input to focus
-                                        await amountInput.click();
-                                        await driver.sleep(500);
-                                        
-                                        // Since it's readonly, use JavaScript to set value
-                                        await driver.executeScript(`
+                                    }
+
+                                    // Clean amount string (remove currency symbols, commas)
+                                    amountToEnter = amountToEnter.replace(/[₹,\s]/g, '').trim();
+
+                                    if (amountToEnter) {
+                                      const amountInput = await driver.wait(
+                                        until.elementLocated(By.css("input#txtTotalAmountPaidCurrency")),
+                                        5000
+                                      );
+
+                                      await driver.executeScript(
+                                        "arguments[0].scrollIntoView({block: 'center'});",
+                                        amountInput
+                                      );
+                                      await driver.sleep(500);
+
+                                      // Click on the input to focus
+                                      await amountInput.click();
+                                      await driver.sleep(500);
+
+                                      // Since it's readonly, use JavaScript to set value
+                                      await driver.executeScript(`
                                           var input = arguments[0];
                                           input.removeAttribute('readonly');
                                           input.value = '${amountToEnter}';
@@ -3567,12 +4001,12 @@ async function fillRelianceForm(
                                           var inputEvent = new Event('input', { bubbles: true });
                                           input.dispatchEvent(inputEvent);
                                         `, amountInput);
-                                        
-                                        console.log(`✅ Entered amount: ${amountToEnter}`);
-                                        
-                                        // Also try to set the hidden input if exists
-                                        try {
-                                          await driver.executeScript(`
+
+                                      console.log(`✅ Entered amount: ${amountToEnter}`);
+
+                                      // Also try to set the hidden input if exists
+                                      try {
+                                        await driver.executeScript(`
                                             var hiddenInput = document.getElementById('txtTotalAmountPaid');
                                             if (hiddenInput) {
                                               hiddenInput.value = '${amountToEnter}';
@@ -3580,48 +4014,58 @@ async function fillRelianceForm(
                                               hiddenInput.dispatchEvent(event);
                                             }
                                           `);
-                                        } catch (e) {
-                                          // Ignore
-                                        }
-                                        
-                                        await driver.sleep(2000);
-                                        console.log("✅ Payment flow completed successfully!");
-                                      } else {
-                                        console.log("⚠️  Could not determine amount to enter");
+                                      } catch (e) {
+                                        // Ignore
                                       }
-                                      
-                                    } catch (amountErr) {
-                                      console.log(`⚠️  Amount input error: ${amountErr.message}`);
+
+                                      await driver.sleep(2000);
+                                      console.log("✅ Payment flow completed successfully!");
+                                    } else {
+                                      console.log("⚠️  Could not determine amount to enter");
                                     }
-                                    
-                                  } catch (payBtnErr) {
-                                    console.log(`⚠️  Pay button error: ${payBtnErr.message}`);
+
+                                  } catch (amountErr) {
+                                    console.log(`⚠️  Amount input error: ${amountErr.message}`);
                                   }
-                                  
-                                } catch (tpErr) {
-                                  console.log(`⚠️  TP Declaration error: ${tpErr.message}`);
+                                  */
+                                  console.log("⏭️  Skipping amount field (disabled)");
+                                  await driver.sleep(2000);
+
+
+                                } catch (payBtnErr) {
+                                  console.log(`⚠️  Pay button error: ${payBtnErr.message}`);
                                 }
-                              } else {
-                                console.log("❌ Could not find proposal checkbox");
+
+                              } catch (tpErr) {
+                                console.log(`⚠️  TP Declaration error: ${tpErr.message}`);
                               }
-                              
-                            } catch (proposalErr) {
-                              console.log(`⚠️  Proposal checkbox error: ${proposalErr.message}`);
+                            } else {
+                              console.log("❌ Could not find proposal checkbox");
                             }
-                            
-                          } catch (paymentMenuErr) {
-                            console.log(`⚠️  Payment menu error: ${paymentMenuErr.message}`);
+
+                          } catch (proposalErr) {
+                            console.log(`⚠️  Proposal checkbox error: ${proposalErr.message}`);
                           }
-                          
+
+                        } catch (paymentMenuErr) {
+                          console.log(`⚠️  Payment menu error: ${paymentMenuErr.message}`);
+                        }
+
                       } else {
                         console.log("❌ PROCEED button not found after all attempts");
                       }
-                      
+
+
                       // Wait indefinitely after payment flow - don't close driver
+                      // DISABLED: Allowing code to continue to Brisk API call
+                      /*
                       console.log("⏳ Waiting indefinitely (driver won't close)...");
                       await new Promise(() => {
                         // Never resolve - keeps browser open
                       });
+                      */
+                      console.log("✅ Payment flow completed, continuing to Brisk API...");
+                      await driver.sleep(2000);
                     } else {
                       console.log("❌ SUBMIT button could not be located");
                     }
@@ -3948,7 +4392,86 @@ async function fillRelianceForm(
       };
     }
 
-    return { success: true };
+    // === STEP 9: Call Brisk Certificate API ===
+    let briskPdfPath = null;
+    let reliancePdfPath = null;
+    let mergedPdfInfo = null;
+
+    try {
+      console.log("📝 Creating Brisk Certificate...");
+      const briskResult = await createBriskCertificate(data);
+      console.log("✅ Brisk Certificate created successfully:", briskResult);
+
+      // Download the Brisk PDF if downloadUrl is available
+      if (briskResult.downloadUrl) {
+        try {
+          console.log("📥 Downloading Brisk Certificate PDF...");
+          briskPdfPath = await downloadBriskPDF(briskResult.downloadUrl, briskResult.policyId);
+          console.log(`✅ Brisk PDF saved to: ${briskPdfPath}`);
+        } catch (downloadError) {
+          console.error("❌ Failed to download Brisk PDF:", downloadError.message);
+          // Continue even if download fails
+        }
+      }
+
+      // === STEP 10: Find Reliance PDF and Merge with Brisk PDF ===
+      if (briskPdfPath) {
+        try {
+          console.log("🔍 Looking for Reliance PDF...");
+
+          // Find the latest PDF in reliance_pdf folder
+          const reliancePdfDir = path.join(__dirname, 'reliance_pdf');
+
+          if (fs.existsSync(reliancePdfDir)) {
+            const pdfFiles = fs.readdirSync(reliancePdfDir)
+              .filter(file => file.endsWith('.pdf'))
+              .map(file => ({
+                name: file,
+                path: path.join(reliancePdfDir, file),
+                time: fs.statSync(path.join(reliancePdfDir, file)).mtime.getTime()
+              }))
+              .sort((a, b) => b.time - a.time); // Sort by newest first
+
+            if (pdfFiles.length > 0) {
+              reliancePdfPath = pdfFiles[0].path;
+              console.log(`✅ Found Reliance PDF: ${reliancePdfPath}`);
+
+              // Merge PDFs, upload to AWS, and update policy
+              console.log("🔄 Starting PDF merge and upload process...");
+              console.log("🔍 DEBUG BEFORE MERGE: data._id =", data._id);
+              console.log("🔍 DEBUG BEFORE MERGE: data.policyId =", data.policyId);
+              console.log("🔍 DEBUG BEFORE MERGE: Available keys =", Object.keys(data));
+              mergedPdfInfo = await mergePDFsAndUpload(reliancePdfPath, briskPdfPath, data);
+              console.log("✅ PDFs merged and uploaded successfully:", mergedPdfInfo);
+            } else {
+              console.warn("⚠️  No PDF files found in reliance_pdf folder");
+            }
+          } else {
+            console.warn(`⚠️  Reliance PDF directory not found: ${reliancePdfDir}`);
+          }
+        } catch (mergeError) {
+          console.error("❌ Failed to merge PDFs:", mergeError.message);
+          // Continue even if merge fails - we still have individual PDFs
+        }
+      }
+
+      return {
+        success: true,
+        briskCertificate: {
+          ...briskResult,
+          localPdfPath: briskPdfPath
+        },
+        reliancePdfPath: reliancePdfPath,
+        mergedPdf: mergedPdfInfo
+      };
+    } catch (briskError) {
+      console.error("❌ Failed to create Brisk Certificate:", briskError.message);
+      // Don't fail the entire job if Brisk API fails, just log it
+      return {
+        success: true,
+        briskCertificateError: briskError.message
+      };
+    }
   } catch (e) {
     console.error("[relianceForm] Error:", e.message || e);
     hadError = true;

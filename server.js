@@ -55,6 +55,18 @@ const multer = require("multer");
 const mongoose = require("mongoose");
 const moment = require("moment");
 
+// 🛡️ Import Enhanced Error Handler (CRITICAL: Money involved)
+const {
+  validateFormData,
+  sanitizeFormData,
+  generateIdempotencyKey,
+  checkDuplicateSubmission,
+  createErrorLogEntry,
+  ERROR_CODES,
+  ValidationError,
+  PolicyAutomationError
+} = require("./lib/errorHandler");
+
 mongoose.connect(process.env.MONGODB_URI);
 
 const db = mongoose.connection;
@@ -63,6 +75,7 @@ const db = mongoose.connection;
 let activeRelianceJobs = 0;
 const MAX_PARALLEL_JOBS = 3; // Process 3 jobs in parallel using multiple tabs in same browser
 let jobQueueCollection = null; // Will be initialized after DB connection
+let auditLogCollection = null; // For audit logging
 
 // Job statuses
 const JOB_STATUS = {
@@ -71,36 +84,153 @@ const JOB_STATUS = {
   COMPLETED: "completed", // Successfully completed
   FAILED_LOGIN_FORM: "failed_login_form", // Failed during login page form filling
   FAILED_POST_SUBMISSION: "failed_post_submission", // Failed after form submission
+  FAILED_VALIDATION: "failed_validation", // Failed input validation
+  FAILED_DUPLICATE: "failed_duplicate", // Duplicate submission detected
 };
 
+/**
+ * 🛡️ Enhanced Job Enqueue with Validation & Duplicate Detection
+ * CRITICAL: Since money is involved, we validate and check for duplicates
+ */
 const enqueueRelianceJob = async (formData, captchaId = null) => {
+  const startTime = Date.now();
+
   try {
-    // Save job to MongoDB with pending status
+    // Step 1: Sanitize form data
+    const sanitizedData = sanitizeFormData(formData);
+
+    // Step 2: Validate form data
+    const company = sanitizedData.Companyname || 'reliance';
+    const validation = validateFormData(sanitizedData, company);
+
+    if (!validation.valid) {
+      console.error(`[Reliance Queue] ❌ Validation failed for ${sanitizedData.firstName}:`);
+      validation.errors.forEach(e => console.error(`   - ${e.field}: ${e.message}`));
+
+      // Create failed job record for tracking
+      const failedJob = {
+        captchaId: captchaId,
+        formData: sanitizedData,
+        status: JOB_STATUS.FAILED_VALIDATION,
+        createdAt: new Date(),
+        failedAt: new Date(),
+        attempts: 0,
+        maxAttempts: 0,
+        validationErrors: validation.errors.map(e => e.toJSON ? e.toJSON() : e),
+        errorSummary: validation.errorSummary
+      };
+
+      await jobQueueCollection.insertOne(failedJob);
+
+      // Log audit entry
+      await logAuditEntry('VALIDATION_FAILED', {
+        captchaId,
+        customerName: `${sanitizedData.firstName} ${sanitizedData.lastName}`,
+        errors: validation.errorSummary
+      });
+
+      throw new ValidationError('formData', null, 'E100_INVALID_INPUT', {
+        message: `Validation failed: ${validation.errorSummary}`
+      });
+    }
+
+    // Step 3: Check for duplicate submissions (CRITICAL: Prevent double charges)
+    const idempotencyKey = generateIdempotencyKey(sanitizedData);
+    const existingJob = await checkDuplicateSubmission(jobQueueCollection, idempotencyKey, 60);
+
+    if (existingJob) {
+      console.warn(`[Reliance Queue] ⚠️ Duplicate submission detected for ${sanitizedData.firstName}`);
+      console.warn(`   Existing Job ID: ${existingJob._id}, Status: ${existingJob.status}`);
+
+      // Log audit entry
+      await logAuditEntry('DUPLICATE_DETECTED', {
+        captchaId,
+        customerName: `${sanitizedData.firstName} ${sanitizedData.lastName}`,
+        existingJobId: existingJob._id,
+        existingJobStatus: existingJob.status
+      });
+
+      // Return existing job ID instead of creating duplicate
+      return existingJob._id;
+    }
+
+    // Step 4: Create job with enhanced tracking
     const job = {
-      captchaId: captchaId, // Reference to original Captcha collection document
-      formData,
+      captchaId: captchaId,
+      formData: sanitizedData,
+      idempotencyKey: idempotencyKey,
       status: JOB_STATUS.PENDING,
       createdAt: new Date(),
       attempts: 0,
-      maxAttempts: 3, // Retry up to 3 times on failure
+      maxAttempts: 3,
       lastError: null,
-      errorLogs: [], // Initialize empty error logs array
+      errorLogs: [],
+      statusHistory: [{
+        from: null,
+        to: JOB_STATUS.PENDING,
+        timestamp: new Date()
+      }],
+      metadata: {
+        company: company,
+        enqueuedAt: new Date(),
+        processingTimeMs: null,
+        retryCount: 0
+      }
     };
 
     const result = await jobQueueCollection.insertOne(job);
+
+    const enqueueDuration = Date.now() - startTime;
     console.log(
-      `[Reliance Queue] Enqueued job for ${formData.firstName} (Job ID: ${result.insertedId}, Captcha ID: ${captchaId})`
+      `[Reliance Queue] ✅ Enqueued job for ${sanitizedData.firstName} (Job ID: ${result.insertedId}, Captcha ID: ${captchaId}) [${enqueueDuration}ms]`
     );
+
+    // Log audit entry
+    await logAuditEntry('JOB_ENQUEUED', {
+      jobId: result.insertedId,
+      captchaId,
+      customerName: `${sanitizedData.firstName} ${sanitizedData.lastName}`,
+      company: company,
+      mobile: sanitizedData.mobile
+    });
 
     // Try to process queue
     void processRelianceQueue();
 
     return result.insertedId;
   } catch (error) {
-    console.error("[Reliance Queue] Failed to enqueue job:", error.message);
+    console.error("[Reliance Queue] ❌ Failed to enqueue job:", error.message);
+
+    // Log audit entry for failure
+    await logAuditEntry('ENQUEUE_FAILED', {
+      captchaId,
+      error: error.message,
+      errorCode: error.code || 'UNKNOWN'
+    });
+
     throw error;
   }
 };
+
+/**
+ * Helper function to log audit entries
+ */
+async function logAuditEntry(action, details) {
+  try {
+    if (!auditLogCollection) {
+      auditLogCollection = db.collection('AuditLog');
+    }
+
+    await auditLogCollection.insertOne({
+      action,
+      details,
+      timestamp: new Date(),
+      service: 'policy-form-automation'
+    });
+  } catch (err) {
+    console.error('[Audit] Failed to log entry:', err.message);
+  }
+}
 
 const processRelianceQueue = async () => {
   if (!jobQueueCollection) return;
@@ -193,15 +323,25 @@ const processRelianceQueue = async () => {
 const runPolicyJob = async (job) => {
   const jobIdentifier = `${job.formData.firstName}_${job._id}`;
   const JOB_TIMEOUT = 300000; // 5 minutes timeout per job
+  const processingStartTime = Date.now();
+
+  // Log processing start
+  await logAuditEntry('JOB_PROCESSING_STARTED', {
+    jobId: job._id,
+    customerName: `${job.formData.firstName} ${job.formData.lastName}`,
+    attemptNumber: job.attempts + 1,
+    maxAttempts: job.maxAttempts
+  });
 
   try {
     // Normalize company name - check both Companyname and company fields, convert to lowercase
     const companyName = (job.formData.Companyname || job.formData.company || "reliance").toLowerCase();
     const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
 
-    console.log(
-      `\n[${queueName}] Processing ${companyName} form for: ${job.formData.firstName} ${job.formData.lastName}`
-    );
+    console.log(`\n${'═'.repeat(70)}`);
+    console.log(`[${queueName}] 🔄 Processing ${companyName} form for: ${job.formData.firstName} ${job.formData.lastName}`);
+    console.log(`[${queueName}] 📋 Job ID: ${job._id} | Attempt: ${job.attempts + 1}/${job.maxAttempts}`);
+    console.log(`${'═'.repeat(70)}`);
     console.log(
       `[${queueName}] Company detection: job.formData.Companyname="${job.formData.Companyname}", job.formData.company="${job.formData.company}", normalized="${companyName}"`
     );
@@ -235,7 +375,7 @@ const runPolicyJob = async (job) => {
     const timeoutPromise = new Promise((_, reject) =>
       setTimeout(
         () =>
-          reject(new Error(`Job timeout after ${JOB_TIMEOUT / 1000} seconds`)),
+          reject(new Error(`[E302] Job timeout after ${JOB_TIMEOUT / 1000} seconds`)),
         JOB_TIMEOUT
       )
     );
@@ -243,8 +383,10 @@ const runPolicyJob = async (job) => {
     // Race between job completion and timeout
     const result = await Promise.race([fillFormPromise, timeoutPromise]);
 
+    const processingTimeMs = Date.now() - processingStartTime;
+
     if (result && result.success) {
-      // Mark as completed in database
+      // 🎉 SUCCESS - Mark as completed in database
       await jobQueueCollection.updateOne(
         { _id: job._id },
         {
@@ -252,36 +394,62 @@ const runPolicyJob = async (job) => {
             status: JOB_STATUS.COMPLETED,
             completedAt: new Date(),
             completedAttempt: job.attempts + 1,
+            processingTimeMs: processingTimeMs
           },
+          $push: {
+            statusHistory: {
+              from: JOB_STATUS.PROCESSING,
+              to: JOB_STATUS.COMPLETED,
+              timestamp: new Date()
+            }
+          }
         }
       );
-      console.log(
-        `[Reliance Queue] ✅ Success for ${job.formData.firstName} (ID: ${job._id})`
-      );
+
+      console.log(`\n${'═'.repeat(70)}`);
+      console.log(`[Reliance Queue] ✅ SUCCESS for ${job.formData.firstName} (ID: ${job._id})`);
+      console.log(`[Reliance Queue] ⏱️  Processing time: ${(processingTimeMs / 1000).toFixed(2)}s`);
+      console.log(`${'═'.repeat(70)}\n`);
+
+      // Log audit entry for success
+      await logAuditEntry('JOB_COMPLETED', {
+        jobId: job._id,
+        customerName: `${job.formData.firstName} ${job.formData.lastName}`,
+        company: companyName,
+        processingTimeMs: processingTimeMs,
+        attemptNumber: job.attempts + 1
+      });
+
     } else {
-      // Job failed - determine failure type
+      // ❌ FAILURE - Handle based on failure type
       const newAttemptCount = job.attempts + 1;
 
-      // Determine failure type based on result
+      // Classify the error
       const isPostSubmissionFailure =
         result?.postSubmissionFailed ||
         result?.stage === "post-submission" ||
         result?.stage === "post-calculation";
+
+      // Use structured error codes
+      const errorCode = isPostSubmissionFailure ? 'E401' : 'E300';
       const failureType = isPostSubmissionFailure
         ? "PostSubmissionError"
         : "LoginFormError";
+      const severity = isPostSubmissionFailure ? 'critical' : 'warning';
 
-      // Create error log with screenshot (if driver available in result)
+      // Create enhanced error log with structured codes
       const errorLog = {
         timestamp: new Date(),
         attemptNumber: newAttemptCount,
+        errorCode: errorCode,
         errorMessage: result?.error || "Unknown error",
         errorType: failureType,
-        stage:
-          result?.stage ||
-          (isPostSubmissionFailure ? "post-submission" : "login-form"),
+        severity: severity,
+        stage: result?.stage || (isPostSubmissionFailure ? "post-submission" : "login-form"),
         screenshotUrl: result?.screenshotUrl || null,
         screenshotKey: result?.screenshotKey || null,
+        processingTimeMs: processingTimeMs,
+        retryable: !isPostSubmissionFailure
       };
 
       // Add error to errorLogs array
@@ -289,19 +457,29 @@ const runPolicyJob = async (job) => {
         { _id: job._id },
         {
           $inc: { attempts: 1 },
-          $push: { errorLogs: errorLog },
+          $push: {
+            errorLogs: errorLog,
+            statusHistory: {
+              from: JOB_STATUS.PROCESSING,
+              to: isPostSubmissionFailure ? JOB_STATUS.FAILED_POST_SUBMISSION : JOB_STATUS.PROCESSING,
+              timestamp: new Date(),
+              reason: errorLog.errorMessage
+            }
+          },
           $set: {
             lastError: errorLog.errorMessage,
+            lastErrorCode: errorCode,
             lastErrorTimestamp: errorLog.timestamp,
             lastAttemptAt: new Date(),
-            failureType: failureType, // Store failure type
+            failureType: failureType,
+            processingTimeMs: processingTimeMs
           },
         }
       );
 
       const updatedJob = await jobQueueCollection.findOne({ _id: job._id });
 
-      // Post-submission failures: Mark as failed immediately (no retry)
+      // 🔴 Post-submission failures: Mark as failed immediately (CRITICAL - NO RETRY - money involved)
       if (isPostSubmissionFailure) {
         await jobQueueCollection.updateOne(
           { _id: job._id },
@@ -313,15 +491,29 @@ const runPolicyJob = async (job) => {
             },
           }
         );
-        console.error(
-          `[Reliance Queue] ❌ Failed permanently (POST-SUBMISSION) for ${job.formData.firstName} - NO RETRY (form already submitted)`
-        );
-        console.error(`   Error: ${errorLog.errorMessage}`);
+
+        console.error(`\n${'🔴'.repeat(35)}`);
+        console.error(`[Reliance Queue] ❌ CRITICAL FAILURE (POST-SUBMISSION) for ${job.formData.firstName}`);
+        console.error(`[Reliance Queue] ⚠️  NO RETRY - Form already submitted, may have charges`);
+        console.error(`[Reliance Queue] 📋 Error Code: ${errorCode}`);
+        console.error(`[Reliance Queue] 📝 Error: ${errorLog.errorMessage}`);
         if (errorLog.screenshotUrl) {
-          console.error(`   Screenshot: ${errorLog.screenshotUrl}`);
+          console.error(`[Reliance Queue] 📸 Screenshot: ${errorLog.screenshotUrl}`);
         }
+        console.error(`${'🔴'.repeat(35)}\n`);
+
+        // Log critical audit entry
+        await logAuditEntry('JOB_FAILED_CRITICAL', {
+          jobId: job._id,
+          customerName: `${job.formData.firstName} ${job.formData.lastName}`,
+          errorCode: errorCode,
+          errorMessage: errorLog.errorMessage,
+          severity: 'CRITICAL',
+          requiresManualReview: true,
+          processingTimeMs: processingTimeMs
+        });
       }
-      // Login form failures: Retry logic
+      // 🟠 Login form failures: Retry logic
       else if (updatedJob.attempts >= updatedJob.maxAttempts) {
         // Max attempts reached for login form failures
         await jobQueueCollection.updateOne(
@@ -334,49 +526,89 @@ const runPolicyJob = async (job) => {
             },
           }
         );
-        console.error(
-          `[Reliance Queue] ❌ Failed permanently (LOGIN FORM) for ${job.formData.firstName} after ${updatedJob.attempts} attempts`
-        );
-        console.error(`   Last error: ${errorLog.errorMessage}`);
+
+        console.error(`\n${'🟠'.repeat(35)}`);
+        console.error(`[Reliance Queue] ❌ FAILED PERMANENTLY (LOGIN FORM) for ${job.formData.firstName}`);
+        console.error(`[Reliance Queue] 📋 Attempts exhausted: ${updatedJob.attempts}/${updatedJob.maxAttempts}`);
+        console.error(`[Reliance Queue] 📋 Error Code: ${errorCode}`);
+        console.error(`[Reliance Queue] 📝 Last error: ${errorLog.errorMessage}`);
         if (errorLog.screenshotUrl) {
-          console.error(`   Screenshot: ${errorLog.screenshotUrl}`);
+          console.error(`[Reliance Queue] 📸 Screenshot: ${errorLog.screenshotUrl}`);
         }
+        console.error(`${'🟠'.repeat(35)}\n`);
+
+        // Log audit entry
+        await logAuditEntry('JOB_FAILED_MAX_RETRIES', {
+          jobId: job._id,
+          customerName: `${job.formData.firstName} ${job.formData.lastName}`,
+          errorCode: errorCode,
+          errorMessage: errorLog.errorMessage,
+          attempts: updatedJob.attempts,
+          maxAttempts: updatedJob.maxAttempts,
+          processingTimeMs: processingTimeMs
+        });
       } else {
         // Retry login form failures: reset to pending
+        const retryDelay = 60000 * Math.pow(2, updatedJob.attempts - 1); // Exponential backoff
+        const nextRetryAt = new Date(Date.now() + retryDelay);
+
         await jobQueueCollection.updateOne(
           { _id: job._id },
           {
             $set: {
               status: JOB_STATUS.PENDING,
-              nextRetryAt: new Date(Date.now() + 60000),
+              nextRetryAt: nextRetryAt,
             },
+            $inc: { 'metadata.retryCount': 1 }
           }
         );
-        console.warn(
-          `[Reliance Queue] ⚠️ Failed (LOGIN FORM) for ${job.formData.firstName}, will retry (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
-        );
+
+        console.warn(`\n${'🟡'.repeat(35)}`);
+        console.warn(`[Reliance Queue] ⚠️ FAILED (LOGIN FORM) for ${job.formData.firstName}`);
+        console.warn(`[Reliance Queue] 🔄 Will retry in ${retryDelay / 1000}s (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`);
+        console.warn(`[Reliance Queue] 📋 Error Code: ${errorCode}`);
         if (errorLog.screenshotUrl) {
-          console.warn(`   Screenshot: ${errorLog.screenshotUrl}`);
+          console.warn(`[Reliance Queue] 📸 Screenshot: ${errorLog.screenshotUrl}`);
         }
+        console.warn(`${'🟡'.repeat(35)}\n`);
+
+        // Log audit entry
+        await logAuditEntry('JOB_RETRY_SCHEDULED', {
+          jobId: job._id,
+          customerName: `${job.formData.firstName} ${job.formData.lastName}`,
+          errorCode: errorCode,
+          attempt: updatedJob.attempts,
+          maxAttempts: updatedJob.maxAttempts,
+          nextRetryAt: nextRetryAt
+        });
       }
     }
   } catch (e) {
+    const processingTimeMs = Date.now() - processingStartTime;
+
     console.error(
-      `[Reliance Queue] ❌ Error for ${job.formData.firstName}:`,
+      `[Reliance Queue] ❌ EXCEPTION for ${job.formData.firstName}:`,
       e.message
     );
 
-    // Increment attempt and create error log
+    // Classify the error using our error handler
+    const { classifyError } = require("./lib/errorHandler");
+    const classified = classifyError(e);
+
+    // Increment attempt and create enhanced error log
     const newAttemptCount = job.attempts + 1;
 
-    // For exceptions, we assume it's a login form error since post-submission errors are caught earlier
     const errorLog = {
       timestamp: new Date(),
       attemptNumber: newAttemptCount,
+      errorCode: classified.code,
       errorMessage: e.message,
       errorStack: e.stack || null,
-      errorType: "LoginFormError",
-      stage: "login-form",
+      errorType: classified.severity === 'critical' ? 'SystemError' : 'LoginFormError',
+      severity: classified.severity,
+      stage: "exception",
+      retryable: classified.retryable,
+      processingTimeMs: processingTimeMs
     };
 
     // Add error to errorLogs array
@@ -387,16 +619,18 @@ const runPolicyJob = async (job) => {
         $push: { errorLogs: errorLog },
         $set: {
           lastError: e.message,
+          lastErrorCode: classified.code,
           lastErrorTimestamp: errorLog.timestamp,
           lastAttemptAt: new Date(),
-          failureType: "LoginFormError",
+          failureType: errorLog.errorType,
+          processingTimeMs: processingTimeMs
         },
       }
     );
 
     const updatedJob = await jobQueueCollection.findOne({ _id: job._id });
 
-    if (updatedJob.attempts >= updatedJob.maxAttempts) {
+    if (updatedJob.attempts >= updatedJob.maxAttempts || !classified.retryable) {
       await jobQueueCollection.updateOne(
         { _id: job._id },
         {
@@ -407,22 +641,45 @@ const runPolicyJob = async (job) => {
           },
         }
       );
-      console.error(
-        `[Reliance Queue] ❌ Failed permanently (LOGIN FORM) after ${updatedJob.attempts} attempts`
-      );
+
+      console.error(`[Reliance Queue] ❌ Failed permanently [${classified.code}] after ${updatedJob.attempts} attempts`);
+
+      // Log audit entry
+      await logAuditEntry('JOB_FAILED_EXCEPTION', {
+        jobId: job._id,
+        customerName: `${job.formData.firstName} ${job.formData.lastName}`,
+        errorCode: classified.code,
+        errorMessage: e.message,
+        attempts: updatedJob.attempts,
+        retryable: classified.retryable,
+        processingTimeMs: processingTimeMs
+      });
     } else {
+      const retryDelay = 60000 * Math.pow(2, updatedJob.attempts - 1);
+      const nextRetryAt = new Date(Date.now() + retryDelay);
+
       await jobQueueCollection.updateOne(
         { _id: job._id },
         {
           $set: {
             status: JOB_STATUS.PENDING,
-            nextRetryAt: new Date(Date.now() + 60000),
+            nextRetryAt: nextRetryAt,
           },
         }
       );
+
       console.warn(
-        `[Reliance Queue] ⚠️ Will retry (LOGIN FORM error) (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
+        `[Reliance Queue] ⚠️ Will retry [${classified.code}] in ${retryDelay / 1000}s (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
       );
+
+      // Log audit entry
+      await logAuditEntry('JOB_RETRY_AFTER_EXCEPTION', {
+        jobId: job._id,
+        customerName: `${job.formData.firstName} ${job.formData.lastName}`,
+        errorCode: classified.code,
+        attempt: updatedJob.attempts,
+        nextRetryAt: nextRetryAt
+      });
     }
   }
 };
@@ -477,32 +734,72 @@ db.once("open", async () => {
   const changeStream = collection.watch([
     {
       $match: {
-        operationType: "insert",
+        $or: [
+          { operationType: "insert" },
+          {
+            operationType: "update",
+            "updateDescription.updatedFields.aadharCard": { $exists: true }
+          },
+          {
+            operationType: "update",
+            "updateDescription.updatedFields.panCard": { $exists: true }
+          }
+        ],
       },
     },
   ]);
+
   changeStream.on("change", async (change) => {
-    // console.log(change);
+    console.log(`📡 Change detected: ${change.operationType}`);
+
     let data = change?.fullDocument;
+    const documentId = change.documentKey?._id;
+
+    // If this is an update operation and we don't have fullDocument, fetch it
+    if (!data && documentId) {
+      console.log("📥 Fetching full document from database...");
+      data = await collection.findOne({ _id: documentId });
+    }
+
     console.log("data: ******* ******* ******* ******* ******* ******* ", data);
+
+    // Skip if this is just a document update (not initial insert)
+    // We only want to process when aadharCard and panCard are present
+    if (change.operationType === "update") {
+      const hasAadhar = data?.aadharCard?.key;
+      const hasPan = data?.panCard?.key;
+
+      if (!hasAadhar || !hasPan) {
+        console.log("⏭️  Skipping update - waiting for both documents to be uploaded");
+        return;
+      }
+
+      console.log("✅ Both documents uploaded, processing policy...");
+    }
+
     // Get the Captcha document _id for reference
     const captchaId = data?._id;
 
     // Generate presigned URLs for document downloads
     let aadharPresignedUrl = null;
     let panPresignedUrl = null;
-    
+
     if (data?.aadharCard?.key) {
       aadharPresignedUrl = await getPresignedUrl(data.aadharCard.key);
       console.log(`📄 Aadhar presigned URL generated: ${aadharPresignedUrl ? 'YES' : 'NO'}`);
     }
-    
+
     if (data?.panCard?.key) {
       panPresignedUrl = await getPresignedUrl(data.panCard.key);
       console.log(`📄 PAN presigned URL generated: ${panPresignedUrl ? 'YES' : 'NO'}`);
     }
 
     let formData = {
+      // MongoDB document identifiers (CRITICAL for updates)
+      _id: data?._id,
+      policyId: data?.policyId,
+      userId: data?.userId,
+
       username: "rfcpolicy",
       password: "Pass@123",
       // Proposer details
