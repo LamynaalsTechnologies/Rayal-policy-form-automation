@@ -350,10 +350,31 @@ const runPolicyJob = async (job) => {
 
     // Fetch credentials from DB
     console.log(`→ [${queueName}] Fetching ${companyName} credentials from database...`);
-    const creds = await ProviderCredential.findOne({
-      provider: companyName,
-      isActive: true,
-    });
+    
+    let creds = null;
+    // Check if job has clientId and try to fetch specific credentials
+    if (job.formData.clientId) {
+      console.log(`→ [${queueName}] Looking for credentials with clientId: ${job.formData.clientId}`);
+      creds = await ProviderCredential.findOne({
+        provider: companyName,
+        clientId: job.formData.clientId,
+        isActive: true,
+      });
+      
+      if (creds) {
+        console.log(`✓ [${queueName}] Found specific credentials for user: ${creds.username}`);
+      } else {
+        console.log(`⚠️ [${queueName}] No specific credentials found for clientId: ${job.formData.clientId}. Falling back to default.`);
+      }
+    }
+    
+    // Fallback to default credentials if not found
+    if (!creds) {
+      creds = await ProviderCredential.findOne({
+        provider: companyName,
+        isActive: true,
+      });
+    }
 
     if (!creds) {
       console.error(`❌ [${queueName}] No active ${companyName} credentials found in DB`);

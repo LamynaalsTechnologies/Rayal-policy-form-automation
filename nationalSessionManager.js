@@ -124,11 +124,75 @@ const recoveryManager = new NationalMasterSessionRecovery();
  * Initialize National master session - called once on server start
  * This creates the master browser and ensures user is logged in
  */
-async function initializeNationalMasterSession() {
+async function initializeNationalMasterSession(policyId = null) {
   try {
     console.log("\n" + "=".repeat(60));
     console.log("  🔐 INITIALIZING NATIONAL MASTER SESSION");
     console.log("=".repeat(60) + "\n");
+
+    // Ensure MongoDB connection
+    const mongoose = require("mongoose");
+    const { ProviderCredential } = require("./models");
+    
+    if (mongoose.connection.readyState === 0) {
+      if (process.env.MONGODB_URI) {
+        await mongoose.connect(process.env.MONGODB_URI);
+        console.log("✓ Connected to MongoDB");
+      } else {
+        console.warn("⚠️ MONGODB_URI not found in env, skipping DB connection");
+      }
+    }
+
+    // Fetch credentials logic - Matching Reliance implementation
+    let creds = null;
+
+    if (policyId) {
+      console.log(`→ Fetching policy data for ID: ${policyId}...`);
+      const policy = await mongoose.connection.db
+        .collection("onlinePolicy")
+        .findOne({ _id: new mongoose.Types.ObjectId(policyId) });
+
+      if (policy && policy.clientId) {
+        console.log(
+          `→ Policy found with clientId: ${policy.clientId}. Fetching credentials...`
+        );
+        creds = await ProviderCredential.findOne({
+          clientId: policy.clientId,
+          provider: "national",
+          isActive: true,
+        });
+        
+        if (creds) {
+          console.log(
+            `✓ Found specific credentials for clientId: ${policy.clientId} (username: ${creds.username})`
+          );
+        } else {
+          console.log(
+            `⚠ No specific credentials found for clientId: ${policy.clientId}. Falling back to default.`
+          );
+        }
+      }
+    }
+
+    // Fallback to default credentials if no specific ones found
+    if (!creds) {
+      console.log("→ Fetching default National credentials from database...");
+      creds = await ProviderCredential.findOne({
+        provider: "national",
+        isActive: true,
+      });
+    }
+
+    // If found in DB, update CONFIG
+    if (creds) {
+      console.log(`✓ Using credentials for: ${creds.username}`);
+      CONFIG.USERNAME = creds.username;
+      CONFIG.PASSWORD = creds.password;
+      if (creds.loginUrl) CONFIG.LOGIN_URL = creds.loginUrl;
+      // if (creds.dashboardUrl) CONFIG.DASHBOARD_URL = creds.dashboardUrl;
+    } else {
+      console.warn("⚠️ No National credentials found in DB, using hardcoded defaults from config");
+    }
 
     // Step 1: Create master browser (this creates the base profile directory)
     console.log("📂 Creating National master browser with profile...");
