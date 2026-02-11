@@ -65,7 +65,8 @@ let masterDriver = null;
 let isSessionActive = false;
 let sessionLastChecked = null;
 let optimizationsEnabled = false;
-let currentLoggedInUserId = null; // Track which userId is currently logged in
+let currentLoggedInUserId = null;
+let currentLoggedInClientId = null; // Track which userId is currently logged in
 
 /**
  * Get session status
@@ -551,28 +552,28 @@ async function initializeMasterSession(policyId = null) {
         .collection("onlinePolicy")
         .findOne({ _id: new mongoose.Types.ObjectId(policyId) });
 
-      if (policy && policy.userId) {
+      if (policy && policy.clientId) {
         console.log(
-          `→ Policy found with userId: ${policy.userId}. Fetching credentials...`
+          `→ Policy found with clientId: ${policy.clientId}. Fetching credentials...`
         );
         creds = await ProviderCredential.findOne({
-          userId: policy.userId,
+          clientId: policy.clientId,
           provider: "reliance",
           isActive: true,
         });
         
         if (creds) {
           console.log(
-            `✓ Found credentials for userId: ${policy.userId} (username: ${creds.username})`
+            `✓ Found credentials for clientId: ${policy.clientId} (username: ${creds.username})`
           );
         } else {
           console.log(
-            `⚠ No credentials found for userId: ${policy.userId}. Falling back to default credentials.`
+            `⚠ No credentials found for clientId: ${policy.clientId}. Falling back to default credentials.`
           );
         }
       } else {
         console.log(
-          "⚠ Policy not found or has no userId. Falling back to default credentials."
+          "⚠ Policy not found or has no clientId. Falling back to default credentials."
         );
       }
     }
@@ -615,6 +616,7 @@ async function initializeMasterSession(policyId = null) {
       console.log("✅ Already logged in! Session is active.\n");
       isSessionActive = true;
       sessionLastChecked = new Date();
+      currentLoggedInClientId = creds.clientId || null;
       currentLoggedInUserId = creds.userId || null; // Track which userId is logged in
     } else {
       // Step 4: Perform login if needed
@@ -625,6 +627,7 @@ async function initializeMasterSession(policyId = null) {
         console.log("✅ Login successful! Session is now active.\n");
         isSessionActive = true;
         sessionLastChecked = new Date();
+        currentLoggedInClientId = creds.clientId || null;
         currentLoggedInUserId = creds.userId || null; // Track which userId is logged in
       } else {
         console.error("❌ Login failed!\n");
@@ -745,32 +748,33 @@ async function reLoginIfNeeded() {
  * Switch master session to use different credentials
  * This is called when a job requires different credentials than currently logged in
  * @param {string} userId - The userId to switch to
+ * @param {string} client - The clientId to switch to
  * @returns {Promise<boolean>} - True if switch successful
  */
-async function switchMasterSessionCredentials(userId) {
+async function switchMasterSessionCredentials(clientId) {
   try {
     console.log(`\\n${'='.repeat(60)}`);
     console.log(`  🔄 SWITCHING MASTER SESSION CREDENTIALS`);
     console.log(`${'='.repeat(60)}\\n`);
     
-    console.log(`→ Current logged-in userId: ${currentLoggedInUserId || 'default'}`);
-    console.log(`→ Requested userId: ${userId || 'default'}\\n`);
+    console.log(`→ Current logged-in clientId: ${currentLoggedInClientId || 'default'}`);
+    console.log(`→ Requested clientId: ${clientId || 'default'}\\n`);
 
-    // Fetch credentials for the requested userId
+    // Fetch credentials for the requested clientId
     let creds = null;
     
-    if (userId) {
-      console.log(`→ Fetching credentials for userId: ${userId}...`);
+    if (clientId) {
+      console.log(`→ Fetching credentials for clientId: ${clientId}...`);
       creds = await ProviderCredential.findOne({
-        userId: userId,
+        clientId: clientId,
         provider: "reliance",
         isActive: true,
       });
       
       if (creds) {
-        console.log(`✓ Found credentials for userId: ${userId} (username: ${creds.username})`);
+        console.log(`✓ Found credentials for clientId: ${clientId} (username: ${creds.username})`);
       } else {
-        console.log(`⚠ No credentials found for userId: ${userId}. Using default credentials.`);
+        console.log(`⚠ No credentials found for clientId: ${clientId}. Using default credentials.`);
       }
     }
     
@@ -816,6 +820,7 @@ async function switchMasterSessionCredentials(userId) {
       console.log("✅ Re-login successful with new credentials!\\n");
       isSessionActive = true;
       sessionLastChecked = new Date();
+      currentLoggedInClientId = creds.clientId || null;
       currentLoggedInUserId = creds.userId || null;
       
       console.log(`${'='.repeat(60)}`);
@@ -845,25 +850,41 @@ async function switchMasterSessionCredentials(userId) {
  * Enhanced with stale flag detection and recovery lock coordination
  * @param {string} jobId - Job identifier
  * @param {string} userId - User ID for credential lookup (optional)
+ * @param {string} clientId - Client ID for credential lookup (optional)
  */
-async function createJobBrowser(jobId, userId = null) {
+async function createJobBrowser(jobId, clientId = null) {
   try {
     console.log(`\\n📋 [Job ${jobId}] Creating cloned browser...`);
     
     // Step 0: Check if we need to switch credentials for this user
-    if (userId && userId !== currentLoggedInUserId) {
-      console.log(`\\n🔄 [Job ${jobId}] Different userId detected!`);
-      console.log(`   Current: ${currentLoggedInUserId || 'default'}`);
-      console.log(`   Required: ${userId}`);
+    // if (userId && userId !== currentLoggedInUserId) {
+    //   console.log(`\\n🔄 [Job ${jobId}] Different userId detected!`);
+    //   console.log(`   Current: ${currentLoggedInUserId || 'default'}`);
+    //   console.log(`   Required: ${userId}`);
+    //   console.log(`   → Switching master session credentials...\\n`);
+      
+    //   await switchMasterSessionCredentials(userId);
+      
+    //   console.log(`✅ [Job ${jobId}] Master session now using credentials for userId: ${userId}\\n`);
+    // } else if (userId) {
+    //   console.log(`✅ [Job ${jobId}] Master session already using correct credentials for userId: ${userId}`);
+    // } else {
+    //   console.log(`ℹ️  [Job ${jobId}] No userId provided, using current session credentials`);
+    // }
+
+    if (clientId && clientId !== currentLoggedInClientId) {
+      console.log(`\\n🔄 [Job ${jobId}] Different clientId detected!`);
+      console.log(`   Current: ${currentLoggedInClientId || 'default'}`);
+      console.log(`   Required: ${clientId}`);
       console.log(`   → Switching master session credentials...\\n`);
       
-      await switchMasterSessionCredentials(userId);
+      await switchMasterSessionCredentials(clientId);
       
-      console.log(`✅ [Job ${jobId}] Master session now using credentials for userId: ${userId}\\n`);
-    } else if (userId) {
-      console.log(`✅ [Job ${jobId}] Master session already using correct credentials for userId: ${userId}`);
+      console.log(`✅ [Job ${jobId}] Master session now using credentials for clientId: ${clientId}\\n`);
+    } else if (clientId) {
+      console.log(`✅ [Job ${jobId}] Master session already using correct credentials for clientId: ${clientId}`);
     } else {
-      console.log(`ℹ️  [Job ${jobId}] No userId provided, using current session credentials`);
+      console.log(`ℹ️  [Job ${jobId}] No clientId provided, using current session credentials`);
     }
 
     // Step 1: Ensure session is active (with proactive check to catch stale flags)

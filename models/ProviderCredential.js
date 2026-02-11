@@ -5,6 +5,10 @@ const ProviderCredentialSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     required: true,
   },
+  clientId: {
+    type: mongoose.Schema.Types.ObjectId,
+    required: true,
+  },
   provider: {
     type: String,
     required: true,
@@ -37,7 +41,7 @@ const ProviderCredentialSchema = new mongoose.Schema({
   },
 });
 
-ProviderCredentialSchema.index({ provider: 1, userId: 1 }, { unique: true });
+ProviderCredentialSchema.index({ provider: 1, clientId: 1 }, { unique: true });
 
 ProviderCredentialSchema.pre("save", function (next) {
   this.updatedAt = Date.now();

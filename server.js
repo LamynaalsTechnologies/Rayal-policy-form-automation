@@ -817,6 +817,7 @@ db.once("open", async () => {
       _id: data?._id,
       policyId: data?.policyId,
       userId: data?.userId,
+      clientId:data?.clientId,
 
       username: "rfcpolicy",
       password: "Pass@123",

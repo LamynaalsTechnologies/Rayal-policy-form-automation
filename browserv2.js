@@ -307,28 +307,28 @@ async function initializeMasterSession(policyId = null) {
         .collection("onlinePolicy")
         .findOne({ _id: new mongoose.Types.ObjectId(policyId) });
 
-      if (policy && policy.userId) {
+      if (policy && policy.clientId) {
         console.log(
-          `→ Policy found with userId: ${policy.userId}. Fetching credentials...`
+          `→ Policy found with clientId: ${policy.clientId}. Fetching credentials...`
         );
         creds = await ProviderCredential.findOne({
-          userId: policy.userId,
+          clientId: policy.clientId,
           provider: "reliance",
           isActive: true,
         });
         
         if (creds) {
           console.log(
-            `✓ Found credentials for userId: ${policy.userId} (username: ${creds.username})`
+            `✓ Found credentials for clientId: ${policy.clientId} (username: ${creds.username})`
           );
         } else {
           console.log(
-            `⚠ No credentials found for userId: ${policy.userId}. Falling back to default credentials.`
+            `⚠ No credentials found for clientId: ${policy.clientId}. Falling back to default credentials.`
           );
         }
       } else {
         console.log(
-          "⚠ Policy not found or has no userId. Falling back to default credentials."
+          "⚠ Policy not found or has no clientId. Falling back to default credentials."
         );
       }
     }
