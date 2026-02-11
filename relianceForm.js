@@ -1025,7 +1025,12 @@ async function fillRelianceForm(
   try {
     // === STEP 0: Create cloned browser (already logged in!) ===
     console.log(`\n🚀 [${jobId}] Starting job...`);
-    jobBrowser = await createJobBrowser(jobId);
+    
+    // Extract userId from data (handle both string and MongoDB ObjectId format)
+    const userId = data.userId?.$oid || data.userId || null;
+    console.log(`📋 [${jobId}] Job userId: ${userId || 'not specified'}`);
+    
+    jobBrowser = await createJobBrowser(jobId, userId);
     driver = jobBrowser.driver;
 
     console.log(`✅ [${jobId}] Browser ready with active session!`);

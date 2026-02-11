@@ -67,6 +67,8 @@ const {
   PolicyAutomationError
 } = require("./lib/errorHandler");
 
+const { ProviderCredential } = require("./models");
+
 mongoose.connect(process.env.MONGODB_URI);
 
 const db = mongoose.connection;
@@ -346,14 +348,28 @@ const runPolicyJob = async (job) => {
       `[${queueName}] Company detection: job.formData.Companyname="${job.formData.Companyname}", job.formData.company="${job.formData.company}", normalized="${companyName}"`
     );
 
+    // Fetch credentials from DB
+    console.log(`→ [${queueName}] Fetching ${companyName} credentials from database...`);
+    const creds = await ProviderCredential.findOne({
+      provider: companyName,
+      isActive: true,
+    });
+
+    if (!creds) {
+      console.error(`❌ [${queueName}] No active ${companyName} credentials found in DB`);
+      throw new Error(`[E303] No active credentials found for ${companyName}`);
+    }
+
     // Route to appropriate form filling function based on Companyname
     let fillFormPromise;
     if (companyName === "national") {
       // National Insurance form
       fillFormPromise = fillNationalForm({
         ...job.formData,
-        username: "9999839907", // Always use this username for National
-        password: "Rayal$2025", // Always use this password for National
+        // username: "9999839907", // Always use this username for National
+        // password: "Rayal$2025",
+        username: creds.username,
+        password: creds.password,
         _jobId: job._id, // Pass job ID for error logging
         _jobIdentifier: jobIdentifier,
         _attemptNumber: job.attempts + 1, // Current attempt number
@@ -362,8 +378,10 @@ const runPolicyJob = async (job) => {
     } else {
       // Reliance form (default)
       fillFormPromise = fillRelianceForm({
-        username: "rfcpolicy",
-        password: "Pass@123",
+        // username: "rfcpolicy",
+        // password: "Pass@123",
+        username: creds.username,
+        password: creds.password,
         ...job.formData,
         _jobId: job._id, // Pass job ID for error logging
         _jobIdentifier: jobIdentifier,

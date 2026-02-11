@@ -439,7 +439,7 @@ async function fillNationalForm(
     console.log(`\n🚀 [${jobId}] Starting National Insurance job...`);
 
     // === STEP 0: Create fresh browser ===
-    jobBrowser = await createNationalJobBrowser(jobId);
+    jobBrowser = await createNationalJobBrowser(jobId, data?._policyId);
     driver = jobBrowser.driver;
 
     console.log(`✅ [${jobId}] National browser ready!`);

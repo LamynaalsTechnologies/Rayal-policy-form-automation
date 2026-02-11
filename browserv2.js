@@ -5,15 +5,20 @@ const path = require("path");
 const fs = require("fs");
 const { execSync } = require("child_process");
 const { getCaptchaScreenShot, getCaptchaText } = require("./captchaUtils");
+require("dotenv").config();
+const mongoose = require("mongoose");
+const { ProviderCredential } = require("./models");
 // ============================================
 // CONFIGURATION
 // ============================================
 const CONFIG = {
   LOGIN_URL: "https://smartzone.reliancegeneral.co.in/Login/IMDLogin",
   DASHBOARD_URL: "https://smartzone.reliancegeneral.co.in/",
-  USERNAME: "rfcpolicy",
-  PASSWORD: "Pass@123",
-  LOGIN_TIMEOUT: 5000, // 30 seconds for manual login
+  // USERNAME: "rfcpolicy",
+  // PASSWORD: "Pass@123",
+  USERNAME: "", // Will be populated from DB
+  PASSWORD: "", // Will be populated from DB
+  LOGIN_TIMEOUT: 5000,
   CHECK_TIMEOUT: 5000,
 };
 
@@ -279,13 +284,74 @@ async function createClonedBrowser(clonedProfileInfo) {
 /**
  * Main function - handles login and profile cloning
  */
-async function initializeMasterSession() {
+async function initializeMasterSession(policyId = null) {
   let driver = null;
 
   try {
     console.log("\n========================================");
     console.log("  MASTER SESSION INITIALIZATION");
     console.log("========================================\n");
+
+    // Connect to MongoDB if not already connected
+    if (mongoose.connection.readyState === 0) {
+      await mongoose.connect(process.env.MONGODB_URI);
+      console.log("✓ Connected to MongoDB");
+    }
+
+    // Fetch credentials from DB
+    let creds = null;
+
+    if (policyId) {
+      console.log(`→ Fetching policy data for ID: ${policyId}...`);
+      const policy = await mongoose.connection.db
+        .collection("onlinePolicy")
+        .findOne({ _id: new mongoose.Types.ObjectId(policyId) });
+
+      if (policy && policy.userId) {
+        console.log(
+          `→ Policy found with userId: ${policy.userId}. Fetching credentials...`
+        );
+        creds = await ProviderCredential.findOne({
+          userId: policy.userId,
+          provider: "reliance",
+          isActive: true,
+        });
+        
+        if (creds) {
+          console.log(
+            `✓ Found credentials for userId: ${policy.userId} (username: ${creds.username})`
+          );
+        } else {
+          console.log(
+            `⚠ No credentials found for userId: ${policy.userId}. Falling back to default credentials.`
+          );
+        }
+      } else {
+        console.log(
+          "⚠ Policy not found or has no userId. Falling back to default credentials."
+        );
+      }
+    }
+
+    if (!creds) {
+      console.log("→ Fetching default Reliance credentials from database...");
+      creds = await ProviderCredential.findOne({
+        provider: "reliance",
+        isActive: true,
+      });
+    }
+
+    if (!creds) {
+      throw new Error(
+        "No active Reliance credentials found in the database. Please check the ProviderCredential collection."
+      );
+    }
+
+    console.log(`✓ Using credentials for: ${creds.username}`);
+    CONFIG.USERNAME = creds.username;
+    CONFIG.PASSWORD = creds.password;
+    if (creds.loginUrl) CONFIG.LOGIN_URL = creds.loginUrl;
+    if (creds.dashboardUrl) CONFIG.DASHBOARD_URL = creds.dashboardUrl;
 
     // Create master browser instance
     driver = await createMasterBrowser();

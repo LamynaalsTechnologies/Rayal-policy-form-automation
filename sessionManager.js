@@ -24,6 +24,8 @@ const {
   CONFIG,
   PATHS,
 } = require("./browserv2");
+const { ProviderCredential } = require("./models");
+const mongoose = require("mongoose");
 const fs = require("fs");
 const path = require("path");
 
@@ -63,6 +65,7 @@ let masterDriver = null;
 let isSessionActive = false;
 let sessionLastChecked = null;
 let optimizationsEnabled = false;
+let currentLoggedInUserId = null; // Track which userId is currently logged in
 
 /**
  * Get session status
@@ -527,11 +530,72 @@ const recoveryManager = new MasterSessionRecovery();
  * Initialize master session - called once on server start
  * This creates the master browser and ensures user is logged in
  */
-async function initializeMasterSession() {
+async function initializeMasterSession(policyId = null) {
   try {
     console.log("\n" + "=".repeat(60));
     console.log("  🔐 INITIALIZING MASTER SESSION");
     console.log("=".repeat(60) + "\n");
+
+    // Connect to MongoDB if not already connected
+    if (mongoose.connection.readyState === 0) {
+      await mongoose.connect(process.env.MONGODB_URI);
+      console.log("✓ Connected to MongoDB");
+    }
+
+    // Fetch credentials from DB
+    let creds = null;
+
+    if (policyId) {
+      console.log(`→ Fetching policy data for ID: ${policyId}...`);
+      const policy = await mongoose.connection.db
+        .collection("onlinePolicy")
+        .findOne({ _id: new mongoose.Types.ObjectId(policyId) });
+
+      if (policy && policy.userId) {
+        console.log(
+          `→ Policy found with userId: ${policy.userId}. Fetching credentials...`
+        );
+        creds = await ProviderCredential.findOne({
+          userId: policy.userId,
+          provider: "reliance",
+          isActive: true,
+        });
+        
+        if (creds) {
+          console.log(
+            `✓ Found credentials for userId: ${policy.userId} (username: ${creds.username})`
+          );
+        } else {
+          console.log(
+            `⚠ No credentials found for userId: ${policy.userId}. Falling back to default credentials.`
+          );
+        }
+      } else {
+        console.log(
+          "⚠ Policy not found or has no userId. Falling back to default credentials."
+        );
+      }
+    }
+
+    if (!creds) {
+      console.log("→ Fetching default Reliance credentials from database...");
+      creds = await ProviderCredential.findOne({
+        provider: "reliance",
+        isActive: true,
+      });
+    }
+
+    if (!creds) {
+      throw new Error(
+        "No active Reliance credentials found in the database. Please check the ProviderCredential collection."
+      );
+    }
+
+    console.log(`✓ Using credentials for: ${creds.username}`);
+    CONFIG.USERNAME = creds.username;
+    CONFIG.PASSWORD = creds.password;
+    if (creds.loginUrl) CONFIG.LOGIN_URL = creds.loginUrl;
+    if (creds.dashboardUrl) CONFIG.DASHBOARD_URL = creds.dashboardUrl;
 
     // Step 1: Create master browser (this creates the base profile directory)
     console.log("📂 Creating master browser with profile...");
@@ -551,6 +615,7 @@ async function initializeMasterSession() {
       console.log("✅ Already logged in! Session is active.\n");
       isSessionActive = true;
       sessionLastChecked = new Date();
+      currentLoggedInUserId = creds.userId || null; // Track which userId is logged in
     } else {
       // Step 4: Perform login if needed
       console.log("⚠️  Not logged in. Starting login process...\n");
@@ -560,6 +625,7 @@ async function initializeMasterSession() {
         console.log("✅ Login successful! Session is now active.\n");
         isSessionActive = true;
         sessionLastChecked = new Date();
+        currentLoggedInUserId = creds.userId || null; // Track which userId is logged in
       } else {
         console.error("❌ Login failed!\n");
         isSessionActive = false;
@@ -675,6 +741,100 @@ async function reLoginIfNeeded() {
   }
 }
 
+/**
+ * Switch master session to use different credentials
+ * This is called when a job requires different credentials than currently logged in
+ * @param {string} userId - The userId to switch to
+ * @returns {Promise<boolean>} - True if switch successful
+ */
+async function switchMasterSessionCredentials(userId) {
+  try {
+    console.log(`\\n${'='.repeat(60)}`);
+    console.log(`  🔄 SWITCHING MASTER SESSION CREDENTIALS`);
+    console.log(`${'='.repeat(60)}\\n`);
+    
+    console.log(`→ Current logged-in userId: ${currentLoggedInUserId || 'default'}`);
+    console.log(`→ Requested userId: ${userId || 'default'}\\n`);
+
+    // Fetch credentials for the requested userId
+    let creds = null;
+    
+    if (userId) {
+      console.log(`→ Fetching credentials for userId: ${userId}...`);
+      creds = await ProviderCredential.findOne({
+        userId: userId,
+        provider: "reliance",
+        isActive: true,
+      });
+      
+      if (creds) {
+        console.log(`✓ Found credentials for userId: ${userId} (username: ${creds.username})`);
+      } else {
+        console.log(`⚠ No credentials found for userId: ${userId}. Using default credentials.`);
+      }
+    }
+    
+    if (!creds) {
+      console.log("→ Fetching default Reliance credentials from database...");
+      creds = await ProviderCredential.findOne({
+        provider: "reliance",
+        isActive: true,
+      });
+    }
+    
+    if (!creds) {
+      throw new Error(
+        "No active Reliance credentials found in the database. Please check the ProviderCredential collection."
+      );
+    }
+
+    console.log(`✓ Using credentials for: ${creds.username}`);
+    
+    // Update CONFIG with new credentials
+    CONFIG.USERNAME = creds.username;
+    CONFIG.PASSWORD = creds.password;
+    if (creds.loginUrl) CONFIG.LOGIN_URL = creds.loginUrl;
+    if (creds.dashboardUrl) CONFIG.DASHBOARD_URL = creds.dashboardUrl;
+
+    // Check if master driver exists
+    if (!masterDriver) {
+      console.log("⚠️  No master driver exists. Creating new master session...");
+      await initializeMasterSession();
+      return true;
+    }
+
+    // Navigate to dashboard
+    console.log("🌐 Navigating to dashboard...");
+    await masterDriver.get(CONFIG.DASHBOARD_URL);
+    await masterDriver.sleep(3000);
+
+    // Perform re-login with new credentials
+    console.log("🔐 Performing re-login with new credentials...");
+    const loginSuccess = await performLogin(masterDriver);
+
+    if (loginSuccess) {
+      console.log("✅ Re-login successful with new credentials!\\n");
+      isSessionActive = true;
+      sessionLastChecked = new Date();
+      currentLoggedInUserId = creds.userId || null;
+      
+      console.log(`${'='.repeat(60)}`);
+      console.log(`  ✅ CREDENTIALS SWITCHED SUCCESSFULLY`);
+      console.log(`${'='.repeat(60)}\\n`);
+      
+      return true;
+    } else {
+      console.error("❌ Re-login failed with new credentials!\\n");
+      isSessionActive = false;
+      throw new Error("Failed to switch credentials. Re-login failed.");
+    }
+  } catch (error) {
+    console.error("\\n❌ Failed to switch credentials:", error.message);
+    isSessionActive = false;
+    throw error;
+  }
+}
+
 // ============================================
 // JOB PROCESSING
 // ============================================
@@ -683,10 +843,28 @@ async function reLoginIfNeeded() {
  * Create a cloned browser for a job
  * This clones the master profile so the job has an independent browser with active session
  * Enhanced with stale flag detection and recovery lock coordination
+ * @param {string} jobId - Job identifier
+ * @param {string} userId - User ID for credential lookup (optional)
  */
-async function createJobBrowser(jobId) {
+async function createJobBrowser(jobId, userId = null) {
   try {
-    console.log(`\n📋 [Job ${jobId}] Creating cloned browser...`);
+    console.log(`\\n📋 [Job ${jobId}] Creating cloned browser...`);
+    
+    // Step 0: Check if we need to switch credentials for this user
+    if (userId && userId !== currentLoggedInUserId) {
+      console.log(`\\n🔄 [Job ${jobId}] Different userId detected!`);
+      console.log(`   Current: ${currentLoggedInUserId || 'default'}`);
+      console.log(`   Required: ${userId}`);
+      console.log(`   → Switching master session credentials...\\n`);
+      
+      await switchMasterSessionCredentials(userId);
+      
+      console.log(`✅ [Job ${jobId}] Master session now using credentials for userId: ${userId}\\n`);
+    } else if (userId) {
+      console.log(`✅ [Job ${jobId}] Master session already using correct credentials for userId: ${userId}`);
+    } else {
+      console.log(`ℹ️  [Job ${jobId}] No userId provided, using current session credentials`);
+    }
 
     // Step 1: Ensure session is active (with proactive check to catch stale flags)
     // Check if flag is stale (last check > 2 minutes ago)
@@ -888,6 +1066,7 @@ module.exports = {
   checkSession,
   reLoginIfNeeded,
   getSessionStatus,
+  switchMasterSessionCredentials,
 
   // Job processing
   createJobBrowser,
