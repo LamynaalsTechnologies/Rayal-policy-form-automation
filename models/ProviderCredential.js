@@ -35,11 +35,7 @@ const ProviderCredentialSchema = new mongoose.Schema({
   lastUsedAt: {
     type: Date,
   },
-  updatedAt: {
-    type: Date,
-    default: Date.now,
-  },
-});
+},{timestamps:true});
 
 ProviderCredentialSchema.index({ provider: 1, clientId: 1 }, { unique: true });
 
