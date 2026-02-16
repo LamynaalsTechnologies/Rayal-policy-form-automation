@@ -189,9 +189,10 @@ async function initializeNationalMasterSession(policyId = null) {
       CONFIG.USERNAME = creds.username;
       CONFIG.PASSWORD = creds.password;
       if (creds.loginUrl) CONFIG.LOGIN_URL = creds.loginUrl;
-      // if (creds.dashboardUrl) CONFIG.DASHBOARD_URL = creds.dashboardUrl;
     } else {
-      console.warn("⚠️ No National credentials found in DB, using hardcoded defaults from config");
+      throw new Error(
+        "No active National credentials found in the database. Please check the ProviderCredential collection."
+      );
     }
 
     // Step 1: Create master browser (this creates the base profile directory)
@@ -396,10 +397,57 @@ async function reLoginNationalIfNeeded() {
 /**
  * Create a fresh browser for a National job
  * National uses a simple approach: each job gets a fresh browser and logs in
+ * @param {string} jobId - Unique identifier for the job
+ * @param {string} policyId - Optional policy ID to fetch specific credentials
  */
-async function createNationalJobBrowser(jobId) {
+async function createNationalJobBrowser(jobId, policyId = null) {
   try {
     console.log(`\n📋 [National Job ${jobId}] Creating fresh browser...`);
+
+    // Ensure MongoDB connection if policyId is provided
+    const mongoose = require("mongoose");
+    const { ProviderCredential } = require("./models");
+    
+    if (mongoose.connection.readyState === 0) {
+      if (process.env.MONGODB_URI) {
+        await mongoose.connect(process.env.MONGODB_URI);
+      }
+    }
+
+    // Fetch credentials logic
+    let creds = null;
+    const { CONFIG } = require("./nationalBrowserConfig");
+
+    if (policyId) {
+      console.log(`→ [Job ${jobId}] Fetching policy data for ID: ${policyId}...`);
+      const policy = await mongoose.connection.db
+        .collection("onlinePolicy")
+        .findOne({ _id: new mongoose.Types.ObjectId(policyId) });
+
+      if (policy && policy.clientId) {
+        creds = await ProviderCredential.findOne({
+          clientId: policy.clientId,
+          provider: "national",
+          isActive: true,
+        });
+      }
+    }
+
+    if (!creds) {
+      creds = await ProviderCredential.findOne({
+        provider: "national",
+        isActive: true,
+      });
+    }
+
+    if (creds) {
+      console.log(`✓ [Job ${jobId}] Using credentials for: ${creds.username}`);
+      CONFIG.USERNAME = creds.username;
+      CONFIG.PASSWORD = creds.password;
+      if (creds.loginUrl) CONFIG.LOGIN_URL = creds.loginUrl;
+    } else {
+      console.warn(`⚠️ [Job ${jobId}] No National credentials found in DB`);
+    }
 
     // Create a fresh profile for this job (no cloning, no master session)
     const { createClonedProfileOptions, createClonedBrowser } = require("./nationalBrowserConfig");

@@ -40,10 +40,13 @@ async function waitForLoaderToDisappear(driver, timeout = 30000) {
 // CONFIGURATION
 // ============================================
 const CONFIG = {
-  LOGIN_URL: "https://nicportal.nic.co.in/nicportal/signin/login",
+  // LOGIN_URL: "https://nicportal.nic.co.in/nicportal/signin/login",
+  LOGIN_URL: "",
   DASHBOARD_URL: "https://nicportal.nic.co.in/nicportal/home/hcontent",
-  USERNAME: "9999839907",
-  PASSWORD: "Rayal$2025",
+  // USERNAME: "9999839907",
+  // PASSWORD: "Rayal$2025",
+  USERNAME: "",
+  PASSWORD: "",
   LOGIN_TIMEOUT: 10000,
   CHECK_TIMEOUT: 5000,
 };

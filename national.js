@@ -5,6 +5,7 @@ const {
   reLoginNationalIfNeeded,
   recoveryManager,
 } = require("./nationalSessionManager");
+const { CONFIG } = require("./nationalBrowserConfig");
 const fs = require("fs");
 const path = require("path");
 const { extractCaptchaText } = require("./Captcha");
@@ -12,8 +13,10 @@ const { uploadScreenshotToS3, generateScreenshotKey } = require("./s3Uploader");
 
 // Default form data for standalone execution
 const defaultFormData = {
-  username: "9999839907",
-  password: "Rayal$2025",
+  // username: "9999839907",
+  // password: "Rayal$2025",
+  username: "",
+  password: "",
   rtoLocation: "Mumbai",
   make: "Honda",
   variant: "Standard"
@@ -449,8 +452,9 @@ async function fillNationalForm(
     console.log(`🌐 [${jobId}] Navigating to National login page...`);
 
     try {
-      console.log(`⏳ [${jobId}] Loading URL: R`);
-      await driver.get("https://nicportal.nic.co.in/nicportal/signin/login");
+      console.log(`⏳ [${jobId}] Loading URL: ${CONFIG.LOGIN_URL}`);
+      // await driver.get("https://nicportal.nic.co.in/nicportal/signin/login");
+      await driver.get(CONFIG.LOGIN_URL);
       console.log(`✅ [${jobId}] Navigation successful!`);
 
       await driver.sleep(3000);
@@ -602,13 +606,13 @@ async function fillNationalForm(
       // Fill username
       console.log(`[${jobId}] Looking for username field...`);
       const usernameField = By.name("log_txtfield_iUsername_01");
-      await safeType(driver, usernameField, data.username || "9364646564", 10000);
+      await safeType(driver, usernameField, data.username || CONFIG.USERNAME, 10000);
       console.log(`[${jobId}] Filled username`);
 
       // Fill password
       console.log(`[${jobId}] Looking for password field...`);
       const passwordField = By.name("log_pwd_iPassword_01");
-      await safeType(driver, passwordField, data.password || "Pond@2123", 10000);
+      await safeType(driver, passwordField, data.password || CONFIG.PASSWORD, 10000);
       console.log(`[${jobId}] Filled password`);
 
       // Click login button

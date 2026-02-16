@@ -12,7 +12,8 @@ const { ProviderCredential } = require("./models");
 // CONFIGURATION
 // ============================================
 const CONFIG = {
-  LOGIN_URL: "https://smartzone.reliancegeneral.co.in/Login/IMDLogin",
+  // LOGIN_URL: "https://smartzone.reliancegeneral.co.in/Login/IMDLogin",
+  LOGIN_URL: "", // Will be populated from DB
   DASHBOARD_URL: "https://smartzone.reliancegeneral.co.in/",
   // USERNAME: "rfcpolicy",
   // PASSWORD: "Pass@123",
