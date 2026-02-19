@@ -430,6 +430,7 @@ async function captureErrorScreenshot(
 async function fillNationalForm(
   data = { username: "9364646564", password: "Pond@2123" }
 ) {
+  const formData = data;
   const jobId = data._jobIdentifier || `national_${Date.now()}`;
   let jobBrowser = null;
   let driver = null;
@@ -3111,6 +3112,37 @@ async function fillNationalForm(
 
     await driver.sleep(500);
 
+    await driver.sleep(500);
+
+    // Handle Discount/Percentage if provided
+    if (formData.discount) {
+      try {
+        console.log(`[${jobId}] Setting discount percentage to: ${formData.discount}`);
+        // Wait for the percentage input to be visible and enabled
+        const percentageInput = await driver.wait(
+          until.elementLocated(By.name("mcy_text_percentage_01")),
+          5000
+        );
+
+        await driver.wait(until.elementIsVisible(percentageInput), 5000);
+
+        // Clear existing value and type new one
+        await percentageInput.clear();
+        await percentageInput.sendKeys(Key.CONTROL + "a");
+        await percentageInput.sendKeys(Key.DELETE);
+        await percentageInput.sendKeys(formData.discount.toString());
+
+        // Trigger change event just in case
+        await driver.executeScript("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", percentageInput);
+
+        console.log(`[${jobId}] ✅ Discount percentage set to ${formData.discount}`);
+        await driver.sleep(500);
+      } catch (e) {
+        console.log(`[${jobId}] ⚠️ Failed to set discount percentage: ${e.message}`);
+        // Don't fail the whole job for this, but log it
+      }
+    }
+
     // Click Calculate Premium button
     try {
       console.log(`[${jobId}] Clicking Calculate Premium button...`);
@@ -3154,40 +3186,45 @@ async function fillNationalForm(
     }
 
     // Proceed For Payment Flow
-    try {
-      console.log("Clicking Proceed For Payment button...");
-      const proceedPaymentButton = By.xpath("//button[@name='main_btn_convert_01'] | //span[contains(., 'Proceed For payment')]/ancestor::button");
-      await safeClick(driver, proceedPaymentButton, 10000);
-      await driver.sleep(2000);
-      await waitForPortalLoaderToDisappear(driver);
-
-      console.log("Selecting Payment Option (Value 5)...");
-      // Find radio button with value="5"
-      const paymentRadio = By.xpath("//input[@type='radio' and @value='5']");
+    if (formData.Paymentmethod === "link") {
       try {
-        const radioElement = await driver.wait(until.elementLocated(paymentRadio), 5000);
-        // Use JS click for reliability with hidden/styled radio inputs
-        await driver.executeScript("arguments[0].click();", radioElement);
-        console.log("Clicked payment radio button (value=5)");
-      } catch (radioError) {
-        console.log("Could not find or click payment radio button (value=5):", radioError.message);
+        console.log("Payment method is 'link'. Initiating Proceed For Payment flow...");
+        console.log("Clicking Proceed For Payment button...");
+        const proceedPaymentButton = By.xpath("//button[@name='main_btn_convert_01'] | //span[contains(., 'Proceed For payment')]/ancestor::button");
+        await safeClick(driver, proceedPaymentButton, 10000);
+        await driver.sleep(2000);
+        await waitForPortalLoaderToDisappear(driver);
+
+        console.log("Selecting Payment Option (Value 5)...");
+        // Find radio button with value="5"
+        const paymentRadio = By.xpath("//input[@type='radio' and @value='5']");
+        try {
+          const radioElement = await driver.wait(until.elementLocated(paymentRadio), 5000);
+          // Use JS click for reliability with hidden/styled radio inputs
+          await driver.executeScript("arguments[0].click();", radioElement);
+          console.log("Clicked payment radio button (value=5)");
+        } catch (radioError) {
+          console.log("Could not find or click payment radio button (value=5):", radioError.message);
+        }
+        await driver.sleep(1000);
+
+        console.log("Clicking Send Payment Link button...");
+        const sendLinkButton = By.xpath("//button[@name='vQuote_btn_sendPayLink_01'] | //span[contains(., 'Send Payment Link')]/ancestor::button");
+        await safeClick(driver, sendLinkButton, 5000);
+        await driver.sleep(2000);
+        await waitForPortalLoaderToDisappear(driver);
+
+        console.log("Waiting for confirmation popup and clicking Close...");
+        // Both buttons have the same name, so we must distinguish by text content "Close"
+        const closeButton = By.xpath("//button[@name='alert_btn_data_01' and .//span[contains(text(), 'Close')]]");
+        await safeClick(driver, closeButton, 10000);
+        await driver.sleep(1000);
+
+      } catch (e) {
+        console.log("Proceed For Payment flow failed:", e.message);
       }
-      await driver.sleep(1000);
-
-      console.log("Clicking Send Payment Link button...");
-      const sendLinkButton = By.xpath("//button[@name='vQuote_btn_sendPayLink_01'] | //span[contains(., 'Send Payment Link')]/ancestor::button");
-      await safeClick(driver, sendLinkButton, 5000);
-      await driver.sleep(2000);
-      await waitForPortalLoaderToDisappear(driver);
-
-      console.log("Waiting for confirmation popup and clicking Close...");
-      // Both buttons have the same name, so we must distinguish by text content "Close"
-      const closeButton = By.xpath("//button[@name='alert_btn_data_01' and .//span[contains(text(), 'Close')]]");
-      await safeClick(driver, closeButton, 10000);
-      await driver.sleep(1000);
-
-    } catch (e) {
-      console.log("Proceed For Payment flow failed:", e.message);
+    } else {
+      console.log(`Payment method is '${formData.Paymentmethod || 'undefined'}', not 'link'. Skipping Payment flow.`);
     }
 
     console.log(`✅ [${jobId}] National Insurance form automation completed successfully!`);
@@ -3238,9 +3275,9 @@ async function fillNationalForm(
     };
   } finally {
     // Cleanup: Always close browser and delete cloned profile
-    // if (jobBrowser) {
-    //   await cleanupNationalJobBrowser(jobBrowser);
-    // }
+    if (jobBrowser) {
+      await cleanupNationalJobBrowser(jobBrowser);
+    }
   }
 }
 
