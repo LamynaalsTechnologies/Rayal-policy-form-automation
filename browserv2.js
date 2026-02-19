@@ -146,38 +146,92 @@ async function isUserLoggedIn(driver) {
  * @param {WebDriver} driver - Selenium WebDriver instance
  */
 async function performLogin(driver) {
-  console.log("→ Navigating to login page...");
-  await driver.get(CONFIG.LOGIN_URL);
-  await driver.sleep(2000);
+  const MAX_RETRIES = 3;
 
-  console.log("→ Filling login credentials...");
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    console.log(`🔄 Login attempt ${attempt}/${MAX_RETRIES}...`);
 
-  // Get captcha text
-  const captchaText = await getCaptchaText(driver, "reliance_captcha");
-  console.log("Captcha text:", captchaText);
+    try {
+      console.log("→ Navigating to login page...");
+      await driver.get(CONFIG.LOGIN_URL);
+      await driver.sleep(3000); // Wait for page load
 
-  // Fill login form
-  await driver.findElement(By.id("txtUserName")).sendKeys(CONFIG.USERNAME);
-  await driver.findElement(By.id("txtPassword")).sendKeys(CONFIG.PASSWORD);
-  await driver.sleep(2000);
-  await driver.findElement(By.id("CaptchaInputText")).sendKeys(captchaText);
-  await driver.findElement(By.id("btnLogin")).click();
+      console.log("→ Filling login credentials...");
 
-  console.log(
-    `→ Waiting ${CONFIG.LOGIN_TIMEOUT / 1000}s for login completion...`
-  );
+      // Use hardcoded credentials if CONFIG is empty (Reset for debugging/robustness)
+      const username = CONFIG.USERNAME || "rfcpolicy";
+      const password = CONFIG.PASSWORD || "Pass@123";
 
-  await driver.sleep(CONFIG.LOGIN_TIMEOUT);
+      if (!CONFIG.USERNAME) console.log("⚠️ Using hardcoded fallback username");
 
-  // Verify login was successful
-  const loginSuccess = await isUserLoggedIn(driver);
-  if (loginSuccess) {
-    console.log("✓ Login completed successfully!");
-    return true;
-  } else {
-    console.log("✗ Login failed or timed out");
-    return false;
+      // Get captcha text
+      console.log("📸 Capturing captcha...");
+      const captchaText = await getCaptchaText(driver, "reliance_captcha");
+
+      if (!captchaText) {
+        console.log("⚠️ Failed to extract captcha text, retrying...");
+        continue;
+      }
+      console.log("Captcha text:", captchaText);
+
+      // Fill login form
+      const userField = await driver.findElement(By.id("txtUserName"));
+      await userField.clear();
+      await userField.sendKeys(username);
+
+      const passField = await driver.findElement(By.id("txtPassword"));
+      await passField.clear();
+      await passField.sendKeys(password);
+
+      await driver.sleep(1000);
+      const captchaField = await driver.findElement(By.id("CaptchaInputText"));
+      await captchaField.clear();
+      await captchaField.sendKeys(captchaText);
+
+      await driver.sleep(1000);
+      const loginBtn = await driver.findElement(By.id("btnLogin"));
+      await loginBtn.click();
+
+      console.log(
+        `→ Waiting ${CONFIG.LOGIN_TIMEOUT / 1000}s for login completion...`
+      );
+
+      // Wait for either login success or error message
+      // checking for error message first might be faster if it appears quickly
+      try {
+        await driver.sleep(2000); // Short wait for processing
+
+        // check for specific error message mentioned by user
+        const errorElement = await driver.findElements(By.xpath("//span[contains(text(), 'Captcha is not valid')]"));
+
+        if (errorElement.length > 0 && await errorElement[0].isDisplayed()) {
+          console.log("⚠️ Captcha validation failed! Retrying...");
+          continue; // Retry loop
+        }
+      } catch (checkErr) {
+        // Ignore check error
+      }
+
+      await driver.sleep(CONFIG.LOGIN_TIMEOUT);
+
+      // Verify login was successful
+      const loginSuccess = await isUserLoggedIn(driver);
+      if (loginSuccess) {
+        console.log("✓ Login completed successfully!");
+        return true;
+      } else {
+        console.log("✗ Login failed or timed out");
+        // If not successful and we have retries left, loop will continue
+        if (attempt === MAX_RETRIES) return false;
+      }
+    } catch (err) {
+      console.error(`❌ Error during login attempt ${attempt}:`, err.message);
+      if (attempt === MAX_RETRIES) return false;
+      await driver.sleep(2000); // Wait before retry
+    }
   }
+
+  return false;
 }
 
 /**
@@ -317,7 +371,7 @@ async function initializeMasterSession(policyId = null) {
           provider: "reliance",
           isActive: true,
         });
-        
+
         if (creds) {
           console.log(
             `✓ Found credentials for clientId: ${policy.clientId} (username: ${creds.username})`

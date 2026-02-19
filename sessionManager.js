@@ -1113,4 +1113,8 @@ module.exports = {
   get isSessionActive() {
     return isSessionActive;
   },
+
+  // Export internal browser functions for direct use
+  isUserLoggedIn: async (driver) => isUserLoggedIn(driver),
+  performLogin: async (driver) => performLogin(driver),
 };

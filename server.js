@@ -350,7 +350,7 @@ const runPolicyJob = async (job) => {
 
     // Fetch credentials from DB
     console.log(`→ [${queueName}] Fetching ${companyName} credentials from database...`);
-    
+
     let creds = null;
     // Check if job has clientId and try to fetch specific credentials
     if (job.formData.clientId) {
@@ -360,14 +360,14 @@ const runPolicyJob = async (job) => {
         clientId: job.formData.clientId,
         isActive: true,
       });
-      
+
       if (creds) {
         console.log(`✓ [${queueName}] Found specific credentials for user: ${creds.username}`);
       } else {
         console.log(`⚠️ [${queueName}] No specific credentials found for clientId: ${job.formData.clientId}. Falling back to default.`);
       }
     }
-    
+
     // Fallback to default credentials if not found
     if (!creds) {
       creds = await ProviderCredential.findOne({
@@ -838,7 +838,7 @@ db.once("open", async () => {
       _id: data?._id,
       policyId: data?.policyId,
       userId: data?.userId,
-      clientId:data?.clientId,
+      clientId: data?.clientId,
 
       username: "rfcpolicy",
       password: "Pass@123",

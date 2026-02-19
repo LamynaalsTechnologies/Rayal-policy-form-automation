@@ -258,9 +258,27 @@ async function captureErrorScreenshot(
       attemptNumber,
       errorStage
     );
-    screenshotUrl = await uploadScreenshotToS3(screenshot, screenshotKey);
 
-    console.log(`📸 Error screenshot uploaded to S3: ${screenshotUrl}`);
+    // === OPTIMIZATION: Always save local copy first for reliability ===
+    const localScreenshotDir = path.join(__dirname, "error_screenshots");
+    if (!fs.existsSync(localScreenshotDir)) {
+      fs.mkdirSync(localScreenshotDir, { recursive: true });
+    }
+    const localFilename = `error_${jobIdentifier}_${errorStage}_${Date.now()}.png`;
+    const localPath = path.join(localScreenshotDir, localFilename);
+
+    // Save locally
+    fs.writeFileSync(localPath, screenshot, "base64");
+    console.log(`📸 Error screenshot saved locally: ${localPath}`);
+
+    // Attempt S3 upload (might fail if credentials missing)
+    try {
+      screenshotUrl = await uploadScreenshotToS3(screenshot, screenshotKey);
+      console.log(`📸 Error screenshot uploaded to S3: ${screenshotUrl}`);
+    } catch (s3Err) {
+      console.warn(`⚠️ S3 Upload failed (using local copy): ${s3Err.message}`);
+      screenshotUrl = localPath; // Fallback to local path string
+    }
 
     // Also capture page source for debugging (optional)
     try {
@@ -1030,7 +1048,9 @@ async function fillRelianceForm(
     const clientId = data.clientId?.$oid || data.clientId || null;
     console.log(`📋 [${jobId}] Job clientId: ${clientId || 'not specified'}`);
 
-    jobBrowser = await createJobBrowser(jobId, clientId);
+    // FORCE NULL to skip "Switching Master Session" logic as per user request
+    // This avoids the "invalid session id" error loop when switching users
+    jobBrowser = await createJobBrowser(jobId, null);
     driver = jobBrowser.driver;
 
     console.log(`✅ [${jobId}] Browser ready with active session!`);
@@ -1040,7 +1060,26 @@ async function fillRelianceForm(
     await driver.get("https://smartzone.reliancegeneral.co.in/Login/IMDLogin");
     await driver.sleep(3000);
 
-    // === STEP 1: Check if cloned session is expired ===
+    // === OPTIMIZATION: Explicit Login Check for New Window ===
+    // As per user request: "not even try to login on the single page so create the new window and use that properly"
+    // We check if we are logged in. If not, we perform login right here.
+    const { isUserLoggedIn, performLogin } = require("./sessionManager");
+    const isLoggedIn = await isUserLoggedIn(driver);
+
+    if (!isLoggedIn) {
+      console.log("⚠️ Session not active in new window. Performing explicit login...");
+      const loginSuccess = await performLogin(driver);
+      if (!loginSuccess) {
+        throw new Error("Explicit login failed in new window.");
+      }
+      console.log("✅ Explicit login successful! Proceeding...");
+    } else {
+      console.log("✅ Session verified active in new window.");
+    }
+
+    // === STEP 1: Check if cloned session is expired (Legacy check disabled) ===
+    // DISABLED as per user request ("i dont want the helth chek process")
+    /*
     // This detects if we cloned an expired session and attempts to login on cloned browser
     const credentials = {
       username: data.username || "rfcpolicy",
@@ -1060,6 +1099,8 @@ async function fillRelianceForm(
         "Cloned session login failed after all attempts. Job will retry."
       );
     }
+    */
+    console.log("⚠️ SKIPPED Session Health Check (User Request)");
 
     // === STEP 1.1: Close popup modal if present ===
     try {
@@ -4580,9 +4621,9 @@ async function fillRelianceForm(
   }
   finally {
     // Cleanup: Always close browser and delete cloned profile
-    // if (jobBrowser) {
-    //   await cleanupJobBrowser(jobBrowser);
-    // }
+    if (jobBrowser) {
+      await cleanupJobBrowser(jobBrowser);
+    }
   }
 }
 
