@@ -152,8 +152,7 @@ class MasterSessionRecovery {
       // Level 1: Soft Recovery
       if (this.recoveryAttempts.soft.count < this.recoveryAttempts.soft.max) {
         console.log(
-          `🔧 LEVEL 1: Soft Recovery (attempt ${
-            this.recoveryAttempts.soft.count + 1
+          `🔧 LEVEL 1: Soft Recovery (attempt ${this.recoveryAttempts.soft.count + 1
           }/${this.recoveryAttempts.soft.max})`
         );
 
@@ -172,8 +171,7 @@ class MasterSessionRecovery {
       // Level 2: Hard Recovery
       if (this.recoveryAttempts.hard.count < this.recoveryAttempts.hard.max) {
         console.log(
-          `🔨 LEVEL 2: Hard Recovery (attempt ${
-            this.recoveryAttempts.hard.count + 1
+          `🔨 LEVEL 2: Hard Recovery (attempt ${this.recoveryAttempts.hard.count + 1
           }/${this.recoveryAttempts.hard.max})`
         );
 
@@ -194,8 +192,7 @@ class MasterSessionRecovery {
         this.recoveryAttempts.nuclear.count < this.recoveryAttempts.nuclear.max
       ) {
         console.log(
-          `☢️  LEVEL 3: Nuclear Recovery (attempt ${
-            this.recoveryAttempts.nuclear.count + 1
+          `☢️  LEVEL 3: Nuclear Recovery (attempt ${this.recoveryAttempts.nuclear.count + 1
           }/${this.recoveryAttempts.nuclear.max})`
         );
 
@@ -561,7 +558,7 @@ async function initializeMasterSession(policyId = null) {
           provider: "reliance",
           isActive: true,
         });
-        
+
         if (creds) {
           console.log(
             `✓ Found credentials for clientId: ${policy.clientId} (username: ${creds.username})`
@@ -756,13 +753,13 @@ async function switchMasterSessionCredentials(clientId) {
     console.log(`\\n${'='.repeat(60)}`);
     console.log(`  🔄 SWITCHING MASTER SESSION CREDENTIALS`);
     console.log(`${'='.repeat(60)}\\n`);
-    
+
     console.log(`→ Current logged-in clientId: ${currentLoggedInClientId || 'default'}`);
     console.log(`→ Requested clientId: ${clientId || 'default'}\\n`);
 
     // Fetch credentials for the requested clientId
     let creds = null;
-    
+
     if (clientId) {
       console.log(`→ Fetching credentials for clientId: ${clientId}...`);
       creds = await ProviderCredential.findOne({
@@ -770,14 +767,14 @@ async function switchMasterSessionCredentials(clientId) {
         provider: "reliance",
         isActive: true,
       });
-      
+
       if (creds) {
         console.log(`✓ Found credentials for clientId: ${clientId} (username: ${creds.username})`);
       } else {
         console.log(`⚠ No credentials found for clientId: ${clientId}. Using default credentials.`);
       }
     }
-    
+
     if (!creds) {
       console.log("→ Fetching default Reliance credentials from database...");
       creds = await ProviderCredential.findOne({
@@ -785,7 +782,7 @@ async function switchMasterSessionCredentials(clientId) {
         isActive: true,
       });
     }
-    
+
     if (!creds) {
       throw new Error(
         "No active Reliance credentials found in the database. Please check the ProviderCredential collection."
@@ -793,7 +790,7 @@ async function switchMasterSessionCredentials(clientId) {
     }
 
     console.log(`✓ Using credentials for: ${creds.username}`);
-    
+
     // Update CONFIG with new credentials
     CONFIG.USERNAME = creds.username;
     CONFIG.PASSWORD = creds.password;
@@ -822,11 +819,11 @@ async function switchMasterSessionCredentials(clientId) {
       sessionLastChecked = new Date();
       currentLoggedInClientId = creds.clientId || null;
       currentLoggedInUserId = creds.userId || null;
-      
+
       console.log(`${'='.repeat(60)}`);
       console.log(`  ✅ CREDENTIALS SWITCHED SUCCESSFULLY`);
       console.log(`${'='.repeat(60)}\\n`);
-      
+
       return true;
     } else {
       console.error("❌ Re-login failed with new credentials!\\n");
@@ -855,16 +852,16 @@ async function switchMasterSessionCredentials(clientId) {
 async function createJobBrowser(jobId, clientId = null) {
   try {
     console.log(`\\n📋 [Job ${jobId}] Creating cloned browser...`);
-    
+
     // Step 0: Check if we need to switch credentials for this user
     // if (userId && userId !== currentLoggedInUserId) {
     //   console.log(`\\n🔄 [Job ${jobId}] Different userId detected!`);
     //   console.log(`   Current: ${currentLoggedInUserId || 'default'}`);
     //   console.log(`   Required: ${userId}`);
     //   console.log(`   → Switching master session credentials...\\n`);
-      
+
     //   await switchMasterSessionCredentials(userId);
-      
+
     //   console.log(`✅ [Job ${jobId}] Master session now using credentials for userId: ${userId}\\n`);
     // } else if (userId) {
     //   console.log(`✅ [Job ${jobId}] Master session already using correct credentials for userId: ${userId}`);
@@ -877,9 +874,9 @@ async function createJobBrowser(jobId, clientId = null) {
       console.log(`   Current: ${currentLoggedInClientId || 'default'}`);
       console.log(`   Required: ${clientId}`);
       console.log(`   → Switching master session credentials...\\n`);
-      
+
       await switchMasterSessionCredentials(clientId);
-      
+
       console.log(`✅ [Job ${jobId}] Master session now using credentials for clientId: ${clientId}\\n`);
     } else if (clientId) {
       console.log(`✅ [Job ${jobId}] Master session already using correct credentials for clientId: ${clientId}`);
