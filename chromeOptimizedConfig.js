@@ -88,7 +88,8 @@ function getOptimizedChromeOptions(profilePath, config = {}) {
   );
 
   // ===== OPTIONAL: HEADLESS MODE =====
-  if (config.headless) {
+  const shouldRunHeadless = config.headless !== undefined ? config.headless : (process.env.HEADLESS === "true");
+  if (shouldRunHeadless) {
     options.addArguments("--headless=new"); // Use new headless mode
     options.addArguments("--disable-blink-features=AutomationControlled"); // Avoid detection
   }

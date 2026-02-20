@@ -12,7 +12,7 @@ async function waitForLoaderToDisappear(driver, timeout = 30000) {
   try {
     // Wait for any loading indicators to disappear
     await driver.sleep(2000);
-    
+
     // Try to find and wait for loader to disappear
     const loaderSelectors = [
       By.css(".loader"),
@@ -20,7 +20,7 @@ async function waitForLoaderToDisappear(driver, timeout = 30000) {
       By.css("[class*='spinner']"),
       By.id("loader"),
     ];
-    
+
     for (const selector of loaderSelectors) {
       try {
         const loader = await driver.findElement(selector);
@@ -152,19 +152,19 @@ async function isNationalUserLoggedIn(driver) {
     // Check if we're on login page (not logged in) or dashboard (logged in)
     const currentUrl = await driver.getCurrentUrl();
     const loginElements = await driver.findElements(By.name("log_txtfield_iUsername_01"));
-    
+
     // If we're on login page or login elements exist, we're not logged in
     if (loginElements.length > 0 || currentUrl.includes("/signin/login")) {
       console.log("→ User is NOT logged in -> on login page");
       return false;
     }
-    
+
     // Check if we're on the post-login URL (home/hcontent)
     if (currentUrl.includes("/home/hcontent") || currentUrl.includes("/nicportal/home")) {
       console.log("✓ User is logged in -> on dashboard/home page");
       return true;
     }
-    
+
     // If we're not on login page and not on home page, try navigating to home to verify
     if (!currentUrl.includes("/home")) {
       console.log("→ Current URL doesn't match expected post-login URL, checking...");
@@ -186,7 +186,7 @@ async function isNationalUserLoggedIn(driver) {
         return false;
       }
     }
-    
+
     // If we're not on login page, assume logged in
     console.log("✓ User appears to be logged in");
     return true;
@@ -210,7 +210,7 @@ async function performNationalLogin(driver) {
   try {
     // Wait for page to load
     await waitForLoaderToDisappear(driver);
-    
+
     // Select INTERMEDIARY from dropdown (Material Design)
     let dropdown;
     try {
@@ -227,11 +227,11 @@ async function performNationalLogin(driver) {
         await driver.wait(until.elementLocated(dropdown), 10000);
       }
     }
-    
+
     const dropdownElement = await driver.findElement(dropdown);
     await dropdownElement.click();
     await driver.sleep(2000);
-    
+
     // Find and click INTERMEDIARY option
     const intermediaryOption = await driver.wait(
       until.elementLocated(By.xpath("//mat-option[contains(., 'INTERMEDIARY')]")),
@@ -244,7 +244,7 @@ async function performNationalLogin(driver) {
     // Select BROKER POSP from second dropdown
     // Note: The second dropdown might appear after selecting INTERMEDIARY
     await driver.sleep(2000); // Wait for second dropdown to appear
-    
+
     // Try to find the second dropdown - it might be the same selector or a different one
     // Look for all mat-select elements and use the second one, or try to find by different attributes
     let secondDropdown;
@@ -275,9 +275,9 @@ async function performNationalLogin(driver) {
         console.log("Alternative approach also failed, continuing...");
       }
     }
-    
+
     await driver.sleep(2000);
-    
+
     // Find and click BROKER POSP option
     try {
       const brokerOption = await driver.wait(
@@ -325,7 +325,7 @@ async function performNationalLogin(driver) {
     );
     await driver.wait(until.elementIsVisible(loginButton), 10000);
     await driver.wait(until.elementIsEnabled(loginButton), 10000);
-    
+
     try {
       await loginButton.click();
       console.log("✓ Login button clicked (regular click)");
@@ -384,6 +384,9 @@ function createMasterProfileOptions() {
   // Don't pre-create Demo directory - let Chrome create it
 
   const options = new chrome.Options();
+  if (process.env.HEADLESS === "true") {
+    options.addArguments("--headless=new");
+  }
   options.addArguments(`--user-data-dir=${PATHS.BASE_PROFILE}`);
   options.addArguments("--profile-directory=Demo");
   options.addArguments("--no-first-run");
@@ -417,7 +420,7 @@ function createMasterProfileOptions() {
         console.log(`✓ Using Chrome binary: ${bin}`);
         break;
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
   return options;
@@ -430,6 +433,9 @@ function createMasterProfileOptions() {
  */
 function createClonedProfileOptions(clonedProfileInfo) {
   const options = new chrome.Options();
+  if (process.env.HEADLESS === "true") {
+    options.addArguments("--headless=new");
+  }
   options.addArguments(`--user-data-dir=${clonedProfileInfo.userDataDir}`);
   options.addArguments(
     `--profile-directory=${clonedProfileInfo.profileDirectory}`
@@ -461,7 +467,7 @@ function createClonedProfileOptions(clonedProfileInfo) {
         options.setChromeBinaryPath(bin);
         break;
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
   return options;
@@ -492,11 +498,11 @@ async function createMasterBrowser() {
         console.log(`✓ Using ChromeDriver: ${driverPath}`);
         break;
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
   let builder = new Builder().forBrowser("chrome").setChromeOptions(options);
-  
+
   if (serviceBuilder) {
     builder = builder.setChromeService(serviceBuilder);
   }
@@ -532,11 +538,11 @@ async function createClonedBrowser(clonedProfileInfo) {
         serviceBuilder = new ServiceBuilder(driverPath);
         break;
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
   let builder = new Builder().forBrowser("chrome").setChromeOptions(options);
-  
+
   if (serviceBuilder) {
     builder = builder.setChromeService(serviceBuilder);
   }

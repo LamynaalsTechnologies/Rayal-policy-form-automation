@@ -259,7 +259,9 @@ async function saveCookies(driver) {
  */
 function createMasterProfileOptions() {
   const options = new chrome.Options();
-  // options.addArguments("--headless=new")
+  if (process.env.HEADLESS === "true") {
+    options.addArguments("--headless=new");
+  }
   options.addArguments(`user-data-dir=${PATHS.BASE_PROFILE}`);
   options.addArguments("profile-directory=Demo");
   options.addArguments("--no-first-run");
@@ -282,7 +284,9 @@ function createMasterProfileOptions() {
  */
 function createClonedProfileOptions(clonedProfileInfo) {
   const options = new chrome.Options();
-  // options.addArguments("--headless=new");
+  if (process.env.HEADLESS === "true") {
+    options.addArguments("--headless=new");
+  }
   options.addArguments(`user-data-dir=${clonedProfileInfo.userDataDir}`);
   options.addArguments(
     `profile-directory=${clonedProfileInfo.profileDirectory}`

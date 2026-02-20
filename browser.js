@@ -11,14 +11,20 @@ async function getDriver() {
   if (singletonDriver) return singletonDriver;
 
   const options = new chrome.Options();
-  // options.addArguments("--headless=new");
+  if (process.env.HEADLESS === "true") {
+    options.addArguments("--headless=new");
+  }
   options.addArguments("--start-maximized");
+  options.addArguments("--no-sandbox");
+  options.addArguments("--disable-dev-shm-usage");
+  options.addArguments("--disable-blink-features=AutomationControlled");
+
   const userDataDir = path.join(__dirname, "chrome-profile");
   try {
     if (!fs.existsSync(userDataDir)) {
       fs.mkdirSync(userDataDir, { recursive: true });
     }
-  } catch {}
+  } catch { }
   options.addArguments(`--user-data-dir=${userDataDir}`);
 
   // Try to use system Chrome binary if found
@@ -36,7 +42,7 @@ async function getDriver() {
         console.log(`[selenium] Using Chrome binary: ${bin}`);
         break;
       }
-    } catch {}
+    } catch { }
   }
 
   // Prefer a local chromedriver if present
@@ -58,12 +64,12 @@ async function getDriver() {
       if (fs.existsSync(drv)) {
         try {
           fs.chmodSync(drv, 0o755);
-        } catch {}
+        } catch { }
         serviceBuilder = new chrome.ServiceBuilder(drv);
         console.log(`[selenium] Using chromedriver: ${drv}`);
         break;
       }
-    } catch {}
+    } catch { }
   }
 
   try {
@@ -78,8 +84,7 @@ async function getDriver() {
       : "selenium-manager auto";
     const msg = [
       "Failed to start Chrome driver.",
-      `Chrome binary: ${
-        (options.options_ && options.options_.binary) || "auto"
+      `Chrome binary: ${(options.options_ && options.options_.binary) || "auto"
       }`,
       `Tried driver: ${triedDriver}`,
       "Tips: Install google-chrome-stable and ensure chromedriver matches your Chrome version.",
@@ -249,7 +254,7 @@ async function ensureLoggedIn(driver, waitMsIfNeeded = 20000) {
   // If redirected to public uiic.co.in, force to portal login
   if (onPublicUiicRoot(currentUrl)) {
     console.log(
-      "Redirected to public uiic.co.in → forcing portal login page..."
+      "Redirected to public uiic.co.in \u2192 forcing portal login page..."
     );
     await driver.get(loginUrl);
     currentUrl = await driver.getCurrentUrl();
@@ -284,15 +289,15 @@ async function ensureLoggedIn(driver, waitMsIfNeeded = 20000) {
   // After login or if already authenticated, ensure we are on portal home
   try {
     currentUrl = await driver.getCurrentUrl();
-  } catch {}
+  } catch { }
   if (onPublicUiicRoot(currentUrl) || !currentUrl.includes("/GCWebPortal/")) {
     try {
       await driver.get(homeUrl);
-    } catch {}
+    } catch { }
   } else if (!currentUrl.includes("HomeAction.do")) {
     try {
       await driver.get(homeUrl);
-    } catch {}
+    } catch { }
   }
 
   // --- Case 3: Already logged in (sanity check) ---
@@ -341,15 +346,20 @@ async function ensureCleanState(driver) {
   try {
     const handles = await driver.getAllWindowHandles();
     console.log(`[cleanup] Skipped. Tabs open: ${handles.length}`);
-  } catch {}
+  } catch { }
 }
 
 async function createFreshDriver() {
   console.log("[driver] Creating fresh driver instance");
 
   const options = new chrome.Options();
-  // options.addArguments("--headless=new");
+  if (process.env.HEADLESS === "true") {
+    options.addArguments("--headless=new");
+  }
   options.addArguments("--start-maximized");
+  options.addArguments("--no-sandbox");
+  options.addArguments("--disable-dev-shm-usage");
+  options.addArguments("--disable-blink-features=AutomationControlled");
 
   // Use the same profile directory but add additional options to handle conflicts
   const userDataDir = path.join(__dirname, "chrome-profile");
@@ -357,7 +367,7 @@ async function createFreshDriver() {
     if (!fs.existsSync(userDataDir)) {
       fs.mkdirSync(userDataDir, { recursive: true });
     }
-  } catch {}
+  } catch { }
 
   // Add options to handle profile conflicts
   options.addArguments(`--user-data-dir=${userDataDir}`);
@@ -386,7 +396,7 @@ async function createFreshDriver() {
         console.log(`[selenium] Using Chrome binary: ${bin}`);
         break;
       }
-    } catch {}
+    } catch { }
   }
 
   // Prefer a local chromedriver if present
@@ -408,12 +418,12 @@ async function createFreshDriver() {
       if (fs.existsSync(drv)) {
         try {
           fs.chmodSync(drv, 0o755);
-        } catch {}
+        } catch { }
         serviceBuilder = new chrome.ServiceBuilder(drv);
         console.log(`[selenium] Using chromedriver: ${drv}`);
         break;
       }
-    } catch {}
+    } catch { }
   }
 
   try {
@@ -433,8 +443,7 @@ async function createFreshDriver() {
       : "selenium-manager auto";
     const msg = [
       "Failed to start Chrome driver.",
-      `Chrome binary: ${
-        (options.options_ && options.options_.binary) || "auto"
+      `Chrome binary: ${(options.options_ && options.options_.binary) || "auto"
       }`,
       `Tried driver: ${triedDriver}`,
       "Tips: Install google-chrome-stable and ensure chromedriver matches your Chrome version.",
@@ -472,12 +481,17 @@ async function createFreshDriverFromBaseProfile(baseProfileDir) {
     );
     try {
       fs.mkdirSync(tempProfileDir, { recursive: true });
-    } catch {}
+    } catch { }
   }
 
   const options = new chrome.Options();
-  // options.addArguments("--headless=new");
+  if (process.env.HEADLESS === "true") {
+    options.addArguments("--headless=new");
+  }
   options.addArguments("--start-maximized");
+  options.addArguments("--no-sandbox");
+  options.addArguments("--disable-dev-shm-usage");
+  options.addArguments("--disable-blink-features=AutomationControlled");
   options.addArguments(`--user-data-dir=${tempProfileDir}`);
   options.addArguments("--no-first-run");
   options.addArguments("--no-default-browser-check");
@@ -498,7 +512,7 @@ async function createFreshDriverFromBaseProfile(baseProfileDir) {
         console.log(`[selenium] Using Chrome binary: ${bin}`);
         break;
       }
-    } catch {}
+    } catch { }
   }
 
   // Prefer a local chromedriver if present
@@ -520,12 +534,12 @@ async function createFreshDriverFromBaseProfile(baseProfileDir) {
       if (fs.existsSync(drv)) {
         try {
           fs.chmodSync(drv, 0o755);
-        } catch {}
+        } catch { }
         serviceBuilder = new chrome.ServiceBuilder(drv);
         console.log(`[selenium] Using chromedriver: ${drv}`);
         break;
       }
-    } catch {}
+    } catch { }
   }
 
   try {
@@ -552,7 +566,7 @@ async function createFreshDriverFromBaseProfile(baseProfileDir) {
 function cloneDirectoryRecursive(srcDir, destDir) {
   try {
     fs.mkdirSync(destDir, { recursive: true });
-  } catch {}
+  } catch { }
   if (!fs.existsSync(srcDir)) return;
   const entries = fs.readdirSync(srcDir, { withFileTypes: true });
   for (const entry of entries) {
@@ -569,7 +583,7 @@ function cloneDirectoryRecursive(srcDir, destDir) {
         if (stat.size > 25 * 1024 * 1024) continue;
         fs.copyFileSync(srcPath, destPath);
       }
-    } catch {}
+    } catch { }
   }
 }
 
@@ -621,11 +635,15 @@ async function createChromeDriver(profileName = "InsurancePortalProfile") {
   await fs.copy(baseChromePath, tempProfilePath);
 
   // Set Chrome options
-  const options = new chrome.Options()
-    // .addArguments("--headless=new")
-    .addArguments(`--user-data-dir=${profilePath}`) // ← FIXED: Use unique profilePath!
-    .addArguments("--start-maximized")
-    .addArguments("--disable-blink-features=AutomationControlled");
+  const options = new chrome.Options();
+  if (process.env.HEADLESS === "true") {
+    options.addArguments("--headless=new");
+  }
+  options.addArguments(`--user-data-dir=${profilePath}`) // \u2190 FIXED: Use unique profilePath!
+  options.addArguments("--start-maximized")
+  options.addArguments("--no-sandbox")
+  options.addArguments("--disable-dev-shm-usage")
+  options.addArguments("--disable-blink-features=AutomationControlled");
 
   // Launch ChromeDriver
   const driver = await new Builder()
