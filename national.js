@@ -960,7 +960,16 @@ async function fillNationalForm(
 
     // Type the RTO location
     await rtoInput.clear();
-    await rtoInput.sendKeys("Chennai - North West");
+    let rtoText = data.RTOCity || "Chennai";
+    console.log("RTO Text: ", rtoText);
+    if (data.RTORegion) {
+      console.log("RTO Region found, using it");
+      rtoText = `${data.RTOCity} - ${data.RTORegion}`;
+    } else if (!data.RTOCity) {
+      console.log("RTO City not found, using fallback");
+      rtoText = "Chennai - North West";
+    }
+    await rtoInput.sendKeys(rtoText);
     await driver.sleep(2000); // Wait for autocomplete options to appear
 
     // Click on the first autocomplete option
@@ -3275,9 +3284,9 @@ async function fillNationalForm(
     };
   } finally {
     // Cleanup: Always close browser and delete cloned profile
-    if (jobBrowser) {
-      await cleanupNationalJobBrowser(jobBrowser);
-    }
+    // if (jobBrowser) {
+    //   await cleanupNationalJobBrowser(jobBrowser);
+    // }
   }
 }
 

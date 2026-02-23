@@ -887,6 +887,8 @@ db.once("open", async () => {
       vehicleModel: data?.vehicleModel,
       vehicleCC: data?.vehicleCC,
       rtoCityLocation: data?.rtoCityLocation,
+      RTORegion: data?.RTORegion,
+      RTOCity: data?.RTOCity,
       idv: data?.idv,
       manufacturingYear: data?.manufacturingYear,
       manufacturingMonth: data?.manufacturingMonth,
