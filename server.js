@@ -1076,10 +1076,10 @@ app.get("/api/job-status/:captchaId", async (req, res) => {
     const ObjectId = require("mongodb").ObjectId;
     const captchaObjectId = new ObjectId(captchaId);
 
-    // Find job by captchaId reference
+    // Find job by captchaId reference (use lean for plain object)
     const job = await jobQueueCollection.findOne({
       captchaId: captchaObjectId,
-    });
+    }).lean();
 
     if (!job) {
       return res.status(404).json({
@@ -1092,10 +1092,25 @@ app.get("/api/job-status/:captchaId", async (req, res) => {
     // Generate presigned URLs for each error log entry that has a screenshotKey
     const errorLogs = job.errorLogs || [];
     const enrichedErrorLogs = await Promise.all(errorLogs.map(async (log) => {
-      const logCopy = { ...log };
-      if (log.screenshotKey) {
+      const logCopy = { ...(log.toObject ? log.toObject() : log) };
+      let s3Key = logCopy.screenshotKey;
+
+      // Fallback: extract key from screenshotUrl if screenshotKey is missing
+      if (!s3Key && logCopy.screenshotUrl && logCopy.screenshotUrl.includes('.amazonaws.com/')) {
         try {
-          const presignedUrl = await getPresignedUrl(log.screenshotKey);
+          const urlParts = logCopy.screenshotUrl.split('.amazonaws.com/');
+          if (urlParts.length > 1) {
+            s3Key = urlParts[1];
+            console.log(`🔍 Extracted S3 key from URL: ${s3Key}`);
+          }
+        } catch (e) {
+          console.warn("⚠️ Failed to extract S3 key from URL:", e.message);
+        }
+      }
+
+      if (s3Key) {
+        try {
+          const presignedUrl = await getPresignedUrl(s3Key);
           if (presignedUrl) {
             logCopy.screenshotUrl = presignedUrl;
           }

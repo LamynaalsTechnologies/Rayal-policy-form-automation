@@ -3398,10 +3398,10 @@ async function fillNationalForm(
     };
   } finally {
     // Cleanup: Always close browser and delete cloned profile
-    // if (jobBrowser) {
-    //   console.log(`[${jobId}] Cleaning up browser and session data...`);
-    //   await cleanupNationalJobBrowser(jobBrowser);
-    // }
+    if (jobBrowser) {
+      console.log(`[${jobId}] Cleaning up browser and session data...`);
+      await cleanupNationalJobBrowser(jobBrowser);
+    }
   }
 }
 
