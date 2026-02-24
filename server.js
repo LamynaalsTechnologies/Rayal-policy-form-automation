@@ -47,7 +47,8 @@ const cleanupOldData = async () => {
     'brisk_certificates',
     'brisk-certificates',
     'reliance_pdf',
-    'reliance_captcha'
+    'reliance_captcha',
+    'temp_uploads'
   ];
 
   for (const dirName of pathsToClean) {
