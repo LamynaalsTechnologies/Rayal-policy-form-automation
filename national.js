@@ -427,6 +427,65 @@ async function captureErrorScreenshot(
   return { screenshotUrl, screenshotKey, pageSourceUrl, pageSourceKey };
 }
 
+/**
+ * Checks for on-page validation errors (like Discount or IDV errors)
+ * and takes a screenshot/throws an error if found.
+ */
+async function checkForValidationErrors(driver, data, stage) {
+  try {
+    console.log(`[National] Checking for validation errors at stage: ${stage}...`);
+
+    // 1. Check for generic mat-error hints (catches Discount errors like "Maximum available discount(%):0")
+    // Note: User explicitly requested to skip this check (2026-02-24)
+    /*
+    const errorHints = await driver.findElements(By.css("mat-hint.mat-error, .mat-mdc-form-field-error, .mat-error, .text-danger"));
+
+    for (const hint of errorHints) {
+      if (await hint.isDisplayed()) {
+        const errorText = (await hint.getText()).trim();
+        if (errorText) {
+          console.error(`❌ [National] Validation error detected at ${stage}: ${errorText}`);
+
+          // Capture screenshot before throwing
+          const { screenshotUrl } = await captureErrorScreenshot(driver, new Error(errorText), data, `${stage}_validation_error`);
+
+          const finalError = new Error(`Validation Error: ${errorText}`);
+          finalError.screenshotUrl = screenshotUrl;
+          finalError.stage = stage;
+          throw finalError;
+        }
+      }
+    }
+    */
+
+    // 2. specifically check for IDV error message which might be in a different container or class
+    // Based on the screenshot, it's red text below the input: "IDV can't be less than XXXXX"
+    const idvErrorXpath = "//mat-hint[contains(text(), \"IDV can't be less than\")] | //div[contains(@class, 'mat-error') and contains(text(), \"IDV can't be less than\")]";
+    const idvErrors = await driver.findElements(By.xpath(idvErrorXpath));
+
+    for (const error of idvErrors) {
+      if (await error.isDisplayed()) {
+        const errorText = (await error.getText()).trim();
+        console.error(`❌ [National] IDV validation error detected: ${errorText}`);
+
+        const { screenshotUrl } = await captureErrorScreenshot(driver, new Error(errorText), data, `${stage}_idv_error`);
+
+        const finalError = new Error(`IDV Validation Error: ${errorText}`);
+        finalError.screenshotUrl = screenshotUrl;
+        finalError.stage = stage;
+        throw finalError;
+      }
+    }
+
+  } catch (err) {
+    if (err.message.includes("Validation Error") || err.message.includes("IDV Validation Error")) {
+      throw err; // Re-throw our custom validation errors
+    }
+    console.log(`[National] Error while checking for validation errors (ignored): ${err.message}`);
+  }
+}
+
+
 async function fillNationalForm(
   data = { username: "9364646564", password: "Pond@2123" }
 ) {
@@ -990,7 +1049,7 @@ async function fillNationalForm(
     await driver.wait(until.elementIsEnabled(makeInput), 15000);
 
     await makeInput.clear();
-    await makeInput.sendKeys("BAJAJ");
+    await makeInput.sendKeys(data.vehicleMake || "BAJAJ");
     await driver.sleep(2000); // Wait for autocomplete options to appear
 
     // Click on the first autocomplete option
@@ -1011,7 +1070,7 @@ async function fillNationalForm(
     await driver.wait(until.elementIsEnabled(modelInput), 15000);
 
     await modelInput.clear();
-    await modelInput.sendKeys("PULSAR 150 (2024-2025)"); // Default model - Honda SHINE model variant
+    await modelInput.sendKeys(data.vehicleModel || "PULSAR 150 (2024-2025)"); // Default model - Honda SHINE model variant
     await driver.sleep(2000); // Wait for autocomplete options to appear
 
     // Click on the first autocomplete optionm
@@ -1032,7 +1091,7 @@ async function fillNationalForm(
     await driver.wait(until.elementIsEnabled(variantInput), 15000);
 
     await variantInput.clear();
-    await variantInput.sendKeys("SINGLE DISC - BLUETOOTH (2024-2025)");
+    await variantInput.sendKeys(data.vehicleVariant || "SINGLE DISC - BLUETOOTH (2024-2025)");
     await driver.sleep(2000); // Wait for autocomplete options to appear
 
     // Click on the first autocomplete option
@@ -1051,8 +1110,11 @@ async function fillNationalForm(
     try {
       const percentageField = By.name("mcy_text_percentage_01");
       await safeType(driver, percentageField, "75", 15000);
+      await driver.sleep(1000); // Wait for potential error to appear
+      await checkForValidationErrors(driver, data, "discount_selection");
       await driver.sleep(500);
     } catch (e) {
+      if (e.message.includes("Validation Error")) throw e;
       console.log("Could not fill percentage field:", e.message);
     }
 
@@ -1067,11 +1129,14 @@ async function fillNationalForm(
       if (idvValue) {
         await safeType(driver, idvField, String(idvValue), 10000);
         console.log(`✅ Filled IDV value: ${idvValue}`);
+        await driver.sleep(1000); // Wait for potential error validation
+        await checkForValidationErrors(driver, data, "idv_filling");
         await driver.sleep(500);
       } else {
         console.log("No IDV value provided in data, skipping...");
       }
     } catch (e) {
+      if (e.message.includes("Validation Error")) throw e;
       console.log("Could not fill IDV field:", e.message);
     }
 
@@ -1125,8 +1190,22 @@ async function fillNationalForm(
       }
 
       console.log("Successfully clicked Generate Quick Quote button");
-      await driver.sleep(3000); // Wait for quote to generate
+      await driver.sleep(4000); // Wait for quote to generate or errors to appear
       await waitForPortalLoaderToDisappear(driver);
+
+      // Post-click verification: If button still exists and is displayed, check for errors
+      try {
+        const stillExists = await driver.findElements(By.name("mcy_button_quickQuote_01"));
+        if (stillExists.length > 0 && await stillExists[0].isDisplayed()) {
+          console.log("[National] Generate Quick Quote button still visible after click, checking for validation errors...");
+          await checkForValidationErrors(driver, data, "post_quote_generation_click_failure");
+        }
+      } catch (checkError) {
+        console.log("[National] Post-click button check failed (might have transitioned):", checkError.message);
+      }
+
+      // Final generic validation check
+      await checkForValidationErrors(driver, data, "post_quote_generation");
     } catch (e) {
       console.log("Generate Quick Quote button not found, trying alternative:", e.message);
 
@@ -1179,22 +1258,44 @@ async function fillNationalForm(
     try {
       console.log("Looking for OK button...");
       const okButton = By.name("confirm_btn_yes_01");
-      await safeClick(driver, okButton, 5000);
-      console.log("Clicked OK button");
-      await driver.sleep(1000);
+      const okBtn = await driver.wait(until.elementLocated(okButton), 5000);
+      if (await okBtn.isDisplayed()) {
+        await safeClick(driver, okButton, 5000);
+        console.log("✅ Clicked OK button");
+        await driver.sleep(1000);
+      } else {
+        console.log("OK button located but not visible, skipping...");
+      }
     } catch (e) {
-      console.log("OK button not found or not needed:", e.message);
+      console.log("OK button not found or not needed at this stage:", e.message);
     }
 
     // Click Convert Quote button
     try {
       console.log("Looking for Convert Quote button...");
       const convertButton = By.name("main_btn_convert_01");
-      await safeClick(driver, convertButton, 5000);
-      console.log("Clicked Convert Quote button");
-      await driver.sleep(2000);
+      const convertBtn = await driver.wait(until.elementLocated(convertButton), 5000);
+
+      if (await convertBtn.isDisplayed() && await convertBtn.isEnabled()) {
+        await safeClick(driver, convertButton, 5000);
+        console.log("✅ Clicked Convert Quote button");
+        await driver.sleep(2000);
+      } else {
+        throw new Error("Convert Quote button is visible but not clickable (disabled or hidden)");
+      }
     } catch (e) {
-      console.log("Convert Quote button not found:", e.message);
+      console.error(`❌ [National] Convert Quote button error: ${e.message}`);
+      const { screenshotUrl } = await captureErrorScreenshot(driver, e, data, "convert_quote_failure");
+
+      let friendlyMessage = "Convert Quote button not found. This usually means the quote was not generated correctly or there was a system delay.";
+      if (e.name === "TimeoutError") {
+        friendlyMessage = "The Convert Quote screen did not load in time. Please check the website status or the input data.";
+      }
+
+      const err = new Error(friendlyMessage);
+      err.screenshotUrl = screenshotUrl;
+      err.stage = "post-quote-generation";
+      throw err;
     }
 
     // Click Create New Customer
@@ -2336,9 +2437,6 @@ async function fillNationalForm(
     await driver.sleep(1000);
 
 
-    // === POST-CUSTOMER CREATION STEPS ===
-    console.log("Handling post-customer creation steps...");
-
     // === FINANCIER INTEREST SECTION ===
     if (data.hasFinancier) {
       console.log("Financier Interest is applicable (hasFinancier=true). Processing section...");
@@ -3262,13 +3360,29 @@ async function fillNationalForm(
   } catch (error) {
     console.error(`[${jobId}] [nationalForm] Error:`, error.message || error);
 
-    // Capture error screenshot using centralized handler
-    const errorDetails = await captureErrorScreenshot(
-      driver,
-      error,
-      data,
-      "form-error"
-    );
+    const isValidationError =
+      error.message.includes("Validation Error") ||
+      error.message.includes("IDV Validation Error") ||
+      error.message.includes("Convert Quote button") ||
+      error.message.includes("not found") ||
+      error.stage === "post-quote-generation" ||
+      error.stage === "post_quote_generation_click_failure";
+
+    const errorStage = error.stage || "login-form";
+
+    // Only capture a new screenshot if the error doesn't already have one attached
+    let errorDetails = { screenshotUrl: error.screenshotUrl };
+    if (!errorDetails.screenshotUrl) {
+      console.log(`[National] Capturing late-stage error screenshot for: ${error.message}`);
+      errorDetails = await captureErrorScreenshot(
+        driver,
+        error,
+        data,
+        errorStage === "login-form" ? "form-error" : errorStage
+      );
+    } else {
+      console.log(`[National] Using previously captured screenshot: ${errorDetails.screenshotUrl}`);
+    }
 
     return {
       success: false,
@@ -3279,12 +3393,13 @@ async function fillNationalForm(
       pageSourceUrl: errorDetails.pageSourceUrl,
       pageSourceKey: errorDetails.pageSourceKey,
       timestamp: new Date(),
-      stage: "login-form", // Indicate this is a login form error
-      postSubmissionFailed: false,
+      stage: isValidationError ? "post-calculation" : errorStage, // Map validation/critical errors to post-calculation to avoid retries
+      postSubmissionFailed: isValidationError, // Stop retries for these critical errors
     };
   } finally {
     // Cleanup: Always close browser and delete cloned profile
     // if (jobBrowser) {
+    //   console.log(`[${jobId}] Cleaning up browser and session data...`);
     //   await cleanupNationalJobBrowser(jobBrowser);
     // }
   }

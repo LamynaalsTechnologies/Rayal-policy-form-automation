@@ -509,6 +509,7 @@ const runPolicyJob = async (job) => {
             lastError: errorLog.errorMessage,
             lastErrorCode: errorCode,
             lastErrorTimestamp: errorLog.timestamp,
+            lastScreenshotUrl: errorLog.screenshotUrl,
             lastAttemptAt: new Date(),
             failureType: failureType,
             processingTimeMs: processingTimeMs
@@ -526,6 +527,8 @@ const runPolicyJob = async (job) => {
             $set: {
               status: JOB_STATUS.FAILED_POST_SUBMISSION,
               failedAt: new Date(),
+              lastError: errorLog.errorMessage,
+              lastScreenshotUrl: errorLog.screenshotUrl,
               finalError: errorLog,
             },
           }
@@ -887,6 +890,7 @@ db.once("open", async () => {
       vehicleModel: data?.vehicleModel,
       vehicleCC: data?.vehicleCC,
       rtoCityLocation: data?.rtoCityLocation,
+      vehicleVariant: data?.vehicleVariant,
       RTORegion: data?.RTORegion,
       RTOCity: data?.RTOCity,
       idv: data?.idv,
