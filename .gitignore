@@ -207,10 +207,10 @@ screenshots/
 downloads/
 
 # Automation temporary directories
-cloned_profiles/
-error_screenshots/
-local-screenshots/
-brisk_certificates/
-reliance_pdf/
-reliance_captcha*
+# cloned_profiles/
+# error_screenshots/
+# local-screenshots/
+# brisk_certificates/
+# reliance_pdf/
+# reliance_captcha*
 
