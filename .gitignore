@@ -11,10 +11,8 @@ chrome-profile*
 *.log
 chrome_debug.log
 
-# Saved login cookies
+# saved login cookies
 reliance-cookies.json
-cloned_profiles
-cloned_profiles*
 # Environment variables
 .env
 .env.local
@@ -207,3 +205,12 @@ vite-app/.vite/
 *.log
 screenshots/
 downloads/
+
+# Automation temporary directories
+cloned_profiles/
+error_screenshots/
+local-screenshots/
+brisk_certificates/
+reliance_pdf/
+reliance_captcha*
+
