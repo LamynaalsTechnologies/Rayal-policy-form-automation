@@ -32,6 +32,66 @@ const getPresignedUrl = async (key) => {
     return null;
   }
 };
+
+/**
+ * 🧹 Startup Cleanup Routine
+ * Deletes temporary directories and orphaned page source files
+ */
+const cleanupOldData = async () => {
+  console.log("\n🧹 Starting server startup cleanup...");
+  const pathsToClean = [
+    'cloned_profiles',
+    'error_screenshots',
+    'local-screenshots',
+    'screenshots',
+    'brisk_certificates',
+    'brisk-certificates',
+    'reliance_pdf',
+    'reliance_captcha'
+  ];
+
+  for (const dirName of pathsToClean) {
+    const dirPath = path.join(__dirname, dirName);
+    try {
+      if (fs.existsSync(dirPath)) {
+        // Use recursive delete for directories
+        fs.rmSync(dirPath, { recursive: true, force: true });
+        console.log(`  🗑️  Cleared directory: ${dirName}`);
+      }
+      // Recreate the directory so it's ready for use
+      fs.mkdirSync(dirPath, { recursive: true });
+    } catch (err) {
+      console.error(`  ⚠️  Failed to clean ${dirName}:`, err.message);
+    }
+  }
+
+  // Clean up specific temp files in the root
+  try {
+    const files = fs.readdirSync(__dirname);
+    const tempFilePatterns = [
+      f => f.startsWith('temp-page-source-') && f.endsWith('.html'),
+      f => f.startsWith('national_login_page_') && f.endsWith('.png'),
+      f => f === 'reliance_captcha.png'
+    ];
+
+    let deletedCount = 0;
+    for (const file of files) {
+      if (tempFilePatterns.some(pattern => pattern(file))) {
+        fs.unlinkSync(path.join(__dirname, file));
+        deletedCount++;
+      }
+    }
+    if (deletedCount > 0) {
+      console.log(`  🗑️  Cleared ${deletedCount} orphaned temporary files from root`);
+    }
+  } catch (err) {
+    console.error("  ⚠️  Failed to clean temporary files:", err.message);
+  }
+  console.log("✨ Cleanup completed!\n");
+};
+
+// Run cleanup immediately on script load
+cleanupOldData().catch(err => console.error("Cleanup error:", err));
 const {
   getDriver,
   openNewTab,
@@ -253,7 +313,13 @@ const processRelianceQueue = async () => {
     // Get pending jobs from database (oldest first)
     const availableSlots = MAX_PARALLEL_JOBS - activeRelianceJobs;
     const pendingJobs = await jobQueueCollection
-      .find({ status: JOB_STATUS.PENDING })
+      .find({
+        status: JOB_STATUS.PENDING,
+        $or: [
+          { nextRetryAt: { $exists: false } }, // New jobs
+          { nextRetryAt: { $lte: new Date() } }, // Ready for retry
+        ],
+      })
       .sort({ createdAt: 1 })
       .limit(availableSlots)
       .toArray();
@@ -476,12 +542,15 @@ const runPolicyJob = async (job) => {
         : "LoginFormError";
       const severity = isPostSubmissionFailure ? 'critical' : 'warning';
 
+      // Use proper extracted message if available, otherwise fallback to Selenium error
+      const finalErrorMessage = result?.onPageError || result?.error || "Unknown error";
+
       // Create enhanced error log with structured codes
       const errorLog = {
         timestamp: new Date(),
         attemptNumber: newAttemptCount,
         errorCode: errorCode,
-        errorMessage: result?.error || "Unknown error",
+        errorMessage: finalErrorMessage,
         errorType: failureType,
         severity: severity,
         stage: result?.stage || (isPostSubmissionFailure ? "post-submission" : "login-form"),
@@ -910,6 +979,7 @@ db.once("open", async () => {
           : "",
       // Coverage options
       zeroDepreciation: data?.zeroDepreciation,
+      zeroDepreciationPercentage: data?.zeroDepreciationPercentage,
       tppdRestrict: data?.tppdRestrict,
       paCover: data?.paCover,
       // Financier details
@@ -1018,6 +1088,23 @@ app.get("/api/job-status/:captchaId", async (req, res) => {
       });
     }
 
+    // Generate presigned URLs for each error log entry that has a screenshotKey
+    const errorLogs = job.errorLogs || [];
+    const enrichedErrorLogs = await Promise.all(errorLogs.map(async (log) => {
+      const logCopy = { ...log };
+      if (log.screenshotKey) {
+        try {
+          const presignedUrl = await getPresignedUrl(log.screenshotKey);
+          if (presignedUrl) {
+            logCopy.screenshotUrl = presignedUrl;
+          }
+        } catch (err) {
+          console.warn(`⚠️ Failed to generate presigned URL for log ${log.attemptNumber}:`, err.message);
+        }
+      }
+      return logCopy;
+    }));
+
     // Prepare response data
     const responseData = {
       // IDs
@@ -1037,7 +1124,7 @@ app.get("/api/job-status/:captchaId", async (req, res) => {
       // Error information
       hasErrors: (job.errorLogs && job.errorLogs.length > 0) || false,
       errorCount: job.errorLogs ? job.errorLogs.length : 0,
-      errorLogs: job.errorLogs || [],
+      errorLogs: enrichedErrorLogs,
       lastError: job.lastError || null,
       lastErrorTimestamp: job.lastErrorTimestamp || null,
       finalError: job.finalError || null,
@@ -1047,8 +1134,8 @@ app.get("/api/job-status/:captchaId", async (req, res) => {
       lastModalError: job.lastModalError || null,
 
       // Screenshots
-      screenshotUrls: job.errorLogs
-        ? job.errorLogs.map((e) => e.screenshotUrl).filter(Boolean)
+      screenshotUrls: enrichedErrorLogs
+        ? enrichedErrorLogs.map((e) => e.screenshotUrl).filter(Boolean)
         : [],
 
       // Timestamps

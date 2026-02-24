@@ -241,11 +241,29 @@ async function captureErrorScreenshot(
   let screenshotKey = null;
   let pageSourceUrl = null;
   let pageSourceKey = null;
+  let onPageError = null;
 
   try {
     if (!driver) {
       console.log("⚠️  No driver available for screenshot");
-      return { screenshotUrl, screenshotKey, pageSourceUrl, pageSourceKey };
+      return { screenshotUrl, screenshotKey, pageSourceUrl, pageSourceKey, onPageError };
+    }
+
+    // Try to extract on-page error message from #containerMain if it exists
+    try {
+      onPageError = await driver.executeScript(`
+        var container = document.getElementById('containerMain');
+        if (container && (container.style.display !== 'none' || container.offsetHeight > 0)) {
+          // Extract text and clean up whitespace, ignoring script/style tags if any
+          return container.innerText.trim();
+        }
+        return null;
+      `);
+      if (onPageError) {
+        console.log("🚩 Extracted on-page error message:", onPageError);
+      }
+    } catch (e) {
+      console.log("⚠️ Could not check for on-page error message:", e.message);
     }
 
     const screenshot = await driver.takeScreenshot();
@@ -299,31 +317,8 @@ async function captureErrorScreenshot(
       console.log("⚠️  Could not capture page source:", sourceErr.message);
     }
 
-    // Log to MongoDB if available
-    if (data._jobId && data._jobQueueCollection) {
-      const errorLog = {
-        timestamp: new Date(),
-        attemptNumber: attemptNumber,
-        errorMessage: error.message || String(error),
-        errorType: error.name || "UnknownError",
-        errorStack: error.stack || null,
-        screenshotUrl: screenshotUrl,
-        screenshotKey: screenshotKey,
-        pageSourceUrl: pageSourceUrl,
-        pageSourceKey: pageSourceKey,
-        stage: errorStage,
-      };
-
-      await data._jobQueueCollection.updateOne(
-        { _id: data._jobId },
-        {
-          $push: { errorLogs: errorLog },
-          $set: { [`last_${errorStage}_error`]: errorLog },
-        }
-      );
-
-      console.log(`✅ Error logged to job queue (stage: ${errorStage})`);
-    }
+    // Log to MongoDB removed to centralize logging in server.js/caller
+    // We return the details instead
   } catch (captureErr) {
     console.error(
       `❌ Failed to capture/upload error screenshot:`,
@@ -331,7 +326,13 @@ async function captureErrorScreenshot(
     );
   }
 
-  return { screenshotUrl, screenshotKey, pageSourceUrl, pageSourceKey };
+  return {
+    screenshotUrl,
+    screenshotKey,
+    pageSourceUrl,
+    pageSourceKey,
+    onPageError // Return extracted on-page error to caller
+  };
 }
 
 /**
@@ -1039,6 +1040,8 @@ async function fillRelianceForm(
   let postSubmissionError = null;
   let postCalculationFailed = false;
   let postCalculationError = null;
+  let thisScreenshotUrl = null;
+  let thisScreenshotKey = null;
 
   try {
     // === STEP 0: Create cloned browser (already logged in!) ===
@@ -2110,15 +2113,41 @@ async function fillRelianceForm(
             if (!isChecked) {
               await driver.executeScript("arguments[0].click();", zeroDepCheckbox);
               console.log("Checked Zero Depreciation (Nil Depreciation) checkbox");
+              await driver.sleep(1000);
             } else {
               console.log("Zero Depreciation already checked");
+            }
+
+            // Fill Nil Depreciation Rate if provided
+            if (data.zeroDepreciationPercentage) {
+              console.log(`Filling Zero Depreciation Percentage: ${data.zeroDepreciationPercentage}`);
+              const zeroDepRateInput = await driver.wait(
+                until.elementLocated(By.id("txtNilDepriciationRate")),
+                10000
+              );
+              await driver.executeScript(
+                `
+                arguments[0].value = '${data.zeroDepreciationPercentage}';
+                var event = new Event('input', { bubbles: true });
+                arguments[0].dispatchEvent(event);
+                var changeEvent = new Event('change', { bubbles: true });
+                arguments[0].dispatchEvent(changeEvent);
+                var blurEvent = new Event('blur', { bubbles: true });
+                arguments[0].dispatchEvent(blurEvent);
+                if (typeof validateNildepriciation === 'function') {
+                  validateNildepriciation();
+                }
+              `,
+                zeroDepRateInput
+              );
+              console.log("Filled Zero Depreciation Percentage and triggered validation");
             }
             await driver.sleep(500);
           } else {
             console.log("Zero Depreciation not requested. Leaving as-is.");
           }
         } catch (err) {
-          console.log("Could not toggle Zero Depreciation checkbox:", err.message);
+          console.log("Could not toggle Zero Depreciation checkbox or set percentage:", err.message);
         }
 
         // IDV was already set before "Get Coverage Details" - skipping duplicate set
@@ -4457,12 +4486,21 @@ async function fillRelianceForm(
           postCalculationError = err.message;
 
           // Capture error screenshot using centralized handler
-          await captureErrorScreenshot(
+          const errorInfo = await captureErrorScreenshot(
             driver,
             err,
             data,
             "post-calculation-error"
           );
+
+          // Store onPageError if found
+          if (errorInfo.onPageError) {
+            postCalculationError = errorInfo.onPageError;
+          }
+
+          // Store screenshot details for the caller
+          thisScreenshotUrl = errorInfo.screenshotUrl;
+          thisScreenshotKey = errorInfo.screenshotKey;
         }
 
         console.log("All vehicle details filled successfully!");
@@ -4474,12 +4512,19 @@ async function fillRelianceForm(
         postSubmissionError = err.message;
 
         // Capture error screenshot using centralized handler
-        await captureErrorScreenshot(
+        const errorInfo = await captureErrorScreenshot(
           driver,
           err,
           data,
           "post-submission-error"
         );
+
+        if (errorInfo.onPageError) {
+          postSubmissionError = errorInfo.onPageError;
+        }
+
+        thisScreenshotUrl = errorInfo.screenshotUrl;
+        thisScreenshotKey = errorInfo.screenshotKey;
 
         // Don't throw error here, just set flag to mark job as failed
       }
@@ -4492,26 +4537,22 @@ async function fillRelianceForm(
 
     await driver.sleep(2000);
 
-    // Return failure if post-calculation failed
-    if (postCalculationFailed) {
-      hadError = true;
-      return {
+    // If any post-submission/calculation failure occurred, return it
+    if (postCalculationFailed || postSubmissionFailed) {
+      const finalResult = {
         success: false,
-        error: postCalculationError || "Post-calculation stage failed",
-        postSubmissionFailed: true, // Treat as post-submission failure
-        stage: "post-calculation",
-      };
-    }
-
-    // Return failure if post-submission failed (even if modal submission succeeded)
-    if (postSubmissionFailed) {
-      hadError = true;
-      return {
-        success: false,
-        error: postSubmissionError || "Post-submission stage failed",
+        error: postCalculationError || postSubmissionError || "Process failed",
         postSubmissionFailed: true,
-        stage: "post-submission",
+        stage: postCalculationFailed ? "post-calculation" : "post-submission",
       };
+
+      // Include screenshot details if we have them
+      if (typeof thisScreenshotUrl !== "undefined" && thisScreenshotUrl) {
+        finalResult.screenshotUrl = thisScreenshotUrl;
+        finalResult.screenshotKey = thisScreenshotKey;
+      }
+
+      return finalResult;
     }
 
     // === STEP 9: Call Brisk Certificate API ===
@@ -4528,7 +4569,10 @@ async function fillRelianceForm(
       if (briskResult.downloadUrl) {
         try {
           console.log("📥 Downloading Brisk Certificate PDF...");
-          briskPdfPath = await downloadBriskPDF(briskResult.downloadUrl, briskResult.policyId);
+          briskPdfPath = await downloadBriskPDF(
+            briskResult.downloadUrl,
+            briskResult.policyId
+          );
           console.log(`✅ Brisk PDF saved to: ${briskPdfPath}`);
         } catch (downloadError) {
           console.error("❌ Failed to download Brisk PDF:", downloadError.message);
@@ -4542,15 +4586,15 @@ async function fillRelianceForm(
           console.log("🔍 Looking for Reliance PDF...");
 
           // Find the latest PDF in reliance_pdf folder
-          const reliancePdfDir = path.join(__dirname, 'reliance_pdf');
+          const reliancePdfDir = path.join(__dirname, "reliance_pdf");
 
           if (fs.existsSync(reliancePdfDir)) {
             const pdfFiles = fs.readdirSync(reliancePdfDir)
-              .filter(file => file.endsWith('.pdf'))
-              .map(file => ({
+              .filter((file) => file.endsWith(".pdf"))
+              .map((file) => ({
                 name: file,
                 path: path.join(reliancePdfDir, file),
-                time: fs.statSync(path.join(reliancePdfDir, file)).mtime.getTime()
+                time: fs.statSync(path.join(reliancePdfDir, file)).mtime.getTime(),
               }))
               .sort((a, b) => b.time - a.time); // Sort by newest first
 
@@ -4560,16 +4604,22 @@ async function fillRelianceForm(
 
               // Merge PDFs, upload to AWS, and update policy
               console.log("🔄 Starting PDF merge and upload process...");
-              console.log("🔍 DEBUG BEFORE MERGE: data._id =", data._id);
-              console.log("🔍 DEBUG BEFORE MERGE: data.policyId =", data.policyId);
-              console.log("🔍 DEBUG BEFORE MERGE: Available keys =", Object.keys(data));
-              mergedPdfInfo = await mergePDFsAndUpload(reliancePdfPath, briskPdfPath, data);
-              console.log("✅ PDFs merged and uploaded successfully:", mergedPdfInfo);
+              mergedPdfInfo = await mergePDFsAndUpload(
+                reliancePdfPath,
+                briskPdfPath,
+                data
+              );
+              console.log(
+                "✅ PDFs merged and uploaded successfully:",
+                mergedPdfInfo
+              );
             } else {
               console.warn("⚠️  No PDF files found in reliance_pdf folder");
             }
           } else {
-            console.warn(`⚠️  Reliance PDF directory not found: ${reliancePdfDir}`);
+            console.warn(
+              `⚠️  Reliance PDF directory not found: ${reliancePdfDir}`
+            );
           }
         } catch (mergeError) {
           console.error("❌ Failed to merge PDFs:", mergeError.message);
@@ -4581,17 +4631,17 @@ async function fillRelianceForm(
         success: true,
         briskCertificate: {
           ...briskResult,
-          localPdfPath: briskPdfPath
+          localPdfPath: briskPdfPath,
         },
         reliancePdfPath: reliancePdfPath,
-        mergedPdf: mergedPdfInfo
+        mergedPdf: mergedPdfInfo,
       };
     } catch (briskError) {
       console.error("❌ Failed to create Brisk Certificate:", briskError.message);
       // Don't fail the entire job if Brisk API fails, just log it
       return {
         success: true,
-        briskCertificateError: briskError.message
+        briskCertificateError: briskError.message,
       };
     }
   } catch (e) {
@@ -4599,16 +4649,12 @@ async function fillRelianceForm(
     hadError = true;
 
     // Capture error screenshot using centralized handler
-    const errorDetails = await captureErrorScreenshot(
-      driver,
-      e,
-      data,
-      "form-error"
-    );
+    const errorDetails = await captureErrorScreenshot(driver, e, data, "form-error");
 
     return {
       success: false,
-      error: String(e.message || e),
+      error: errorDetails.onPageError || String(e.message || e),
+      onPageError: errorDetails.onPageError,
       errorStack: e.stack,
       screenshotUrl: errorDetails.screenshotUrl,
       screenshotKey: errorDetails.screenshotKey,
@@ -4618,8 +4664,7 @@ async function fillRelianceForm(
       stage: "login-form", // Indicate this is a login form error
       postSubmissionFailed: false,
     };
-  }
-  finally {
+  } finally {
     // Cleanup: Always close browser and delete cloned profile
     if (jobBrowser) {
       await cleanupJobBrowser(jobBrowser);
