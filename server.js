@@ -123,10 +123,14 @@ const {
   generateIdempotencyKey,
   checkDuplicateSubmission,
   createErrorLogEntry,
+  beautifyError,
   ERROR_CODES,
   ValidationError,
   PolicyAutomationError
 } = require("./lib/errorHandler");
+
+// ⏳ Utility for data stabilization delay
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const { ProviderCredential } = require("./models");
 
@@ -136,7 +140,7 @@ const db = mongoose.connection;
 
 // Persistent Queue System using MongoDB
 let activeRelianceJobs = 0;
-const MAX_PARALLEL_JOBS = 3; // Process 3 jobs in parallel using multiple tabs in same browser
+const MAX_PARALLEL_JOBS = 1; // Process only one job at a time as per user request
 let jobQueueCollection = null; // Will be initialized after DB connection
 let auditLogCollection = null; // For audit logging
 
@@ -225,7 +229,7 @@ const enqueueRelianceJob = async (formData, captchaId = null) => {
       status: JOB_STATUS.PENDING,
       createdAt: new Date(),
       attempts: 0,
-      maxAttempts: 3,
+      maxAttempts: 5,
       lastError: null,
       errorLogs: [],
       statusHistory: [{
@@ -730,7 +734,7 @@ const runPolicyJob = async (job) => {
         $inc: { attempts: 1 },
         $push: { errorLogs: errorLog },
         $set: {
-          lastError: e.message,
+          lastError: beautifyError(e, companyName),
           lastErrorCode: classified.code,
           lastErrorTimestamp: errorLog.timestamp,
           lastAttemptAt: new Date(),
@@ -836,9 +840,11 @@ db.once("open", async () => {
 
   if (pendingCount > 0) {
     console.log(
-      `[Job Queue] Found ${pendingCount} pending jobs, will start processing...`
+      `[Job Queue] Found ${pendingCount} pending/recovered jobs, will start processing...`
     );
     void processRelianceQueue();
+  } else {
+    console.log("[Job Queue] No pending jobs found on startup.");
   }
 
   const collection = db.collection("onlinePolicy");
@@ -867,27 +873,32 @@ db.once("open", async () => {
     let data = change?.fullDocument;
     const documentId = change.documentKey?._id;
 
-    // If this is an update operation and we don't have fullDocument, fetch it
-    if (!data && documentId) {
-      console.log("📥 Fetching full document from database...");
-      data = await collection.findOne({ _id: documentId });
+    // ⏳ User requested 3-4 second delay for data entry (Aadhaar/PAN sync)
+    console.log(`[MongoDB Watch] ⏳ Waiting 4 seconds for data stabilization (ID: ${documentId})...`);
+    await sleep(4000);
+
+    // 📥 Fetch FRESH full document AFTER the wait to ensure all fields are captured
+    console.log(`[MongoDB Watch] 📥 Fetching fresh document state...`);
+    data = await collection.findOne({ _id: documentId });
+
+    if (!data) {
+      console.warn(`[MongoDB Watch] ⚠️ Document ${documentId} not found after wait. Skipping.`);
+      return;
     }
+
+    // 🛡️ CRITICAL DATA CHECK: Only proceed if Aadhaar card is present
+    // This prevents creating "empty" jobs during initial insert while files are uploading
+    const hasAadhar = data?.aadharCard?.key;
+    const hasPan = data?.panCard?.key; // Also checking PAN as it's typically required
+
+    if (!hasAadhar) {
+      console.log(`[MongoDB Watch] ⏭️ Skipping ${change.operationType} for ${documentId} - Aadhaar card missing. Waiting for update...`);
+      return;
+    }
+
+    console.log(`[MongoDB Watch] ✅ Data verified for ${change.operationType} (ID: ${documentId}), processing policy...`);
 
     console.log("data: ******* ******* ******* ******* ******* ******* ", data);
-
-    // Skip if this is just a document update (not initial insert)
-    // We only want to process when aadharCard and panCard are present
-    if (change.operationType === "update") {
-      const hasAadhar = data?.aadharCard?.key;
-      const hasPan = data?.panCard?.key;
-
-      if (!hasAadhar || !hasPan) {
-        console.log("⏭️  Skipping update - waiting for both documents to be uploaded");
-        return;
-      }
-
-      console.log("✅ Both documents uploaded, processing policy...");
-    }
 
     // Get the Captcha document _id for reference
     const captchaId = data?._id;
@@ -1436,16 +1447,16 @@ server.listen(8800, async () => {
     console.log("  🚀 INITIALIZING RELIANCE AUTOMATION");
     console.log("=".repeat(60) + "\n");
 
-    await initializeMasterSession();
-    console.log("✅ Reliance master session initialized successfully\n");
+    // await initializeMasterSession();
+    // console.log("✅ Reliance master session initialized successfully\n");
 
     console.log("\n" + "=".repeat(60));
     console.log("  ✅ READY TO PROCESS JOBS");
     console.log("=".repeat(60));
-    console.log(
-      "📊 Reliance Session Status:",
-      JSON.stringify(getSessionStatus(), null, 2)
-    );
+    // console.log(
+    //   "📊 Reliance Session Status:",
+    //   JSON.stringify(getSessionStatus(), null, 2)
+    // );
     console.log("📊 National: Uses fresh login for each job (no master session)");
     console.log("=".repeat(60) + "\n");
   } catch (e) {

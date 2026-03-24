@@ -399,17 +399,24 @@ async function loginOnClonedBrowser(driver, jobId, credentials) {
     console.log(`⏳ [${jobId}] Waiting for login to complete...`);
     await driver.sleep(5000);
 
-    // Verify login successful by checking for dashboard elements
+    // Verify login successful by checking for dashboard elements OR URL patterns
     const motorsElements = await driver.findElements(By.id("divMainMotors"));
     const logoutElements = await driver.findElements(By.id("divLogout"));
+    const currentUrl = await driver.getCurrentUrl();
 
-    if (motorsElements.length > 0 || logoutElements.length > 0) {
+    if (
+      motorsElements.length > 0 ||
+      logoutElements.length > 0 ||
+      currentUrl.includes("?un=") ||
+      currentUrl.includes("FromImdLogin=fromlogin")
+    ) {
       console.log(`✅ [${jobId}] Login successful on cloned browser!`);
       return true;
     } else {
       console.error(
-        `❌ [${jobId}] Login verification failed - dashboard elements not found`
+        `❌ [${jobId}] Login verification failed - dashboard elements or success URL not found`
       );
+      console.log(`📄 [${jobId}] Current URL: ${currentUrl}`);
       return false;
     }
   } catch (error) {
@@ -515,9 +522,15 @@ async function checkAndRecoverClonedSession(driver, jobId, credentials) {
       return true;
     }
 
-    // Check 3: Check current URL
+    // Check 3: Check current URL for login success patterns
     const currentUrl = await driver.getCurrentUrl();
-    if (currentUrl.includes("/Login/IMDLogin") && !currentUrl.includes("?")) {
+    if (currentUrl.includes("?un=") || currentUrl.includes("FromImdLogin=fromlogin")) {
+      console.log(`✅ [${jobId}] Cloned session is ACTIVE - Success URL detected\n`);
+      return true;
+    }
+
+    // Check 4: Check if we are clearly on the login page
+    if (currentUrl.includes("/Login/IMDLogin") && (!currentUrl.includes("?") || currentUrl.includes("ReturnUrl"))) {
       console.error(
         `\n⚠️  [${jobId}] CLONED SESSION EXPIRED - Login URL detected!`
       );
@@ -1027,6 +1040,72 @@ function getStateName(stateCode) {
     "08": "RAJASTHAN"
   };
   return stateMap[stateCode] || "TAMIL NADU";
+}
+
+/**
+ * Beautifies technical Selenium errors into user-friendly messages
+ * @param {Error|string} error - The original error
+ * @returns {string} - User-friendly error message
+ */
+function beautifyError(error) {
+  const msg = typeof error === 'string' ? error : error.message || String(error);
+
+  // Handle Selenium TimeoutError
+  if (msg.includes("Wait timed out after")) {
+    const locatorMatch = msg.match(/By\(([^,]+), ([^)]+)\)/);
+    if (locatorMatch) {
+      const type = locatorMatch[1];
+      const value = locatorMatch[2];
+      
+      // --- SPECIFIC MAPPINGS (Reliance portal) ---
+      const mappings = {
+        "Two Wheeler Package Bundled": "Failed to select 'Two Wheeler Package Bundled' product. The menu might not have opened correctly.",
+        "ddlMotorProducts": "Failed to find or open the 'Motor Products' selection menu. The dashboard may not have loaded correctly.",
+        "ISPANNotAvailable": "Could not find the 'PAN Not Available' checkbox. The proposer details section might not have loaded correctly.",
+        "ddlobjBranchDetailAgentsHnin": "Failed to find the Agency/Branch selection menu on Reliance portal.",
+        "FirstName": "Could not fill 'First Name' field. The form might not be fully loaded or editable.",
+        "LastName": "Could not fill 'Last Name' field. The form might not be fully loaded or editable.",
+        "dob": "Date of Birth field not found or taking too long to respond.",
+        "ClientForm60DetailsWindow": "The Form 60 / Proposer details window did not appear or load correctly.",
+        "divMainMotors": "Could not find 'Motors' menu. The page might have failed to load.",
+        "txtUserName": "Login form did not load in time.",
+        "CaptchaInputText": "Captcha field not found.",
+        "btnFetchIDV": "Failed to click 'Get Coverage Details' or 'Fetch IDV' button.",
+        "ChkBox24": "PA to Owner Driver checkbox not found.",
+        "ChkBox10": "Zero Depreciation checkbox not found.",
+        "txtNilDepriciationRate": "Zero Depreciation Rate field not found.",
+        "VehicleHypothicated": "Vehicle Hypothecated checkbox not found.",
+        "AutoFinancierName": "Financier Name search field not found.",
+        "FinancierAddressVehicle": "Financier Address field not found."
+      };
+
+      for (const key in mappings) {
+        if (value.includes(key)) return mappings[key];
+      }
+
+      // --- GENERIC FALLBACK FOR IDs/Names ---
+      if (type === "css selector" && value.includes('id="')) {
+        const idMatch = value.match(/id="([^"]+)"/);
+        if (idMatch) {
+          const id = idMatch[1];
+          let friendly = id.replace(/^(txt|ddl|btn|chk|lbl|obj|Auto|Div)/, '');
+          friendly = friendly.replace(/([A-Z])/g, ' $1').trim();
+          friendly = friendly.charAt(0).toUpperCase() + friendly.slice(1);
+          return `Failed to interact with the '${friendly}' field/button on Reliance portal.`;
+        }
+      }
+      
+      return `Page element not found or took too long to load (${type}: ${value})`;
+    }
+    return "The page took too long to respond or an expected element did not appear.";
+  }
+
+  // Handle other common Selenium errors
+  if (msg.includes("no such element")) return "Expected page element could not be found.";
+  if (msg.includes("stale element reference")) return "Page changed unexpectedly while filling the form. Retrying might help.";
+  if (msg.includes("element click intercepted")) return "An overlay or popup blocked the form filling. Please try again.";
+
+  return msg;
 }
 
 async function fillRelianceForm(
@@ -4653,7 +4732,7 @@ async function fillRelianceForm(
 
     return {
       success: false,
-      error: errorDetails.onPageError || String(e.message || e),
+      error: errorDetails.onPageError || beautifyError(e),
       onPageError: errorDetails.onPageError,
       errorStack: e.stack,
       screenshotUrl: errorDetails.screenshotUrl,

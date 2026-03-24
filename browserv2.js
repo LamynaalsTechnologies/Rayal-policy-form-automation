@@ -62,16 +62,16 @@ function cloneChromeProfile(profileName) {
 
     ensureDirectoryExists(PATHS.CLONED_PROFILE_BASE);
 
-    console.log(`→ Cloning Chrome profile: ${profileName}`);
-    console.log(`   From: ${PATHS.MASTER_PROFILE}`);
-    console.log(`   To: ${clonedProfileDir}`);
+    // console.log(`→ Cloning Chrome profile: ${profileName}`);
+    // console.log(`   From: ${PATHS.MASTER_PROFILE}`);
+    // console.log(`   To: ${clonedProfileDir}`);
 
     // Copy the entire profile directory to Default
     if (fs.existsSync(PATHS.MASTER_PROFILE)) {
       copyDirectoryRecursive(PATHS.MASTER_PROFILE, clonedProfileDir);
-      console.log(`✓ Profile cloned successfully!`);
-      console.log(`   User Data Dir: ${clonedUserDataDir}`);
-      console.log(`   Profile Dir: Default`);
+      // console.log(`✓ Profile cloned successfully!`);
+      // console.log(`   User Data Dir: ${clonedUserDataDir}`);
+      // console.log(`   Profile Dir: Default`);
 
       return {
         userDataDir: clonedUserDataDir,
@@ -109,7 +109,8 @@ function copyDirectoryRecursive(source, destination) {
         fs.copyFileSync(sourcePath, destPath);
       } catch (err) {
         if (err.code === 'EBUSY' || err.code === 'EPERM') {
-          console.warn(`   ⚠️ Skipped locked file: ${file}`);
+          // Silence locked file warnings as they are expected when master is running
+          // console.warn(`   ⚠️ Skipped locked file: ${file}`);
         } else {
           throw err;
         }
@@ -129,14 +130,24 @@ function copyDirectoryRecursive(source, destination) {
  */
 async function isUserLoggedIn(driver) {
   try {
-    await driver.wait(
-      until.elementLocated(By.id("divLogout")),
-      CONFIG.CHECK_TIMEOUT
-    );
-    console.log("✓ User is logged in -> session is active");
-    return true;
+    // Check 1: URL Pattern (Reliability)
+    const currentUrl = await driver.getCurrentUrl();
+    if (currentUrl.includes("?un=") || currentUrl.includes("FromImdLogin=fromlogin")) {
+      console.log("✓ User is logged in -> URL contains success token");
+      return true;
+    }
+
+    // Check 2: Element Check (Fallback)
+    const logoutElements = await driver.findElements(By.id("divLogout"));
+    if (logoutElements.length > 0 && (await logoutElements[0].isDisplayed())) {
+      console.log("✓ User is logged in -> Logout element detected");
+      return true;
+    }
+
+    console.log("→ User is NOT logged in");
+    return false;
   } catch (error) {
-    console.log("→ User is NOT logged in -> session expired or new profile");
+    console.log("→ Error checking login status:", error.message);
     return false;
   }
 }
@@ -146,7 +157,7 @@ async function isUserLoggedIn(driver) {
  * @param {WebDriver} driver - Selenium WebDriver instance
  */
 async function performLogin(driver) {
-  const MAX_RETRIES = 3;
+  const MAX_RETRIES = 5;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     console.log(`🔄 Login attempt ${attempt}/${MAX_RETRIES}...`);
@@ -154,20 +165,28 @@ async function performLogin(driver) {
     try {
       console.log("→ Navigating to login page...");
       await driver.get(CONFIG.LOGIN_URL);
-      await driver.sleep(3000); // Wait for page load
+      
+      // Wait for login form to load (much better than fixed sleep)
+      try {
+        await driver.wait(until.elementLocated(By.id("txtUserName")), 10000);
+      } catch (e) {
+        console.log("→ Login page took too long to load or field not found");
+      }
+
+      // Check if we're already logged in (sometimes redirect happens)
+      if (await isUserLoggedIn(driver)) {
+        console.log("✓ Already logged in via redirect!");
+        return true;
+      }
 
       console.log("→ Filling login credentials...");
-
-      // Use hardcoded credentials if CONFIG is empty (Reset for debugging/robustness)
+      // ... same as before ...
       const username = CONFIG.USERNAME || "rfcpolicy";
       const password = CONFIG.PASSWORD || "Pass@123";
-
-      if (!CONFIG.USERNAME) console.log("⚠️ Using hardcoded fallback username");
 
       // Get captcha text
       console.log("📸 Capturing captcha...");
       const captchaText = await getCaptchaText(driver, "reliance_captcha");
-
       if (!captchaText) {
         console.log("⚠️ Failed to extract captcha text, retrying...");
         continue;
@@ -175,62 +194,72 @@ async function performLogin(driver) {
       console.log("Captcha text:", captchaText);
 
       // Fill login form
-      const userField = await driver.findElement(By.id("txtUserName"));
-      await userField.clear();
-      await userField.sendKeys(username);
+      await driver.findElement(By.id("txtUserName")).clear();
+      await driver.findElement(By.id("txtUserName")).sendKeys(username);
 
-      const passField = await driver.findElement(By.id("txtPassword"));
-      await passField.clear();
-      await passField.sendKeys(password);
+      await driver.findElement(By.id("txtPassword")).clear();
+      await driver.findElement(By.id("txtPassword")).sendKeys(password);
 
-      await driver.sleep(1000);
-      const captchaField = await driver.findElement(By.id("CaptchaInputText"));
-      await captchaField.clear();
-      await captchaField.sendKeys(captchaText);
+      await driver.sleep(500);
+      await driver.findElement(By.id("CaptchaInputText")).clear();
+      await driver.findElement(By.id("CaptchaInputText")).sendKeys(captchaText);
 
-      await driver.sleep(1000);
-      const loginBtn = await driver.findElement(By.id("btnLogin"));
-      await loginBtn.click();
+      await driver.sleep(500);
+      await driver.findElement(By.id("btnLogin")).click();
 
       console.log(
-        `→ Waiting ${CONFIG.LOGIN_TIMEOUT / 1000}s for login completion...`
+        `→ Waiting for login completion (max ${CONFIG.LOGIN_TIMEOUT / 1000}s)...`
       );
 
-      // Wait for either login success or error message
-      // checking for error message first might be faster if it appears quickly
+      // Intelligent wait for success indicators OR "Captcha invalid" error
       try {
-        await driver.sleep(2000); // Short wait for processing
+        await driver.wait(async () => {
+          const url = await driver.getCurrentUrl();
+          
+          // Pattern 1: Success URL
+          if (url.includes("?un=") || url.includes("FromImdLogin=fromlogin")) {
+            return true;
+          }
+          
+          // Pattern 2: Dashboard Elements
+          const dashboardElements = await driver.findElements(By.id("divMainMotors"));
+          if (dashboardElements.length > 0) return true;
+          
+          const logoutElements = await driver.findElements(By.id("divLogout"));
+          if (logoutElements.length > 0) return true;
 
-        // check for specific error message mentioned by user
-        const errorElement = await driver.findElements(By.xpath("//span[contains(text(), 'Captcha is not valid')]"));
+          // Pattern 3: Captcha Error (Stop waiting and fail attempt)
+          const captchaErrors = await driver.findElements(By.xpath("//span[contains(text(), 'Captcha is not valid')]"));
+          if (captchaErrors.length > 0 && await captchaErrors[0].isDisplayed()) {
+            throw new Error("CAPTCHA_INVALID");
+          }
 
-        if (errorElement.length > 0 && await errorElement[0].isDisplayed()) {
+          return false;
+        }, CONFIG.LOGIN_TIMEOUT);
+      } catch (waitError) {
+        if (waitError.message === "CAPTCHA_INVALID") {
           console.log("⚠️ Captcha validation failed! Retrying...");
-          continue; // Retry loop
+          continue;
         }
-      } catch (checkErr) {
-        // Ignore check error
+        console.log(`→ Wait finished: ${waitError.message}`);
       }
 
-      await driver.sleep(CONFIG.LOGIN_TIMEOUT);
-
-      // Verify login was successful
-      const loginSuccess = await isUserLoggedIn(driver);
-      if (loginSuccess) {
+      // Final verification
+      if (await isUserLoggedIn(driver)) {
         console.log("✓ Login completed successfully!");
         return true;
       } else {
-        console.log("✗ Login failed or timed out");
-        // If not successful and we have retries left, loop will continue
+        console.log("✗ Login verification failed for this attempt");
         if (attempt === MAX_RETRIES) return false;
+        await driver.get(CONFIG.LOGIN_URL); // Go back to login for next attempt
+        await driver.sleep(2000);
       }
     } catch (err) {
       console.error(`❌ Error during login attempt ${attempt}:`, err.message);
       if (attempt === MAX_RETRIES) return false;
-      await driver.sleep(2000); // Wait before retry
+      await driver.sleep(2000);
     }
   }
-
   return false;
 }
 
@@ -259,9 +288,12 @@ async function saveCookies(driver) {
  */
 function createMasterProfileOptions() {
   const options = new chrome.Options();
-  if (process.env.HEADLESS === "true") {
+  // Always run master in headless mode to avoid confusing the user with multiple windows
+  // unless explicitly requested otherwise via environment variable
+  if (process.env.MASTER_HEADLESS !== "false") {
     options.addArguments("--headless=new");
   }
+
   options.addArguments(`user-data-dir=${PATHS.BASE_PROFILE}`);
   options.addArguments("profile-directory=Demo");
   options.addArguments("--no-first-run");
@@ -450,12 +482,14 @@ async function initializeMasterSession(policyId = null) {
           `\n→ Cloned profile location: ${clonedProfileInfo.fullPath}`
         );
 
+/* 
         // Demonstrate: Open a new browser with cloned profile
         console.log("\n========================================");
         console.log("  TESTING CLONED PROFILE");
         console.log("========================================\n");
 
         await testClonedProfile(clonedProfileInfo);
+        */
       }
     }
 

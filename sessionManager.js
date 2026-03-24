@@ -34,7 +34,7 @@ const path = require("path");
 // ============================================
 
 const ProfilePoolManager = require("./profilePoolManager");
-const SessionHealthManager = require("./sessionHealthManager");
+// const SessionHealthManager = require("./sessionHealthManager");
 const {
   getMinimalChromeOptions,
   isRamDiskAvailable,
@@ -50,12 +50,12 @@ const profilePoolManager = new ProfilePoolManager({
   maxProfileLifetime: 30 * 60 * 1000, // 30 minutes
 });
 
-const sessionHealthManager = new SessionHealthManager({
-  sessionLifetime: 60 * 60 * 1000, // 1 hour
-  heartbeatInterval: 5 * 60 * 1000, // 5 minutes
-  warningThreshold: 0.8, // Warn at 80%
-  refreshThreshold: 0.9, // Refresh at 90%
-});
+// const sessionHealthManager = new SessionHealthManager({
+//   sessionLifetime: 60 * 60 * 1000, // 1 hour
+//   heartbeatInterval: 5 * 60 * 1000, // 5 minutes
+//   warningThreshold: 0.8, // Warn at 80%
+//   refreshThreshold: 0.9, // Refresh at 90%
+// });
 
 // ============================================
 // STATE MANAGEMENT
@@ -95,8 +95,8 @@ function getSessionStatus() {
 class MasterSessionRecovery {
   constructor() {
     this.recoveryAttempts = {
-      soft: { count: 0, max: 3 },
-      hard: { count: 0, max: 2 },
+      soft: { count: 0, max: 6 },
+      hard: { count: 0, max: 6 },
       nuclear: { count: 0, max: 1 },
     };
 
@@ -267,7 +267,9 @@ class MasterSessionRecovery {
       }
 
       console.log("   ✗ Re-login failed");
-      this.recordRecovery("soft", false, "Login failed");
+      const currentUrl = await masterDriver.getCurrentUrl();
+      console.log(`   📄 Current URL after failed re-login: ${currentUrl}`);
+      this.recordRecovery("soft", false, `Login failed. URL: ${currentUrl}`);
       return false;
     } catch (error) {
       console.log(`   ✗ Soft recovery error: ${error.message}`);
@@ -524,11 +526,34 @@ const recoveryManager = new MasterSessionRecovery();
 // SESSION INITIALIZATION
 // ============================================
 
+let isInitializing = false;
+let initializationPromise = null;
+
 /**
  * Initialize master session - called once on server start
  * This creates the master browser and ensures user is logged in
  */
 async function initializeMasterSession(policyId = null) {
+  if (isInitializing && initializationPromise) {
+    console.log("⏳ Initialization already in progress, waiting for existing promise...");
+    return initializationPromise;
+  }
+
+  isInitializing = true;
+  initializationPromise = _performInitialization(policyId);
+
+  try {
+    return await initializationPromise;
+  } finally {
+    isInitializing = false;
+    initializationPromise = null;
+  }
+}
+
+/**
+ * Internal initialization logic
+ */
+async function _performInitialization(policyId = null) {
   try {
     console.log("\n" + "=".repeat(60));
     console.log("  🔐 INITIALIZING MASTER SESSION");
@@ -596,17 +621,34 @@ async function initializeMasterSession(policyId = null) {
     if (creds.dashboardUrl) CONFIG.DASHBOARD_URL = creds.dashboardUrl;
 
     // Step 1: Create master browser (this creates the base profile directory)
-    console.log("📂 Creating master browser with profile...");
     masterDriver = await createMasterBrowser();
     console.log("✅ Master browser created\n");
+
+    /* 
+    // Ensure profile pool is initialized if optimizations are enabled
+    if (!optimizationsEnabled) {
+      console.log("🚀 Initializing performance optimizations...");
+      try {
+        await profilePoolManager.initialize();
+        console.log("✅ Profile pool ready\n");
+        optimizationsEnabled = true;
+      } catch (poolError) {
+        console.warn(
+          "⚠️  Profile pool initialization failed:",
+          poolError.message
+        );
+        optimizationsEnabled = false;
+      }
+    }
+    */
+    optimizationsEnabled = false; // Force disabled as per user request to remove "health something"
 
     // Step 2: Navigate to dashboard
     console.log("🌐 Navigating to dashboard...");
     await masterDriver.get(CONFIG.DASHBOARD_URL);
-    await masterDriver.sleep(3000);
 
     // Step 3: Check if already logged in
-    console.log("🔍 Checking login status...");
+    // console.log("🔐 Performing login check...");
     const loggedIn = await isUserLoggedIn(masterDriver);
 
     if (loggedIn) {
@@ -652,14 +694,14 @@ async function initializeMasterSession(policyId = null) {
       }
     }
 
-    // Step 6: Register session with health manager
-    console.log("💓 Registering session with health monitor...");
-    sessionHealthManager.registerSession(
-      "master_session",
-      masterDriver,
-      CONFIG.CREDENTIALS
-    );
-    console.log("✅ Session health monitoring active\n");
+    // Step 6: Register session with health manager (DISABLED as per user request)
+    // console.log("💓 Registering session with health monitor...");
+    // sessionHealthManager.registerSession(
+    //   "master_session",
+    //   masterDriver,
+    //   CONFIG.CREDENTIALS
+    // );
+    // console.log("✅ Session health monitoring active\n");
 
     console.log("=".repeat(60));
     console.log("  ✅ MASTER SESSION READY");
@@ -714,6 +756,13 @@ async function checkSession() {
  */
 async function reLoginIfNeeded() {
   try {
+    // Lazy initialization if master session hasn't been started
+    if (!masterDriver) {
+      console.log("🚀 Initializing master session on-demand...");
+      const initResult = await initializeMasterSession();
+      return initResult.success;
+    }
+
     const sessionValid = await checkSession();
 
     if (!sessionValid) {
