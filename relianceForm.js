@@ -1056,7 +1056,7 @@ function beautifyError(error) {
     if (locatorMatch) {
       const type = locatorMatch[1];
       const value = locatorMatch[2];
-      
+
       // --- SPECIFIC MAPPINGS (Reliance portal) ---
       const mappings = {
         "Two Wheeler Package Bundled": "Failed to select 'Two Wheeler Package Bundled' product. The menu might not have opened correctly.",
@@ -1094,7 +1094,7 @@ function beautifyError(error) {
           return `Failed to interact with the '${friendly}' field/button on Reliance portal.`;
         }
       }
-      
+
       return `Page element not found or took too long to load (${type}: ${value})`;
     }
     return "The page took too long to respond or an expected element did not appear.";

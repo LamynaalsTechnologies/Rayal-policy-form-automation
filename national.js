@@ -10,6 +10,7 @@ const fs = require("fs");
 const path = require("path");
 const { extractCaptchaText } = require("./Captcha");
 const { uploadScreenshotToS3, generateScreenshotKey } = require("./s3Uploader");
+const { beautifyError } = require("./lib/errorHandler");
 
 // Default form data for standalone execution
 const defaultFormData = {
@@ -491,59 +492,6 @@ async function checkForValidationErrors(driver, data, stage) {
  * @param {Error|string} error - The original error
  * @returns {string} - User-friendly error message
  */
-function beautifyError(error) {
-  const msg = typeof error === 'string' ? error : error.message || String(error);
-
-  // Handle Selenium TimeoutError
-  if (msg.includes("Wait timed out after")) {
-    const locatorMatch = msg.match(/By\(([^,]+), ([^)]+)\)/);
-    if (locatorMatch) {
-      const type = locatorMatch[1];
-      const value = locatorMatch[2];
-      
-      // --- SPECIFIC MAPPINGS (National portal) ---
-      const mappings = {
-        "log_txtfield_iUsername_01": "National portal username field did not load correctly.",
-        "log_pwd_iPassword_01": "National portal password field did not load correctly.",
-        "log_btn_login_01": "National portal login button not found or not clickable.",
-        "reg_dropdown_iType_02": "Failed to find the 'Intermediary' type dropdown.",
-        "INTERMEDIARY": "Failed to select 'INTERMEDIARY' option.",
-        "BROKER POSP": "Failed to select 'BROKER POSP' option.",
-        "main_btn_convert_01": "Failed to find the 'Proceed for Payment' button.",
-        "Calculate Premium": "Failed to find the 'Calculate Premium' link for the selected vehicle type.",
-        "vQuote_btn_sendPayLink_01": "Failed to find 'Send Payment Link' button.",
-        "Registration_Number": "Registration Number field not found or not editable.",
-        "Engine_Number": "Engine Number field not found.",
-        "Chassis_Number": "Chassis Number field not found."
-      };
-
-      for (const key in mappings) {
-        if (value.includes(key)) return mappings[key];
-      }
-
-      // --- GENERIC FALLBACK FOR IDs/Names ---
-      if (type === "css selector" && value.includes('id="')) {
-        const idMatch = value.match(/id="([^"]+)"/);
-        if (idMatch) {
-          const id = idMatch[1];
-          let friendly = id.replace(/^(txt|ddl|btn|chk|lbl|obj|Auto|Div)/, '');
-          friendly = friendly.replace(/([A-Z])/g, ' $1').trim();
-          friendly = friendly.charAt(0).toUpperCase() + friendly.slice(1);
-          return `Failed to interact with the '${friendly}' field/button on National portal.`;
-        }
-      }
-      
-      return `Page element not found or took too long to load on National portal (${type}: ${value})`;
-    }
-    return "The National Insurance portal took too long to respond.";
-  }
-
-  // Handle other common Selenium errors
-  if (msg.includes("no such element")) return "Expected page element could not be found on National portal.";
-  if (msg.includes("stale element reference")) return "Page changed unexpectedly. Retrying might help.";
-  
-  return msg;
-}
 
 async function fillNationalForm(
   data = { username: "9364646564", password: "Pond@2123" }

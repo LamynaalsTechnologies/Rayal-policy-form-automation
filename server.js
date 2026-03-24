@@ -548,7 +548,8 @@ const runPolicyJob = async (job) => {
       const severity = isPostSubmissionFailure ? 'critical' : 'warning';
 
       // Use proper extracted message if available, otherwise fallback to Selenium error
-      const finalErrorMessage = result?.onPageError || result?.error || "Unknown error";
+      const rawError = result?.onPageError || result?.error || "Unknown error";
+      const finalErrorMessage = beautifyError(rawError, companyName);
 
       // Create enhanced error log with structured codes
       const errorLog = {
