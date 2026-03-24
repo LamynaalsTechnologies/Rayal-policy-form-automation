@@ -397,6 +397,8 @@ const runPolicyJob = async (job) => {
   const jobIdentifier = `${job.formData.firstName}_${job._id}`;
   const JOB_TIMEOUT = 300000; // 5 minutes timeout per job
   const processingStartTime = Date.now();
+  const companyName = (job.formData.Companyname || job.formData.company || "reliance").toLowerCase();
+  const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
 
   // Log processing start
   await logAuditEntry('JOB_PROCESSING_STARTED', {
@@ -407,9 +409,7 @@ const runPolicyJob = async (job) => {
   });
 
   try {
-    // Normalize company name - check both Companyname and company fields, convert to lowercase
-    const companyName = (job.formData.Companyname || job.formData.company || "reliance").toLowerCase();
-    const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
+    // Normalize company name - derived at function start
 
     console.log(`\n${'═'.repeat(70)}`);
     console.log(`[${queueName}] 🔄 Processing ${companyName} form for: ${job.formData.firstName} ${job.formData.lastName}`);
