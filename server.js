@@ -48,7 +48,8 @@ const cleanupOldData = async () => {
     'brisk-certificates',
     'reliance_pdf',
     'reliance_captcha',
-    'temp_uploads'
+    'temp_uploads',
+    'cloned_profiles_national'
   ];
 
   for (const dirName of pathsToClean) {
@@ -209,15 +210,33 @@ const enqueueRelianceJob = async (formData, captchaId = null) => {
       console.warn(`[Reliance Queue] ⚠️ Duplicate submission detected for ${sanitizedData.firstName}`);
       console.warn(`   Existing Job ID: ${existingJob._id}, Status: ${existingJob.status}`);
 
+      // NEW logic: If the existing job is missing Aadhaar/PAN but the new data has it, update the job in-place
+      const needsAadharUpdate = sanitizedData.aadharCard?.key && !existingJob.formData.aadharCard?.key;
+      const needsPanUpdate = sanitizedData.panCard?.key && !existingJob.formData.panCard?.key;
+
+      if (needsAadharUpdate || needsPanUpdate) {
+        console.log(`[Reliance Queue] 🔄 Updating existing job ${existingJob._id} with missing document keys...`);
+        const updateFields = {};
+        if (needsAadharUpdate) updateFields["formData.aadharCard"] = sanitizedData.aadharCard;
+        if (needsPanUpdate) updateFields["formData.panCard"] = sanitizedData.panCard;
+
+        await jobQueueCollection.updateOne(
+          { _id: existingJob._id },
+          { $set: updateFields }
+        );
+        console.log(`[Reliance Queue] ✅ In-place update successful for job ${existingJob._id}`);
+      }
+
       // Log audit entry
       await logAuditEntry('DUPLICATE_DETECTED', {
         captchaId,
         customerName: `${sanitizedData.firstName} ${sanitizedData.lastName}`,
         existingJobId: existingJob._id,
-        existingJobStatus: existingJob.status
+        existingJobStatus: existingJob.status,
+        upgraded: needsAadharUpdate || needsPanUpdate
       });
 
-      // Return existing job ID instead of creating duplicate
+      // Return existing job ID
       return existingJob._id;
     }
 
@@ -893,8 +912,9 @@ db.once("open", async () => {
     const hasPan = data?.panCard?.key; // Also checking PAN as it's typically required
 
     if (!hasAadhar) {
-      console.log(`[MongoDB Watch] ⏭️ Skipping ${change.operationType} for ${documentId} - Aadhaar card missing. Waiting for update...`);
-      return;
+      console.log(`[MongoDB Watch] ⚠️ Aadhaar card missing for ${documentId} after 4s. Proceeding and waiting for possible update...`);
+    } else {
+      console.log(`[MongoDB Watch] ✅ Aadhaar card verified for ${documentId}.`);
     }
 
     console.log(`[MongoDB Watch] ✅ Data verified for ${change.operationType} (ID: ${documentId}), processing policy...`);
@@ -995,6 +1015,17 @@ db.once("open", async () => {
       zeroDepreciationPercentage: data?.zeroDepreciationPercentage,
       tppdRestrict: data?.tppdRestrict,
       paCover: data?.paCover,
+      paCoverCompany: data?.paCoverCompany,
+      paCoverAmount: data?.paCoverAmount,
+      nomineeName: data?.nomineeName,
+      nomineeRelation: data?.nomineeRelation,
+      otherRelationName: data?.otherRelationName,
+      appointeeName: data?.appointeeName,
+      nomineeDob: data?.nomineeDob?.$date
+        ? moment(data.nomineeDob.$date).format("DD-MM-YYYY")
+        : data?.nomineeDob
+          ? moment(data.nomineeDob).format("DD-MM-YYYY")
+          : "",
       // Financier details
       hasFinancier: data?.hasFinancier,
       financierType: data?.financierType,

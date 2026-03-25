@@ -610,6 +610,23 @@ async function checkAndRecoverClonedSession(driver, jobId, credentials) {
   }
 }
 
+const moment = require("moment");
+const { captureAndLogError } = require("./errorLogger");
+
+/**
+ * Calculates age from a date string in DD-MM-YYYY format
+ * @param {string} dobStr - Date of birth string
+ * @returns {number} Age in years
+ */
+const calculateAge = (dobStr) => {
+  if (!dobStr) return 0;
+  const birthDate = moment(dobStr, "DD-MM-YYYY");
+  if (!birthDate.isValid()) return 0;
+  return moment().diff(birthDate, "years");
+};
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * Create Brisk Certificate by calling the API
  * @param {Object} data - Form data containing customer and vehicle information
@@ -2047,33 +2064,66 @@ async function fillRelianceForm(
         );
         await driver.sleep(5000); // Wait longer for the API call to complete
 
-        // Click PA to Owner Driver checkbox to open modal
-        console.log("Clicking PA to Owner Driver checkbox to open modal...");
+        // PA to Owner Driver Handling
+        const isCompanyPA = data.paCover === true && (String(data.paCoverCompany).toLowerCase() === "company" || String(data.paCoverCompany).toLowerCase() === "reliance");
+
+        console.log("Checking PA to Owner Driver checkbox state...");
         const paOwnerDriverCheckbox = await driver.wait(
           until.elementLocated(By.id("ChkBox24")),
           10000
         );
-        await driver.executeScript(
-          "arguments[0].click();",
-          paOwnerDriverCheckbox
-        );
-        console.log("Clicked PA to Owner Driver checkbox, modal should open");
-        await driver.sleep(2000);
+        const isChecked = await paOwnerDriverCheckbox.isSelected();
+        console.log(`Current checkbox state: ${isChecked}, Wanted PA: ${isCompanyPA}`);
 
-        // Wait for modal to open and click "No" checkbox
-        console.log("Waiting for modal and clicking 'No' checkbox...");
-        try {
-          const noCheckbox = await driver.wait(
-            until.elementLocated(By.id("OnNoofDL")),
-            10000
-          );
-          await driver.wait(until.elementIsVisible(noCheckbox), 5000);
-          await driver.executeScript("arguments[0].click();", noCheckbox);
-          console.log("Clicked 'No' checkbox in PA to Owner Driver modal");
-          await driver.sleep(1000);
-        } catch (err) {
-          console.log("Error clicking 'No' checkbox in modal:", err.message);
+        let modalOpened = false;
+
+        if (isCompanyPA) {
+          if (!isChecked) {
+            console.log("PA wanted but not checked. Clicking checkbox...");
+            await driver.executeScript("arguments[0].click();", paOwnerDriverCheckbox);
+            modalOpened = true;
+            await driver.sleep(2000);
+          } else {
+            console.log("PA already checked. Not clicking checkbox as per user manual.");
+          }
+        } else {
+          // paCover is false - only click if we want to explicitly opt-out/No in modal
+          console.log("PA not wanted. Clicking checkbox to handle opt-out...");
+          await driver.executeScript("arguments[0].click();", paOwnerDriverCheckbox);
+          modalOpened = true;
+          await driver.sleep(2000);
         }
+
+        // Wait for modal to open and click "Yes" or "No" checkbox ONLY if we triggered it
+        if (modalOpened) {
+          console.log("Waiting for PA to Owner Driver modal...");
+          try {
+            if (isCompanyPA) {
+              // If PA Cover is with Reliance/Company, we must have valid DL (Yes)
+              console.log("PA Cover with Company enabled. Clicking 'Yes' for valid DL...");
+              const yesCheckbox = await driver.wait(
+                until.elementLocated(By.id("OnYesofDL")),
+                5000
+              );
+              await driver.executeScript("arguments[0].click();", yesCheckbox);
+              console.log("✅ Clicked 'Yes' checkbox in PA to Owner Driver modal");
+            } else {
+              // PA not wanted: Click 'No'
+              console.log("Clicking 'No' checkbox in PA to Owner Driver modal...");
+              const noCheckbox = await driver.wait(
+                until.elementLocated(By.id("OnNoofDL")),
+                5000
+              );
+              await driver.executeScript("arguments[0].click();", noCheckbox);
+              console.log("Clicked 'No' checkbox in PA to Owner Driver modal");
+            }
+            await driver.sleep(1000);
+          } catch (err) {
+            console.log("No modal appeared or error handling modal:", err.message);
+          }
+        }
+
+
 
         // Uncheck Helmet Cover checkbox
         console.log("Unchecking Helmet Cover checkbox...");
@@ -2231,6 +2281,7 @@ async function fillRelianceForm(
 
         // IDV was already set before "Get Coverage Details" - skipping duplicate set
         console.log("Skipping duplicate IDV set (already set before Get Coverage Details)");
+
 
         // === FINANCIER FIELDS HANDLING ===
         // Fill financier details BEFORE "Is Registration Address Same" checkbox
@@ -2748,6 +2799,133 @@ async function fillRelianceForm(
         await driver.sleep(2000);
 
         // Click "Calculate Premium" button
+
+
+        // === ULTIMATE FINAL STAGE: Fill Nominee Details for PA Cover after Premium Calculation ===
+        if (isCompanyPA) {
+          console.log("PA Cover enabled. Filling nominee details at ULTIMATE final stage (post-calculation)...");
+          try {
+            // Check if nominee section needs expansion
+            const needsExpansion = await driver.executeScript(`
+      var expandBtn = document.getElementById('ImgExpand1');
+      return expandBtn && expandBtn.style.display !== 'none';
+    `);
+
+            if (needsExpansion) {
+              console.log("Nominee section collapsed. Clicking expand button (ImgExpand1)...");
+              try {
+                const expandBtn = await driver.findElement(By.id("ImgExpand1"));
+                await driver.executeScript("arguments[0].click();", expandBtn);
+                await driver.sleep(1000);
+              } catch (expandErr) {
+                console.log("Could not find or click expand button:", expandErr.message);
+              }
+            }
+
+            // Fill Nominee Name
+            if (data.nomineeName) {
+              try {
+                const nomineeNameInput = await driver.findElement(By.id("txtPAOwnerCoverNomineeName"));
+                await driver.executeScript("arguments[0].value = arguments[1];", nomineeNameInput, data.nomineeName);
+                await driver.executeScript("arguments[0].dispatchEvent(new Event('blur'));", nomineeNameInput);
+                console.log("✅ Filled Nominee Name:", data.nomineeName);
+              } catch (e) { console.log("Failed to fill Nominee Name:", e.message); }
+            }
+
+            // Fill Nominee DOB and Age
+            if (data.nomineeDob) {
+              try {
+                const nomineeDobInput = await driver.findElement(By.id("Nominee_Date_Birth"));
+                await driver.executeScript("arguments[0].value = arguments[1];", nomineeDobInput, data.nomineeDob);
+                await driver.executeScript("arguments[0].dispatchEvent(new Event('change'));", nomineeDobInput);
+
+                const age = calculateAge(data.nomineeDob);
+                const ageInput = await driver.findElement(By.id("txtNomineeAge"));
+                await driver.executeScript("arguments[0].value = arguments[1];", ageInput, age);
+                console.log(`✅ Filled Nominee DOB: ${data.nomineeDob}, Calculated Age: ${age}`);
+              } catch (e) { console.log("Failed to fill Nominee DOB/Age:", e.message); }
+            }
+
+            // Select Nominee Relation - UPDATED TO NATIVE SELENIUM CLICKS
+            // Select Nominee Relation - STRICTLY NATIVE CLICKS
+            // Select Nominee Relation - Index-based Selection as per user's "123" plan
+            if (data.nomineeRelation) {
+              try {
+                const relationIndexMap = {
+                  'mother': 1,
+                  'spouse': 2,
+                  'husband': 2,
+                  'wife': 2,
+                  'son': 3,
+                  'legal heir': 4,
+                  'daughter': 5,
+                  'others': 6,
+                  'other': 6,
+                  'father': 7
+                };
+
+                let targetIndex = relationIndexMap[data.nomineeRelation?.toLowerCase()] || 6;
+                console.log(`Selecting relation index: ${targetIndex} for ${data.nomineeRelation}...`);
+
+                await driver.executeScript(`
+                  var w = $("#Nominee_RelationshipOwnerDriver").data("kendoDropDownList");
+                  if (w) {
+                    w.select(${targetIndex});
+                    w.trigger("change");
+                    // Trigger the portal's change function to show/hide "Other" field
+                    if (typeof OnchangeofRelatioship === "function") OnchangeofRelatioship();
+                  }
+                `);
+                await driver.sleep(1000);
+
+                // Fill "Other" name if needed (index 6 is Others)
+                if (targetIndex === 6 && data.otherRelationName) {
+                  const otherFieldId = await driver.executeScript(`
+                    try {
+                      var label = Array.from(document.querySelectorAll('label')).find(el => 
+                        el.innerText.includes('Other Relationship Name') || 
+                        el.innerText.includes('Specify Other Relation')
+                      );
+                      if (label) {
+                        var block = label.closest('div.Block1') || label.closest('div') || label.parentElement;
+                        var input = block.querySelector('input');
+                        if (!input) {
+                           var next = block.nextElementSibling;
+                           if (next) input = next.querySelector('input');
+                        }
+                        return input ? input.id : null;
+                      }
+                      return null;
+                    } catch (e) { return null; }
+                  `);
+
+                  const targetId = otherFieldId || "Other_Relatioship_Name";
+                  const otherRelInput = await driver.wait(until.elementLocated(By.id(targetId)), 5000).catch(() => null);
+                  if (otherRelInput) {
+                    await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", otherRelInput);
+                    await driver.executeScript("arguments[0].value = arguments[1];", otherRelInput, data.otherRelationName);
+                    await driver.executeScript("arguments[0].dispatchEvent(new Event('change'));", otherRelInput);
+                    console.log("✅ Filled Other Relationship Name:", data.otherRelationName);
+                  }
+                }
+              } catch (err) {
+                console.log("❌ Nominee relation error:", err.message);
+              }
+            }
+
+            // Fill Appointee Name
+            if (data.appointeeName) {
+              try {
+                const appointeeNameInput = await driver.findElement(By.id("Appointee_Name"));
+                await driver.executeScript("arguments[0].value = arguments[1];", appointeeNameInput, data.appointeeName);
+                console.log("✅ Filled Appointee Name:", data.appointeeName);
+              } catch (e) { }
+            }
+          } catch (nomErr) {
+            console.error("❌ Error in ultimate nominee block:", nomErr.message);
+          }
+        }
+
         console.log("Clicking 'Calculate Premium' button...");
         const calculatePremiumButton = await driver.wait(
           until.elementLocated(By.id("btnCalculate")),
@@ -2772,7 +2950,9 @@ async function fillRelianceForm(
         console.log("Clicked 'Calculate Premium' button!");
 
         // Wait for premium calculation to complete
-        await driver.sleep(3000);
+        await driver.sleep(2000);
+        await waitForLoaderToDisappear(driver);
+        await driver.sleep(2000);
         console.log("Premium calculation completed!");
 
         // === STEP 10: Handle post-calculation elements ===
@@ -4745,9 +4925,9 @@ async function fillRelianceForm(
     };
   } finally {
     // Cleanup: Always close browser and delete cloned profile
-    if (jobBrowser) {
-      await cleanupJobBrowser(jobBrowser);
-    }
+    // if (jobBrowser) {
+    //   await cleanupJobBrowser(jobBrowser);
+    // }
   }
 }
 
