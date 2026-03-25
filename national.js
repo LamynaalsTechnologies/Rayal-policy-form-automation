@@ -1147,6 +1147,53 @@ async function fillNationalForm(
       console.log("Could not fill IDV field:", e.message);
     }
 
+    // Compulsory PA for Owner Driver (Initial Setup - Quick Quote Stage)
+    try {
+      const isCompanyPA = (data.paCover === true || data.paCover === "true") && (String(data.paCoverCompany).toLowerCase() === "company");
+      console.log(`[${data._jobId || 'National'}] Handling Compulsory PA (Initial Setup). isCompanyPA: ${isCompanyPA}`);
+
+      let targetValue = "0"; // Default: No
+      if (isCompanyPA) {
+        // value="1" for 1 Year, value="3" for 5 Years
+        targetValue = (data.paCoverYears === 5 || data.paCoverYears === "5") ? "3" : "1";
+      }
+
+      const paRadio = await driver.wait(until.elementLocated(By.xpath(`//mat-radio-group[@name='mcy_toggle_cpaCoverorBenefit_01']//mat-radio-button[@value='${targetValue}']`)), 5000).catch(() =>
+        driver.wait(until.elementLocated(By.css(`mat-radio-button[value='${targetValue}']`)), 3000));
+
+      if (paRadio) {
+        const isAlreadyChecked = await driver.executeScript("return arguments[0].classList.contains('mat-mdc-radio-checked') || arguments[0].classList.contains('mat-radio-checked');", paRadio);
+        if (!isAlreadyChecked) {
+          try {
+            const innerRadio = await paRadio.findElement(By.css("input.mdc-radio__native-control, input[type='radio']"));
+            await driver.executeScript("arguments[0].click();", innerRadio);
+          } catch (ce) {
+            await driver.executeScript("arguments[0].click();", paRadio);
+          }
+          console.log(`[${data._jobId || 'National'}] ✅ Selected PA Radio (Initial): ${targetValue === "0" ? "No" : (targetValue === "1" ? "1 Year" : "5 Year")}`);
+          await driver.sleep(1000);
+
+          // Handle dialog if "No" was selected
+          if (targetValue === "0") {
+            try {
+              console.log(`[${data._jobId || 'National'}] Checking for PA confirmation dialog...`);
+              const closeBtnLocator = By.name("alert_btn_data_01");
+              const closeBtn = await driver.wait(until.elementLocated(closeBtnLocator), 5000).catch(() => null);
+              if (closeBtn && await closeBtn.isDisplayed()) {
+                await driver.executeScript("arguments[0].click();", closeBtn);
+                console.log(`[${data._jobId || 'National'}] ✅ Closed PA confirmation dialog.`);
+                await driver.sleep(1000);
+              }
+            } catch (dialogErr) {
+              console.log(`[${data._jobId || 'National'}] Note: PA dialog not found or already closed: ${dialogErr.message}`);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`[${data._jobId || 'National'}] Error handling Compulsory PA during initial setup: ${e.message}`);
+    }
+
     await driver.sleep(1000);
 
     // Click Generate Quick Quote button
@@ -1563,9 +1610,8 @@ async function fillNationalForm(
 
       console.log(`[${jobId}] ✅ Successfully filled First Name: "${firstName}"`);
     } catch (e) {
-      console.error(`[${jobId}] ❌ Could not fill First Name:`, e.message);
-      console.error(`[${jobId}] Error stack:`, e.stack);
-      // Don't throw - continue with form filling
+      console.error(`[${jobId}] ❌ Mandatory Field Error (First Name):`, e.message);
+      throw new Error(`Mandatory Field Error: Could not fill First Name. ${e.message}`);
     }
 
     // Fill Middle Name (optional)
@@ -1587,7 +1633,8 @@ async function fillNationalForm(
       const lastName = data.lastName || data.surname || "Customer";
       await safeType(driver, lastNameField, lastName, 10000);
     } catch (e) {
-      console.log("Could not fill Last Name:", e.message);
+      console.error(`[${jobId}] ❌ Mandatory Field Error (Last Name):`, e.message);
+      throw new Error(`Mandatory Field Error: Could not fill Last Name. ${e.message}`);
     }
 
     // Select Gender
@@ -1646,7 +1693,8 @@ async function fillNationalForm(
         await driver.executeScript("document.body.click();");
       } catch (e) { }
     } catch (e) {
-      console.log("Could not select Gender:", e.message);
+      console.error(`[${jobId}] ❌ Mandatory Field Error (Gender):`, e.message);
+      throw new Error(`Mandatory Field Error: Could not select Gender. ${e.message}`);
     }
 
     // Fill Occupation (autocomplete)
@@ -1709,7 +1757,8 @@ async function fillNationalForm(
       }
       await dobInput.sendKeys(dob);
     } catch (e) {
-      console.log("Could not fill Date of Birth:", e.message);
+      console.error(`[${jobId}] ❌ Mandatory Field Error (Date of Birth):`, e.message);
+      throw new Error(`Mandatory Field Error: Could not fill Date of Birth. ${e.message}`);
     }
 
     // Fill Aadhaar Number
@@ -1778,7 +1827,8 @@ async function fillNationalForm(
         console.log("Could not locate Address Information panel");
       }
     } catch (e) {
-      console.log("Could not expand Address Information:", e.message);
+      console.error(`[${jobId}] ❌ Mandatory Section Error (Address Information):`, e.message);
+      throw new Error(`Mandatory Section Error: Could not expand Address Information. ${e.message}`);
     }
 
     // Fill House No/ Bldg. Name (concatenated fields as requested)
@@ -1843,7 +1893,8 @@ async function fillNationalForm(
         console.log("Skipping Pincode: no DB value provided.");
       }
     } catch (e) {
-      console.log("Could not fill Pincode:", e.message);
+      console.error(`[${jobId}] ❌ Mandatory Field Error (Pincode):`, e.message);
+      throw new Error(`Mandatory Field Error: Could not fill Pincode. ${e.message}`);
     }
 
     // Fill Locality (only from DB data)
@@ -1961,7 +2012,8 @@ async function fillNationalForm(
         console.log("Could not locate Communication Information panel");
       }
     } catch (e) {
-      console.log("Could not expand Communication Information:", e.message);
+      console.error(`[${jobId}] ❌ Mandatory Section Error (Communication Information):`, e.message);
+      throw new Error(`Mandatory Section Error: Could not expand Communication Information. ${e.message}`);
     }
 
     // Fill Email ID
@@ -1981,7 +2033,8 @@ async function fillNationalForm(
 
       await driver.sleep(500);
     } catch (e) {
-      console.log("Could not fill Email ID:", e.message);
+      console.error(`[${jobId}] ❌ Mandatory Field Error (Email ID):`, e.message);
+      throw new Error(`Mandatory Field Error: Could not fill Email ID. ${e.message}`);
     }
 
     // Fill Mobile No
@@ -1991,7 +2044,8 @@ async function fillNationalForm(
       const mobile = data.mobile || data.mobileNumber || "9876543210";
       await safeType(driver, mobileField, String(mobile), 10000);
     } catch (e) {
-      console.log("Could not fill Mobile No:", e.message);
+      console.error(`[${jobId}] ❌ Mandatory Field Error (Mobile No):`, e.message);
+      throw new Error(`Mandatory Field Error: Could not fill Mobile No. ${e.message}`);
     }
 
     await driver.sleep(1000);
@@ -2046,18 +2100,8 @@ async function fillNationalForm(
       console.log("Successfully clicked Create Customer button");
       await driver.sleep(3000); // Wait for processing
     } catch (e) {
-      console.log("Create Customer button not found, trying alternative:", e.message);
-
-      // Try alternative approach - find by button text
-      try {
-        const createByText = By.xpath("//button[contains(., 'Create Customer')]");
-        const createCustBtn = await driver.wait(until.elementLocated(createByText), 5000);
-        await driver.executeScript("arguments[0].click();", createCustBtn);
-        console.log("Clicked Create Customer button (alternative)");
-        await driver.sleep(3000);
-      } catch (e2) {
-        console.log("All strategies failed for Create Customer button:", e2.message);
-      }
+      console.error(`[${jobId}] ❌ Mandatory Button Error (Create Customer):`, e.message);
+      throw new Error(`Mandatory Button Error: Could not click Create Customer. ${e.message}`);
     }
 
     // === HANDLE DYNAMIC LOCALITY FIELD ===
@@ -2113,7 +2157,8 @@ async function fillNationalForm(
       console.log("Clicked Close button");
       await driver.sleep(2000);
     } catch (e) {
-      console.log("Close button not found:", e.message);
+      console.error(`[${jobId}] ❌ Mandatory Button Error (Close Details):`, e.message);
+      throw new Error(`Mandatory Button Error: Could not click Close button after customer creation. ${e.message}`);
     }
 
     // === VEHICLE INFORMATION SECTION ===
@@ -2149,7 +2194,8 @@ async function fillNationalForm(
       console.log("Filled Engine Number");
       await driver.sleep(500);
     } catch (e) {
-      console.log("Could not fill Engine Number:", e.message);
+      console.error(`[${jobId}] ❌ Mandatory Field Error (Engine Number):`, e.message);
+      throw new Error(`Mandatory Field Error: Could not fill Engine Number. ${e.message}`);
     }
 
     // Fill Chassis Number
@@ -2163,7 +2209,8 @@ async function fillNationalForm(
       console.log("Filled Chassis Number");
       await driver.sleep(500);
     } catch (e) {
-      console.log("Could not fill Chassis Number:", e.message);
+      console.error(`[${jobId}] ❌ Mandatory Field Error (Chassis Number):`, e.message);
+      throw new Error(`Mandatory Field Error: Could not fill Chassis Number. ${e.message}`);
     }
 
     // Fill Color of Vehicle (autocomplete)
@@ -2386,60 +2433,388 @@ async function fillNationalForm(
       console.log("Year of Manufacture handling failed:", e.message);
     }
     // === COMPULSORY PA FOR OWNER DRIVER SECTION ===
-    console.log("Handling Compulsory PA for Owner Driver section...");
+    console.log(`[${jobId}] Handling Compulsory PA for Owner Driver section...`);
     try {
-      // 1. Expand the section
-      const paHeader = By.xpath("//mat-expansion-panel-header[.//h4[contains(., 'Compulsory PA for Owner Driver')]]");
-      const paPanel = await driver.wait(until.elementLocated(paHeader), 10000);
+      // 1. Expand the section with a more robust locator
+      const paHeaderLocators = [
+        By.xpath("//mat-expansion-panel-header[.//h4[contains(., 'Compulsory PA')]]"),
+        By.xpath("//mat-expansion-panel-header[.//mat-panel-title[contains(., 'Compulsory PA')]]"),
+        By.xpath("//mat-expansion-panel-header[.//span[contains(., 'Compulsory PA')]]"),
+        By.xpath("//h4[contains(., 'Compulsory PA')]/ancestor::mat-expansion-panel-header")
+      ];
 
-      const isExpanded = await driver.executeScript("return arguments[0].getAttribute('aria-expanded') === 'true';", paPanel);
-      if (!isExpanded) {
-        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", paPanel);
-        await driver.sleep(500);
-        await driver.executeScript("arguments[0].click();", paPanel);
-        console.log("Expanded Compulsory PA panel");
-        await driver.sleep(1000);
+      let paPanelHeader = null;
+      for (const locator of paHeaderLocators) {
+        try {
+          paPanelHeader = await driver.wait(until.elementLocated(locator), 5000);
+          console.log(`[${jobId}] Found Compulsory PA header using: ${locator.toString()}`);
+          break;
+        } catch (e) { }
       }
 
-      // 2. Disable the toggle
-      // Use a robust locator for the switch button inside the panel
-      try {
-        const toggleButton = await driver.wait(until.elementLocated(By.xpath("//mat-expansion-panel[.//h4[contains(., 'Compulsory PA')]]//button[@role='switch']")), 5000);
-        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", toggleButton);
+      if (paPanelHeader) {
+        const isExpanded = await driver.executeScript(`
+      const header = arguments[0];
+      const panel = header.closest('mat-expansion-panel');
+      return panel ? (panel.getAttribute('aria-expanded') === 'true' || panel.classList.contains('mat-expanded')) : false;
+    `, paPanelHeader);
 
-        const isCheckedStr = await toggleButton.getAttribute("aria-checked");
-        console.log(`Compulsory PA toggle aria-checked: ${isCheckedStr}`);
-
-        if (isCheckedStr === 'true') {
-          console.log("Compulsory PA is enabled. Disabling it...");
-          await toggleButton.click();
-
-          // 3. Handle Confirmation Popup
-          console.log("Waiting for confirmation popup...");
-          try {
-            // Use the specific name provided by the user
-            const closeBtn = await driver.wait(until.elementLocated(By.name("alert_btn_data_01")), 5000);
-            await driver.wait(until.elementIsVisible(closeBtn), 5000);
-            await closeBtn.click();
-            console.log("Clicked Close on Compulsory PA confirmation.");
-          } catch (popupError) {
-            console.log("Confirmation popup Close button (alert_btn_data_01) not found:", popupError.message);
-            // Fallback to text search just in case
-            try {
-              const closeBtnText = await driver.wait(until.elementLocated(By.xpath("//button[contains(., 'Close')]")), 2000);
-              await closeBtnText.click();
-              console.log("Clicked Close (text fallback).");
-            } catch (e) { }
-          }
+        if (!isExpanded) {
+          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", paPanelHeader);
+          await driver.sleep(500);
+          await driver.executeScript("arguments[0].click();", paPanelHeader);
+          console.log(`[${jobId}] Expanded Compulsory PA panel`);
+          await driver.sleep(1000);
         } else {
-          console.log("Compulsory PA is already disabled.");
+          console.log(`[${jobId}] Compulsory PA panel already expanded`);
         }
-      } catch (toggleErr) {
-        console.log("Could not find Compulsory PA toggle button:", toggleErr.message);
+      } else {
+        console.log(`[${jobId}] ⚠️ Could not find Compulsory PA expansion panel header.`);
+      }
+
+      // 2. Handle the selection based on data
+      try {
+        const paCoverVal = String(data.paCover).toLowerCase() === "true" || data.paCover === true;
+        const paCompanyVal = String(data.paCoverCompany || "").toLowerCase();
+        const isCompanyPA = paCoverVal && (paCompanyVal === "company" || paCompanyVal === "national");
+
+        console.log(`[${jobId}] PA Logic Check: paCover=${data.paCover}, company=${data.paCoverCompany} -> isCompanyPA=${isCompanyPA}`);
+
+        if (isCompanyPA) {
+
+          // A. Handle Radio Group (Tenure)
+          try {
+            console.log(`[${jobId}] Input data.paCoverYears: ${data.paCoverYears} (type: ${typeof data.paCoverYears})`);
+            let targetValue = (data.paCoverYears == 5 || data.paCoverYears == "5" || data.paCoverYears == 3 || data.paCoverYears == "3") ? "3" : "1";
+            console.log(`[${jobId}] Setting Compulsory PA radio to value: ${targetValue} (Expected for ${data.paCoverYears} Year)`);
+
+            const radioLocators = [
+              By.xpath(`//mat-radio-group[@name='mcy_toggle_cpaCoverorBenefit_01']//mat-radio-button[@value='${targetValue}']`),
+              By.css(`mat-radio-button[value='${targetValue}']`),
+              By.xpath(`//mat-radio-button[@value='${targetValue}']`)
+            ];
+
+            let radioSelect = null;
+            for (const locator of radioLocators) {
+              try {
+                radioSelect = await driver.wait(until.elementLocated(locator), 5000);
+                console.log(`[${jobId}] Found PA Radio button using: ${locator.toString()}`);
+                break;
+              } catch (e) { }
+            }
+
+            if (radioSelect) {
+              await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", radioSelect);
+              await driver.sleep(300);
+
+              const isChecked = await driver.executeScript(
+                "return arguments[0].classList.contains('mat-mdc-radio-checked') || arguments[0].classList.contains('mat-radio-checked');",
+                radioSelect
+              );
+
+              if (!isChecked) {
+                try {
+                  const innerRadio = await radioSelect.findElement(By.css("input.mdc-radio__native-control, input[type='radio']"));
+                  await driver.executeScript("arguments[0].click();", innerRadio);
+                } catch (clickInnerErr) {
+                  await driver.executeScript("arguments[0].click();", radioSelect);
+                }
+                console.log(`[${jobId}] ✅ Selected PA Radio value: ${targetValue}`);
+                await driver.sleep(1000);
+              } else {
+                console.log(`[${jobId}] PA Radio value ${targetValue} already selected.`);
+              }
+            } else {
+              console.log(`[${jobId}] ⚠️ Could not find PA Radio button with value ${targetValue}`);
+            }
+          } catch (e) {
+            console.log(`[${jobId}] Radio group selection failed: ${e.message}`);
+          }
+
+          // B. Handle "No of Years" mat-select Dropdown
+          try {
+            const targetYearText = (data.paCoverYears == 5 || data.paCoverYears == "5") ? "5 Year" : "1 Year";
+            console.log(`[${jobId}] Selecting No of Years dropdown: ${targetYearText}`);
+
+            const yearSelect = await driver.findElement(By.css("mat-select[name='mcy_dropdown_noy_01']"));
+            await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", yearSelect);
+            await driver.sleep(300);
+
+            const currentYearText = await yearSelect.getText();
+            if (!currentYearText.includes(targetYearText)) {
+              await driver.executeScript("arguments[0].click();", yearSelect);
+              await driver.sleep(1200); // wait for CDK overlay to fully render
+
+              const yearOption = await driver.wait(
+                until.elementLocated(By.xpath(`//mat-option[normalize-space(.)='${targetYearText}']`)),
+                5000
+              );
+              await driver.executeScript("arguments[0].click();", yearOption);
+              await driver.sleep(800);
+              console.log(`[${jobId}] ✅ Selected No of Years: ${targetYearText}`);
+            } else {
+              console.log(`[${jobId}] No of Years already set to: ${targetYearText}`);
+            }
+          } catch (e) {
+            console.log(`[${jobId}] Failed to select No of Years dropdown: ${e.message}`);
+          }
+
+          // C. Fill Nominee Name
+          // C. Fill Nominee Name
+          if (data.nomineeName) {
+            try {
+              const nameInput = await driver.findElement(By.css("input[name='mcy_text_cpaNomineeName_01']"));
+              await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", nameInput);
+              await driver.sleep(200);
+
+              await driver.executeScript(`
+      const input = arguments[0];
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      nativeInputValueSetter.call(input, arguments[1]);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      input.dispatchEvent(new Event('blur', { bubbles: true }));
+    `, nameInput, data.nomineeName.toUpperCase());
+              await driver.sleep(500);
+              console.log(`[${jobId}] ✅ Filled Nominee Name: ${data.nomineeName}`);
+            } catch (e) {
+              console.log(`[${jobId}] Failed to fill Nominee Name: ${e.message}`);
+            }
+          }
+
+          // D. Fill Nominee Age
+          if (data.nomineeAge) {
+            try {
+              const ageInput = await driver.findElement(By.css("input[name='mcy_text_paNomineeAge_01']"));
+              await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", ageInput);
+              await driver.sleep(200);
+
+              // Use nativeInputValueSetter to properly trigger Angular change detection
+              await driver.executeScript(`
+            const input = arguments[0];
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            nativeInputValueSetter.call(input, arguments[1]);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new Event('blur', { bubbles: true }));
+          `, ageInput, data.nomineeAge.toString());
+              await driver.sleep(500);
+              console.log(`[${jobId}] ✅ Filled Nominee Age: ${data.nomineeAge}`);
+            } catch (e) {
+              console.log(`[${jobId}] Failed to fill Nominee Age: ${e.message}`);
+            }
+          }
+
+          // E. Select Relationship with Nominee mat-select
+          if (data.nomineeRelation) {
+            try {
+              const relSelect = await driver.findElement(By.css("mat-select[name='mcy_dropdown_nomineeRelation_01']"));
+              await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", relSelect);
+              await driver.sleep(300);
+              await driver.executeScript("arguments[0].click();", relSelect);
+              await driver.sleep(1200); // wait for CDK overlay to fully render
+
+              const relationTarget = data.nomineeRelation.trim();
+
+              // Try exact match first (case-insensitive via XPath translate)
+              let relOption = null;
+              try {
+                relOption = await driver.wait(
+                  until.elementLocated(By.xpath(
+                    `//mat-option[normalize-space(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'))='${relationTarget.toUpperCase()}']`
+                  )),
+                  4000
+                );
+              } catch (e) {
+                // Fallback: partial match
+                try {
+                  relOption = await driver.wait(
+                    until.elementLocated(By.xpath(
+                      `//mat-option[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '${relationTarget.toUpperCase()}')]`
+                    )),
+                    4000
+                  );
+                } catch (e2) {
+                  // Final fallback: index-based map
+                  const relationMap = {
+                    "self": 1, "husband": 2, "son": 3, "father": 4,
+                    "father in law": 5, "father-in-law": 5,
+                    "wife": 6, "daughter": 7, "sister": 8,
+                    "brother": 9, "mother": 10,
+                    "mother in law": 11, "mother-in-law": 11
+                  };
+                  const index = relationMap[relationTarget.toLowerCase()] || 1;
+                  relOption = await driver.findElement(By.xpath(`//mat-option[${index}]`));
+                  console.log(`[${jobId}] Using index-based fallback for relation: index ${index}`);
+                }
+              }
+
+              if (relOption) {
+                await driver.executeScript("arguments[0].click();", relOption);
+                await driver.sleep(500);
+                console.log(`[${jobId}] ✅ Selected Nominee Relation: ${relationTarget}`);
+              } else {
+                console.log(`[${jobId}] ⚠️ Could not find Nominee Relation option for: ${relationTarget}`);
+              }
+            } catch (e) {
+              console.log(`[${jobId}] Failed to select Nominee Relation: ${e.message}`);
+            }
+          }
+
+          // F. Fill Appointee Name (if visible)
+          if (data.appointeeName) {
+            try {
+              const appointeeInput = await driver.findElement(
+                By.xpath("//mat-label[contains(., 'Appointee Name')]/ancestor::mat-form-field//input")
+              );
+              await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", appointeeInput);
+              await driver.sleep(200);
+
+              await driver.executeScript(`
+            const input = arguments[0];
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            nativeInputValueSetter.call(input, arguments[1]);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new Event('blur', { bubbles: true }));
+          `, appointeeInput, data.appointeeName.toUpperCase());
+              await driver.sleep(500);
+              console.log(`[${jobId}] ✅ Filled Appointee Name: ${data.appointeeName}`);
+            } catch (e) {
+              console.log(`[${jobId}] Appointee Name not found or not required: ${e.message}`);
+            }
+          }
+
+          // === VALIDATION STEP ===
+          await driver.sleep(1000);
+          console.log(`[${jobId}] 🔍 Validating PA mandatory fields...`);
+
+          const validationResults = await driver.executeScript(`
+        const results = {
+          name: { filled: false, valid: false },
+          age: { filled: false, valid: false },
+          relation: { filled: false, valid: false },
+          noOfYears: { filled: false, valid: false }
+        };
+
+        // in the validation executeScript block — replace paNomineeName with cpaNomineeName
+        const nameInput = document.querySelector('input[name="mcy_text_cpaNomineeName_01"]');
+        if (nameInput) {
+          results.name.filled = !!nameInput.value;
+          results.name.valid = !nameInput.classList.contains('ng-invalid');
+        }
+
+        const ageInput = document.querySelector('input[name="mcy_text_paNomineeAge_01"]');
+        if (ageInput) {
+          results.age.filled = !!ageInput.value;
+          results.age.valid = !ageInput.classList.contains('ng-invalid');
+        }
+
+        const relSelect = document.querySelector('mat-select[name="mcy_dropdown_nomineeRelation_01"]');
+        if (relSelect) {
+          const valueText = relSelect.querySelector('.mat-mdc-select-value-text')?.innerText || '';
+          results.relation.filled = !!valueText.trim();
+          results.relation.valid = !relSelect.classList.contains('ng-invalid');
+        }
+
+        const yearSelect = document.querySelector('mat-select[name="mcy_dropdown_noy_01"]');
+        if (yearSelect) {
+          const yearText = yearSelect.querySelector('.mat-mdc-select-value-text')?.innerText || '';
+          results.noOfYears.filled = !!yearText.trim();
+          results.noOfYears.valid = !yearSelect.classList.contains('ng-invalid');
+        }
+
+        return results;
+      `);
+
+          console.log(`[${jobId}] PA Validation Results: ${JSON.stringify(validationResults)}`);
+
+          const isNameValid = validationResults.name.filled && validationResults.name.valid;
+          const isAgeValid = validationResults.age.filled && validationResults.age.valid;
+          const isRelationValid = validationResults.relation.filled && validationResults.relation.valid;
+          const isYearValid = validationResults.noOfYears.filled && validationResults.noOfYears.valid;
+
+          if (!isNameValid || !isAgeValid || !isRelationValid || !isYearValid) {
+            const missing = [];
+            if (!isNameValid) missing.push("Nominee Name");
+            if (!isAgeValid) missing.push("Nominee Age");
+            if (!isRelationValid) missing.push("Relationship with Nominee");
+            if (!isYearValid) missing.push("No of Years");
+
+            const errorMsg = "PA Validation Error: The following mandatory fields are missing or invalid: " + missing.join(", ");
+            console.error(`[${jobId}] ❌ ${errorMsg}`);
+
+            const screenshot = await driver.takeScreenshot();
+            const screenshotUrl = await uploadScreenshotToS3(screenshot, generateScreenshotKey(jobId, 0, "pa-validation-error"));
+
+            const validationError = new Error(errorMsg);
+            validationError.screenshotUrl = screenshotUrl;
+            validationError.stage = "pa-validation";
+            throw validationError;
+          }
+
+          console.log(`[${jobId}] ✅ PA mandatory fields validated successfully.`);
+
+        } else {
+          // PA not required — select "No" radio
+          console.log(`[${jobId}] PA not wanted or not with company. Wanted PA: ${data.paCover}, Company: ${data.paCoverCompany}`);
+
+          try {
+            let noRadio = null;
+            try {
+              noRadio = await driver.wait(
+                until.elementLocated(By.xpath(`//mat-radio-group[@name='mcy_toggle_cpaCoverorBenefit_01']//mat-radio-button[@value='0']`)),
+                5000
+              );
+            } catch (e) {
+              noRadio = await driver.wait(
+                until.elementLocated(By.css("mat-radio-button[value='0']")),
+                3000
+              );
+            }
+
+            if (noRadio) {
+              const isNoChecked = await driver.executeScript(
+                "return arguments[0].classList.contains('mat-mdc-radio-checked') || arguments[0].classList.contains('mat-radio-checked');",
+                noRadio
+              );
+
+              if (!isNoChecked) {
+                try {
+                  const innerRadio = await noRadio.findElement(By.css("input.mdc-radio__native-control, input[type='radio']"));
+                  await driver.executeScript("arguments[0].click();", innerRadio);
+                } catch (ce) {
+                  await driver.executeScript("arguments[0].click();", noRadio);
+                }
+                console.log(`[${jobId}] ✅ Selected PA Radio: No`);
+                await driver.sleep(1000);
+              } else {
+                console.log(`[${jobId}] PA Radio 'No' already selected.`);
+              }
+
+              // Dismiss confirmation dialog if shown
+              try {
+                const closeBtn = await driver.wait(until.elementLocated(By.name("alert_btn_data_01")), 3000);
+                await closeBtn.click();
+                console.log(`[${jobId}] Dismissed PA disable confirmation.`);
+              } catch (e) {
+                try {
+                  const closeBtnAlt = await driver.findElement(By.xpath("//button[contains(., 'Close')]"));
+                  await closeBtnAlt.click();
+                } catch (e2) { }
+              }
+            }
+          } catch (e) {
+            console.log(`[${jobId}] Could not find 'No' radio button for PA cover: ${e.message}`);
+          }
+        }
+
+      } catch (innerErr) {
+        console.log(`[${jobId}] Error in Compulsory PA sub-steps: ${innerErr.message}`);
       }
 
     } catch (e) {
-      console.log("Error handling Compulsory PA section:", e.message);
+      console.log(`[${jobId}] Error handling Compulsory PA section: ${e.message}`);
     }
     await driver.sleep(1000);
 
@@ -3258,42 +3633,39 @@ async function fillNationalForm(
     }
 
     // Click Calculate Premium button
-    try {
-      console.log(`[${jobId}] Clicking Calculate Premium button...`);
-      const calculatePremiumLocators = [
-        By.name("mcy_button_calculatePremium_01"),
-        By.xpath("//button[@name='mcy_button_calculatePremium_01']"),
-        By.xpath("//button[contains(@class, 'q-quote-btn') and .//span[normalize-space(.)='Calculate Premium']]"),
-        By.xpath("//span[normalize-space(.)='Calculate Premium']/ancestor::button"),
-        By.xpath("//button[contains(@class, 'mat-mdc-raised-button') and .//span[contains(text(), 'Calculate Premium')]]"),
-      ];
-      let premiumClicked = false;
-      for (const locator of calculatePremiumLocators) {
-        try {
-          await scrollAndClick(driver, locator, 12000);
-          premiumClicked = true;
-          console.log(`[${jobId}] ✅ Clicked Calculate Premium using locator: ${locator.toString()}`);
-          break;
-        } catch (calcError) {
-          console.log(`[${jobId}] Calculate Premium click failed for ${locator.toString()}: ${calcError.message}`);
-        }
+    console.log(`[${jobId}] Clicking Calculate Premium button...`);
+    const calculatePremiumLocators = [
+      By.name("mcy_button_calculatePremium_01"),
+      By.xpath("//button[@name='mcy_button_calculatePremium_01']"),
+      By.xpath("//button[contains(@class, 'q-quote-btn') and .//span[normalize-space(.)='Calculate Premium']]"),
+      By.xpath("//span[normalize-space(.)='Calculate Premium']/ancestor::button"),
+      By.xpath("//button[contains(@class, 'mat-mdc-raised-button') and .//span[contains(text(), 'Calculate Premium')]]"),
+    ];
+    let premiumClicked = false;
+    for (const locator of calculatePremiumLocators) {
+      try {
+        await scrollAndClick(driver, locator, 12000);
+        premiumClicked = true;
+        console.log(`[${jobId}] ✅ Clicked Calculate Premium using locator: ${locator.toString()}`);
+        break;
+      } catch (calcError) {
+        console.log(`[${jobId}] Calculate Premium click failed for ${locator.toString()}: ${calcError.message}`);
       }
-      if (!premiumClicked) {
-        throw new Error("Unable to click Calculate Premium button.");
-      }
-      await driver.sleep(3000);
-      await waitForPortalLoaderToDisappear(driver);
-      console.log(`[${jobId}] ✅ Calculate Premium button clicked successfully`);
-    } catch (e) {
-      console.error(`[${jobId}] Calculate Premium button not found:`, e.message);
     }
+
+    if (!premiumClicked) {
+      throw new Error("Critical Error: Unable to click Calculate Premium button. Automation cannot proceed.");
+    }
+    await driver.sleep(3000);
+    await waitForPortalLoaderToDisappear(driver);
+    console.log(`[${jobId}] ✅ Calculate Premium button clicked successfully`);
 
     // Confirm popup OK
     try {
       console.log("Handling confirmation popup...");
       const confirmOkButton = By.xpath("//span[contains(., 'OK')]/ancestor::button");
       await safeClick(driver, confirmOkButton, 5000);
-      await driver.sleep(2000);
+      await driver.sleep(1000);
       await waitForPortalLoaderToDisappear(driver);
     } catch (e) {
       console.log("Confirmation popup OK button not found or not needed:", e.message);
@@ -3302,43 +3674,130 @@ async function fillNationalForm(
     // Proceed For Payment Flow
     if (formData.Paymentmethod === "link") {
       try {
-        console.log("Payment method is 'link'. Initiating Proceed For Payment flow...");
-        console.log("Clicking Proceed For Payment button...");
-        const proceedPaymentButton = By.xpath("//button[@name='main_btn_convert_01'] | //span[contains(., 'Proceed For payment')]/ancestor::button");
-        await safeClick(driver, proceedPaymentButton, 10000);
+        console.log(`[${jobId}] Payment method is 'link'. Initiating Proceed For Payment flow...`);
+
+        // Step 1: Click Proceed For Payment button
+        console.log(`[${jobId}] Clicking Proceed For Payment button...`);
+        const proceedPaymentLocators = [
+          By.name("main_btn_convert_01"),
+          By.xpath("//button[@name='main_btn_convert_01']"),
+          By.xpath("//button[.//span[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'PROCEED FOR PAYMENT')]]"),
+          By.xpath("//span[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'PROCEED FOR PAYMENT')]/ancestor::button"),
+          By.xpath("//button[contains(@class, 'mat-mdc-raised-button') and .//span[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'PROCEED')]]"),
+        ];
+
+        let proceedClicked = false;
+        for (const locator of proceedPaymentLocators) {
+          try {
+            await scrollAndClick(driver, locator, 10000);
+            proceedClicked = true;
+            console.log(`[${jobId}] ✅ Clicked Proceed For Payment using: ${locator.toString()}`);
+            break;
+          } catch (e) {
+            console.log(`[${jobId}] Proceed For Payment locator failed: ${locator.toString()}: ${e.message}`);
+          }
+        }
+
+        if (!proceedClicked) {
+          throw new Error("Critical Error: Proceed For Payment button not found after all locators.");
+        }
+
         await driver.sleep(2000);
         await waitForPortalLoaderToDisappear(driver);
 
-        console.log("Selecting Payment Option (Value 5)...");
-        // Find radio button with value="5"
-        const paymentRadio = By.xpath("//input[@type='radio' and @value='5']");
+        // Step 2: Select Payment Option (Value 5)
+        console.log(`[${jobId}] Selecting Payment Option (Value 5)...`);
         try {
-          const radioElement = await driver.wait(until.elementLocated(paymentRadio), 5000);
-          // Use JS click for reliability with hidden/styled radio inputs
-          await driver.executeScript("arguments[0].click();", radioElement);
-          console.log("Clicked payment radio button (value=5)");
-        } catch (radioError) {
-          console.log("Could not find or click payment radio button (value=5):", radioError.message);
+          const paymentRadioLocators = [
+            By.xpath("//input[@type='radio' and @value='5']"),
+            By.css("input[type='radio'][value='5']"),
+            By.xpath("//mat-radio-button[@value='5']//input"),
+          ];
+
+          let radioClicked = false;
+          for (const locator of paymentRadioLocators) {
+            try {
+              const radioElement = await driver.wait(until.elementLocated(locator), 5000);
+              await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", radioElement);
+              await driver.sleep(300);
+              await driver.executeScript("arguments[0].click();", radioElement);
+              radioClicked = true;
+              console.log(`[${jobId}] ✅ Clicked payment radio (value=5) using: ${locator.toString()}`);
+              break;
+            } catch (e) {
+              console.log(`[${jobId}] Payment radio locator failed: ${locator.toString()}: ${e.message}`);
+            }
+          }
+
+          if (!radioClicked) {
+            console.log(`[${jobId}] ⚠️ Could not find payment radio (value=5) — continuing anyway`);
+          }
+        } catch (e) {
+          console.log(`[${jobId}] Payment radio selection error: ${e.message}`);
         }
         await driver.sleep(1000);
 
-        console.log("Clicking Send Payment Link button...");
-        const sendLinkButton = By.xpath("//button[@name='vQuote_btn_sendPayLink_01'] | //span[contains(., 'Send Payment Link')]/ancestor::button");
-        await safeClick(driver, sendLinkButton, 5000);
+        // Step 3: Click Send Payment Link button
+        console.log(`[${jobId}] Clicking Send Payment Link button...`);
+        const sendLinkLocators = [
+          By.name("vQuote_btn_sendPayLink_01"),
+          By.xpath("//button[@name='vQuote_btn_sendPayLink_01']"),
+          By.xpath("//button[.//span[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'SEND PAYMENT LINK')]]"),
+          By.xpath("//span[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'SEND PAYMENT LINK')]/ancestor::button"),
+        ];
+
+        let sendLinkClicked = false;
+        for (const locator of sendLinkLocators) {
+          try {
+            await scrollAndClick(driver, locator, 10000);
+            sendLinkClicked = true;
+            console.log(`[${jobId}] ✅ Clicked Send Payment Link using: ${locator.toString()}`);
+            break;
+          } catch (e) {
+            console.log(`[${jobId}] Send Payment Link locator failed: ${locator.toString()}: ${e.message}`);
+          }
+        }
+
+        if (!sendLinkClicked) {
+          throw new Error("Critical Error: Send Payment Link button not found after all locators.");
+        }
+
         await driver.sleep(2000);
         await waitForPortalLoaderToDisappear(driver);
 
-        console.log("Waiting for confirmation popup and clicking Close...");
-        // Both buttons have the same name, so we must distinguish by text content "Close"
-        const closeButton = By.xpath("//button[@name='alert_btn_data_01' and .//span[contains(text(), 'Close')]]");
-        await safeClick(driver, closeButton, 10000);
+        // Step 4: Close confirmation popup
+        console.log(`[${jobId}] Waiting for confirmation popup and clicking Close...`);
+        const closeLocators = [
+          By.xpath("//button[@name='alert_btn_data_01' and .//span[contains(text(), 'Close')]]"),
+          By.xpath("//button[@name='alert_btn_data_01']"),
+          By.xpath("//button[.//span[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'CLOSE')]]"),
+          By.xpath("//span[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'CLOSE')]/ancestor::button"),
+        ];
+
+        let closedPopup = false;
+        for (const locator of closeLocators) {
+          try {
+            await scrollAndClick(driver, locator, 8000);
+            closedPopup = true;
+            console.log(`[${jobId}] ✅ Closed confirmation popup using: ${locator.toString()}`);
+            break;
+          } catch (e) {
+            console.log(`[${jobId}] Close popup locator failed: ${locator.toString()}: ${e.message}`);
+          }
+        }
+
+        if (!closedPopup) {
+          console.log(`[${jobId}] ⚠️ Could not close confirmation popup — may not have appeared`);
+        }
+
         await driver.sleep(1000);
 
       } catch (e) {
-        console.log("Proceed For Payment flow failed:", e.message);
+        throw new Error(`Critical Error: Proceed For Payment flow failed: ${e.message}`);
       }
+
     } else {
-      console.log(`Payment method is '${formData.Paymentmethod || 'undefined'}', not 'link'. Skipping Payment flow.`);
+      console.log(`[${jobId}] Payment method is '${formData.Paymentmethod || 'undefined'}', not 'link'. Skipping Payment flow.`);
     }
 
     console.log(`✅ [${jobId}] National Insurance form automation completed successfully!`);

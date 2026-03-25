@@ -213,12 +213,16 @@ const enqueueRelianceJob = async (formData, captchaId = null) => {
       // NEW logic: If the existing job is missing Aadhaar/PAN but the new data has it, update the job in-place
       const needsAadharUpdate = sanitizedData.aadharCard?.key && !existingJob.formData.aadharCard?.key;
       const needsPanUpdate = sanitizedData.panCard?.key && !existingJob.formData.panCard?.key;
+      const needsNomineeAgeUpdate = sanitizedData.nomineeAge && !existingJob.formData.nomineeAge;
+      const needsPaCoverYearsUpdate = sanitizedData.paCoverYears && !existingJob.formData.paCoverYears;
 
-      if (needsAadharUpdate || needsPanUpdate) {
-        console.log(`[Reliance Queue] 🔄 Updating existing job ${existingJob._id} with missing document keys...`);
+      if (needsAadharUpdate || needsPanUpdate || needsNomineeAgeUpdate || needsPaCoverYearsUpdate) {
+        console.log(`[Reliance Queue] 🔄 Updating existing job ${existingJob._id} with missing fields...`);
         const updateFields = {};
         if (needsAadharUpdate) updateFields["formData.aadharCard"] = sanitizedData.aadharCard;
         if (needsPanUpdate) updateFields["formData.panCard"] = sanitizedData.panCard;
+        if (needsNomineeAgeUpdate) updateFields["formData.nomineeAge"] = sanitizedData.nomineeAge;
+        if (needsPaCoverYearsUpdate) updateFields["formData.paCoverYears"] = sanitizedData.paCoverYears;
 
         await jobQueueCollection.updateOne(
           { _id: existingJob._id },
@@ -319,7 +323,10 @@ async function logAuditEntry(action, details) {
 }
 
 const processRelianceQueue = async () => {
-  if (!jobQueueCollection) return;
+  if (!jobQueueCollection) {
+    console.log("[Reliance Queue] ⚠️ jobQueueCollection not initialized yet. Skipping.");
+    return;
+  }
 
   try {
     // Count how many jobs are currently processing
@@ -328,9 +335,12 @@ const processRelianceQueue = async () => {
     });
 
     activeRelianceJobs = processingCount;
+    // DEBUG LOG
+    console.log(`[Reliance Queue] 📊 Status: activeRelianceJobs=${activeRelianceJobs}, MAX_PARALLEL_JOBS=${MAX_PARALLEL_JOBS}`);
 
     // Check if we can start more jobs
     if (activeRelianceJobs >= MAX_PARALLEL_JOBS) {
+      console.log("[Reliance Queue] ⏸️  At max capacity. Returning.");
       return; // Already at max capacity
     }
 
@@ -385,13 +395,14 @@ const processRelianceQueue = async () => {
           console.error("Stack trace:", unexpectedError.stack);
 
           // Ensure job is not left in "processing" state
+          const beautifiedMsg = beautifyError(unexpectedError, companyName || 'system');
           jobQueueCollection
             .updateOne(
               { _id: job._id },
               {
                 $set: {
                   status: JOB_STATUS.PENDING, // Reset to pending for retry
-                  lastError: `Unexpected error: ${unexpectedError.message}`,
+                  lastError: `Unexpected error: ${beautifiedMsg}`,
                   lastErrorTimestamp: new Date(),
                 },
                 $inc: { attempts: 1 },
@@ -408,7 +419,8 @@ const processRelianceQueue = async () => {
         });
     }
   } catch (error) {
-    console.error("[Reliance Queue] Error processing queue:", error.message);
+    const beautifiedMsg = beautifyError(error, 'queue');
+    console.error("[Reliance Queue] Error processing queue:", beautifiedMsg);
   }
 };
 
@@ -867,6 +879,14 @@ db.once("open", async () => {
     console.log("[Job Queue] No pending jobs found on startup.");
   }
 
+  // PERIODIC POLLING (CRITICAL: picking up retries when they become due)
+  setInterval(() => {
+    // Only poll if we have space for more jobs
+    if (activeRelianceJobs < MAX_PARALLEL_JOBS) {
+      void processRelianceQueue();
+    }
+  }, 30000); // Check every 30 seconds
+
   const collection = db.collection("onlinePolicy");
 
   const changeStream = collection.watch([
@@ -1019,6 +1039,8 @@ db.once("open", async () => {
       paCoverAmount: data?.paCoverAmount,
       nomineeName: data?.nomineeName,
       nomineeRelation: data?.nomineeRelation,
+      nomineeAge: data?.nomineeAge,
+      paCoverYears: data?.paCoverYears,
       otherRelationName: data?.otherRelationName,
       appointeeName: data?.appointeeName,
       nomineeDob: data?.nomineeDob?.$date

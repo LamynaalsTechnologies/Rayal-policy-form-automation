@@ -4925,9 +4925,9 @@ async function fillRelianceForm(
     };
   } finally {
     // Cleanup: Always close browser and delete cloned profile
-    // if (jobBrowser) {
-    //   await cleanupJobBrowser(jobBrowser);
-    // }
+    if (jobBrowser) {
+      await cleanupJobBrowser(jobBrowser);
+    }
   }
 }
 
