@@ -2585,7 +2585,7 @@ async function fillNationalForm(
           // D. Fill Nominee Age
           if (data.nomineeAge) {
             try {
-              const ageInput = await driver.findElement(By.css("input[name='mcy_text_paNomineeAge_01']"));
+              const ageInput = await driver.findElement(By.css("input[name='mcy_dropdown_cpaNomineeAge_01']"));
               await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", ageInput);
               await driver.sleep(200);
 
@@ -2704,7 +2704,7 @@ async function fillNationalForm(
           results.name.valid = !nameInput.classList.contains('ng-invalid');
         }
 
-        const ageInput = document.querySelector('input[name="mcy_text_paNomineeAge_01"]');
+        const ageInput = document.querySelector('input[name="mcy_dropdown_cpaNomineeAge_01"]');
         if (ageInput) {
           results.age.filled = !!ageInput.value;
           results.age.valid = !ageInput.classList.contains('ng-invalid');
