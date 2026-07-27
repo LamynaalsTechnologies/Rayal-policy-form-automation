@@ -152,6 +152,7 @@ const JOB_STATUS = {
   PENDING: "pending", // Waiting in queue
   PROCESSING: "processing", // Currently being processed
   COMPLETED: "completed", // Successfully completed
+  COMPLETED_WITH_ERRORS: "completed_with_errors", // Form submitted but post steps failed (Brisk cert / doc upload)
   FAILED_LOGIN_FORM: "failed_login_form", // Failed during login page form filling
   FAILED_POST_SUBMISSION: "failed_post_submission", // Failed after form submission
   FAILED_VALIDATION: "failed_validation", // Failed input validation
@@ -211,13 +212,25 @@ const enqueueRelianceJob = async (formData, captchaId = null, operationType = nu
     if (captchaId) {
       sameDocJob = await jobQueueCollection.findOne({
         captchaId: captchaId,
-        status: { $in: [JOB_STATUS.PENDING, JOB_STATUS.PROCESSING, JOB_STATUS.COMPLETED] }
+        status: {
+          $in: [
+            JOB_STATUS.PENDING,
+            JOB_STATUS.PROCESSING,
+            JOB_STATUS.COMPLETED,
+            JOB_STATUS.COMPLETED_WITH_ERRORS
+          ]
+        }
       });
     }
 
     // A re-INSERT after the old job completed means the document was deleted and
     // re-created — that's new work, not a re-notification of the finished job
-    if (sameDocJob && sameDocJob.status === JOB_STATUS.COMPLETED && operationType === "insert") {
+    if (
+      sameDocJob &&
+      (sameDocJob.status === JOB_STATUS.COMPLETED ||
+        sameDocJob.status === JOB_STATUS.COMPLETED_WITH_ERRORS) &&
+      operationType === "insert"
+    ) {
       console.log(`[Reliance Queue] 🔁 Document re-created after completed job ${sameDocJob._id} — starting a fresh job`);
       sameDocJob = null;
     }
@@ -592,38 +605,71 @@ const runPolicyJob = async (job) => {
     const processingTimeMs = Date.now() - processingStartTime;
 
     if (result && result.success) {
-      // 🎉 SUCCESS - Mark as completed in database
-      await jobQueueCollection.updateOne(
-        { _id: job._id },
-        {
-          $set: {
-            status: JOB_STATUS.COMPLETED,
-            completedAt: new Date(),
-            completedAttempt: job.attempts + 1,
-            processingTimeMs: processingTimeMs
+      // Collect non-fatal warnings (form WAS submitted, but post steps failed)
+      const completionWarnings = [];
+      if (result.briskCertificateError) {
+        completionWarnings.push(`Brisk certificate creation failed: ${result.briskCertificateError}`);
+      }
+      if (result.documentUploadError) {
+        completionWarnings.push(result.documentUploadError);
+      }
+
+      const finalStatus = completionWarnings.length
+        ? JOB_STATUS.COMPLETED_WITH_ERRORS
+        : JOB_STATUS.COMPLETED;
+
+      // 🎉 SUCCESS - Mark as completed (with errors, if any) in database
+      const updateDoc = {
+        $set: {
+          status: finalStatus,
+          completedAt: new Date(),
+          completedAttempt: job.attempts + 1,
+          processingTimeMs: processingTimeMs,
+          ...(completionWarnings.length && {
+            completionWarnings: completionWarnings,
+            briskCertificateError: result.briskCertificateError || null,
+            documentUploadError: result.documentUploadError || null,
+          })
+        },
+        $push: {
+          statusHistory: {
+            from: JOB_STATUS.PROCESSING,
+            to: finalStatus,
+            timestamp: new Date()
           },
-          $push: {
-            statusHistory: {
-              from: JOB_STATUS.PROCESSING,
-              to: JOB_STATUS.COMPLETED,
-              timestamp: new Date()
+          ...(completionWarnings.length && {
+            errorLogs: {
+              $each: completionWarnings.map((w) => ({
+                errorMessage: w,
+                errorCode: "E_POST_COMPLETION_WARNING",
+                failureType: "PostCompletionWarning",
+                timestamp: new Date()
+              }))
             }
-          }
+          })
         }
-      );
+      };
+
+      await jobQueueCollection.updateOne({ _id: job._id }, updateDoc);
 
       console.log(`\n${'═'.repeat(70)}`);
-      console.log(`[Reliance Queue] ✅ SUCCESS for ${job.formData.firstName} (ID: ${job._id})`);
+      if (completionWarnings.length) {
+        console.log(`[Reliance Queue] ⚠️ COMPLETED WITH ERRORS for ${job.formData.firstName} (ID: ${job._id})`);
+        completionWarnings.forEach((w) => console.log(`[Reliance Queue]    ⚠️ ${w}`));
+      } else {
+        console.log(`[Reliance Queue] ✅ SUCCESS for ${job.formData.firstName} (ID: ${job._id})`);
+      }
       console.log(`[Reliance Queue] ⏱️  Processing time: ${(processingTimeMs / 1000).toFixed(2)}s`);
       console.log(`${'═'.repeat(70)}\n`);
 
       // Log audit entry for success
-      await logAuditEntry('JOB_COMPLETED', {
+      await logAuditEntry(completionWarnings.length ? 'JOB_COMPLETED_WITH_ERRORS' : 'JOB_COMPLETED', {
         jobId: job._id,
         customerName: `${job.formData.firstName} ${job.formData.lastName}`,
         company: companyName,
         processingTimeMs: processingTimeMs,
-        attemptNumber: job.attempts + 1
+        attemptNumber: job.attempts + 1,
+        ...(completionWarnings.length && { warnings: completionWarnings })
       });
 
     } else {

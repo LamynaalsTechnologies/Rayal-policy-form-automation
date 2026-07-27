@@ -701,10 +701,19 @@ async function createBriskCertificate(data) {
     // Extract userId from data (handle both string and MongoDB ObjectId format)
     const userId = data.userId?.$oid || data.userId || '65a343220a6016a8f93424e7';
 
+    // Full endpoint URL, overridable via env (e.g. https://motorapi.rayal.in/motor/api/createBriskCertificate)
+    const briskApiUrl =
+      process.env.BRISK_CERT_API_URL ||
+      "http://localhost:3010/api/createBriskCertificate";
+    const parsedUrl = new URL(briskApiUrl);
+    const httpModule = parsedUrl.protocol === "https:" ? https : http;
+
+    console.log(`🌐 Brisk Certificate endpoint: ${briskApiUrl}`);
+
     const options = {
-      hostname: '192.168.1.7',
-      port: 8080,
-      path: '/api/createBriskCertificate',
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (parsedUrl.protocol === "https:" ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -714,7 +723,7 @@ async function createBriskCertificate(data) {
       }
     };
 
-    const req = http.request(options, (res) => {
+    const req = httpModule.request(options, (res) => {
       let responseData = '';
 
       res.on('data', (chunk) => {
@@ -1019,7 +1028,10 @@ async function mergePDFsAndUpload(reliancePdfPath, briskPdfPath, data) {
  */
 function getStateName(stateCode) {
   const stateMap = {
-    "30": "KARNATAKA",
+    // NOTE: "30" and "26" are the Reliance portal codes produced by server.js
+    // formData (30 = TAMILNADU, 26 = KARNATAKA) — not GST codes
+    "30": "TAMIL NADU",
+    "26": "KARNATAKA",
     "33": "TAMIL NADU",
     "29": "KERALA",
     "32": "TELANGANA",
@@ -1043,7 +1055,6 @@ function getStateName(stateCode) {
     "31": "LAKSHADWEEP",
     "34": "PUDUCHERRY",
     "04": "CHANDIGARH",
-    "26": "DADRA AND NAGAR HAVELI AND DAMAN AND DIU",
     "25": "GOA",
     "05": "UTTARAKHAND",
     "36": "LADAKH",
@@ -1138,6 +1149,7 @@ async function fillRelianceForm(
   let postCalculationError = null;
   let thisScreenshotUrl = null;
   let thisScreenshotKey = null;
+  let documentUploadError = null; // Aadhaar upload to portal failed (non-fatal warning)
 
   try {
     // === STEP 0: Create cloned browser (already logged in!) ===
@@ -1226,30 +1238,66 @@ async function fillRelianceForm(
     );
     console.log("Motors menu detected!");
 
-    await driver
-      .actions({ bridge: true })
-      .move({ origin: motorsMenu })
-      .perform();
-    await driver.sleep(3000);
-    console.log("Hovered on Motors menu...");
+    // === STEP 3: hover Motors and click Two Wheeler ===
+    // Retried with a real visibility wait — on a slow portal the submenu can
+    // take longer than any fixed sleep, and clicking a collapsed menu item
+    // throws "element not interactable: has no size and location"
+    let twoWheelerClicked = false;
+    for (let menuAttempt = 1; menuAttempt <= 4 && !twoWheelerClicked; menuAttempt++) {
+      try {
+        console.log(`Hovering on Motors menu (attempt ${menuAttempt}/4)...`);
+        await driver
+          .actions({ bridge: true })
+          .move({ origin: motorsMenu })
+          .perform();
 
-    // === STEP 3: click Two Wheeler ===
-    const twoWheelerLink = await driver.wait(
-      until.elementLocated(By.xpath("//li/a[contains(text(),'Two Wheeler')]")),
-      15000
-    );
-    await driver
-      .actions({ bridge: true })
-      .move({ origin: twoWheelerLink })
-      .perform();
-    await driver.wait(until.elementIsVisible(twoWheelerLink), 10000);
-    await driver.wait(until.elementIsEnabled(twoWheelerLink), 10000);
-    try {
-      await twoWheelerLink.click();
-    } catch {
-      await driver.executeScript("arguments[0].click();", twoWheelerLink);
+        const twoWheelerLink = await driver.wait(
+          until.elementLocated(By.xpath("//li/a[contains(text(),'Two Wheeler')]")),
+          10000
+        );
+
+        // Wait until the submenu is actually expanded (link visible WITH size)
+        await driver.wait(
+          async () => {
+            try {
+              const rect = await twoWheelerLink.getRect();
+              return (
+                (await twoWheelerLink.isDisplayed()) &&
+                rect.width > 0 &&
+                rect.height > 0
+              );
+            } catch (e) {
+              return false;
+            }
+          },
+          8000,
+          "Two Wheeler submenu did not become visible"
+        );
+
+        try {
+          await driver
+            .actions({ bridge: true })
+            .move({ origin: twoWheelerLink })
+            .perform();
+          await twoWheelerLink.click();
+        } catch (clickErr) {
+          await driver.executeScript("arguments[0].click();", twoWheelerLink);
+        }
+        twoWheelerClicked = true;
+        console.log(`Clicked Two Wheeler link! (attempt ${menuAttempt})`);
+      } catch (menuErr) {
+        console.log(
+          `⚠️ Motors submenu not ready (attempt ${menuAttempt}/4): ${menuErr.message}`
+        );
+        await driver.sleep(2500);
+      }
     }
-    console.log("Clicked Two Wheeler link!");
+
+    if (!twoWheelerClicked) {
+      throw new Error(
+        "Motors → Two Wheeler menu never became clickable after 4 attempts (portal slow/unresponsive)"
+      );
+    }
     await driver.sleep(4000);
     // === STEP 4: select "Two Wheeler Package Bundled (Only New Veh.)" ===
     console.log("Selecting Sub Product...");
@@ -1425,22 +1473,78 @@ async function fillRelianceForm(
       await driver.sleep(2000);
 
       // 2. Use Pincode Search field and select first result
+      // (verified with retries — the suggestion list sometimes loads slowly and
+      // blind ArrowDown+Enter used to silently miss it ~2/10 runs)
       console.log("Using pincode search field...");
-      const pincodeInput = await safeSendKeys(
-        driver,
-        By.id("pincodesearch"),
-        data.pinCode || "614630"
-      );
-      await driver.sleep(4000);
+      const pinCodeValue = String(data.pinCode || "614630");
+      let pincodeSelected = false;
 
-      // Select the first item from the dropdown by pressing Arrow Down and then Enter.
-      console.log("Selecting first pincode result from dropdown...");
-      await pincodeInput.sendKeys(Key.ARROW_DOWN);
-      await driver.sleep(1000);
-      await pincodeInput.sendKeys(Key.ENTER);
+      for (let pinAttempt = 1; pinAttempt <= 3 && !pincodeSelected; pinAttempt++) {
+        console.log(`Pincode attempt ${pinAttempt}/3: typing ${pinCodeValue}...`);
+        const pincodeInput = await waitForElementAndRetry(
+          driver,
+          By.id("pincodesearch"),
+          "sendKeys"
+        );
 
-      await waitForLoaderToDisappear(driver);
-      await driver.sleep(500);
+        // Clear and re-type with an input event so the autocomplete re-triggers
+        await driver.executeScript(
+          "arguments[0].value = ''; arguments[0].dispatchEvent(new Event('input', { bubbles: true }));",
+          pincodeInput
+        );
+        await driver.sleep(300);
+        await pincodeInput.sendKeys(pinCodeValue);
+
+        // Wait until the suggestion popup actually shows a matching item (up to 12s)
+        let suggestionItem = null;
+        const suggestionDeadline = Date.now() + 12000;
+        while (Date.now() < suggestionDeadline && !suggestionItem) {
+          suggestionItem = await driver.executeScript(
+            `
+            var pin = arguments[0];
+            var candidates = document.querySelectorAll(
+              '.k-animation-container li, ul.k-list li, .k-list-container li, .ui-autocomplete li'
+            );
+            for (var i = 0; i < candidates.length; i++) {
+              var el = candidates[i];
+              if (el.offsetParent !== null && el.textContent && el.textContent.indexOf(pin) !== -1) {
+                return el;
+              }
+            }
+            return null;
+            `,
+            pinCodeValue
+          );
+          if (!suggestionItem) await driver.sleep(500);
+        }
+
+        if (suggestionItem) {
+          console.log("Selecting first pincode result from dropdown...");
+          try {
+            await driver.executeScript("arguments[0].click();", suggestionItem);
+          } catch (clickErr) {
+            console.log("JS click failed, falling back to keyboard selection...");
+            await pincodeInput.sendKeys(Key.ARROW_DOWN);
+            await driver.sleep(500);
+            await pincodeInput.sendKeys(Key.ENTER);
+          }
+
+          await waitForLoaderToDisappear(driver);
+          await driver.sleep(500);
+          pincodeSelected = true;
+          console.log(`✅ Pincode ${pinCodeValue} selected (attempt ${pinAttempt})`);
+        } else {
+          console.log(
+            `⚠️ No pincode suggestions appeared for "${pinCodeValue}" (attempt ${pinAttempt}), retrying...`
+          );
+        }
+      }
+
+      if (!pincodeSelected) {
+        throw new Error(
+          `Pincode dropdown showed no results for "${pinCodeValue}" after 3 attempts — cannot continue without address`
+        );
+      }
 
       // Continue with other fields
       // await safeSendKeys(driver, By.id("area"), data.area || "MG Road");
@@ -1972,7 +2076,7 @@ async function fillRelianceForm(
         try {
           const discountParsed = Number(String(data.discount ?? '').replace(/[^0-9.-]/g, ''));
           let discountValue = Number.isFinite(discountParsed) ? discountParsed : 60;
-          discountValue = discountValue === 80 ? 80 : 60; // clamp to schema enum
+          discountValue = discountValue; // clamp to schema enum
           const discountInput = await driver.wait(
             until.elementLocated(By.id("Detariff_Discount_Rate")),
             10000
@@ -3431,6 +3535,88 @@ async function fillRelianceForm(
             throw err;
           }
 
+          // === NEW STEP: "Choose KYC Method" page (added by the portal team) ===
+          // Select the OVD UPLOAD radio, press Continue, and the document-type
+          // page (PAN / AADHAAR / CKYC / UPLOAD DOCUMENT) opens next
+          try {
+            console.log("Checking for 'Choose KYC Method' page...");
+            const ovdRadio = await driver.wait(
+              until.elementLocated(
+                By.css("#ind-ovd, input[name='selectedOption'][value='ovd']")
+              ),
+              20000
+            );
+
+            // The real radio is hidden behind a styled label — click the label
+            // (or the wrapper div), not the input itself
+            try {
+              const ovdLabel = await driver.findElement(
+                By.css("label[for='ind-ovd'], div.method-option[data-method='ovd']")
+              );
+              await driver.executeScript(
+                "arguments[0].scrollIntoView({block: 'center'});",
+                ovdLabel
+              );
+              await driver.sleep(300);
+              try {
+                await ovdLabel.click();
+              } catch (labelClickErr) {
+                await driver.executeScript("arguments[0].click();", ovdLabel);
+              }
+            } catch (labelErr) {
+              await driver.executeScript(
+                "arguments[0].click(); arguments[0].checked = true; arguments[0].dispatchEvent(new Event('change', { bubbles: true }));",
+                ovdRadio
+              );
+            }
+            await driver.sleep(800);
+
+            // Verify the radio actually got selected; force it if not
+            const ovdSelected = await driver.executeScript(
+              "var r = document.querySelector(\"#ind-ovd, input[name='selectedOption'][value='ovd']\"); return r ? r.checked : false;"
+            );
+            if (!ovdSelected) {
+              console.log("⚠️ OVD radio not selected after click, forcing selection...");
+              await driver.executeScript(
+                "var r = document.querySelector(\"#ind-ovd, input[name='selectedOption'][value='ovd']\"); if (r) { r.checked = true; r.dispatchEvent(new Event('click', { bubbles: true })); r.dispatchEvent(new Event('change', { bubbles: true })); }"
+              );
+            }
+            console.log("✅ Selected 'OVD UPLOAD' KYC method");
+
+            // Click the Continue button ("Continue with OVD UPLOAD ➜")
+            const kycContinueBtn = await driver.wait(
+              until.elementLocated(By.id("continueBtn")),
+              10000
+            );
+            await driver.executeScript(
+              "arguments[0].scrollIntoView({block: 'center'});",
+              kycContinueBtn
+            );
+            await driver.sleep(300);
+            try {
+              await kycContinueBtn.click();
+            } catch (contClickErr) {
+              await driver.executeScript("arguments[0].click();", kycContinueBtn);
+            }
+            console.log("✅ Clicked Continue (with OVD UPLOAD)");
+
+            // Wait for the document-type page to load
+            await driver.sleep(5000);
+            try {
+              await driver.wait(
+                async () =>
+                  driver.executeScript("return document.readyState === 'complete'"),
+                15000
+              );
+            } catch (e) {
+              // best effort — the search below has its own waits
+            }
+          } catch (methodPageErr) {
+            console.log(
+              `⚠️ 'Choose KYC Method' page not detected (${methodPageErr.message}) — continuing with existing flow...`
+            );
+          }
+
           // === NEW FLOW: Upload Document from Database ===
           console.log("Uploading document from database...");
           try {
@@ -3461,46 +3647,79 @@ async function fillRelianceForm(
               console.log("Finding UPLOAD DOCUMENT div with ng-click='selectDoc(upload)'...");
               let uploadDocDiv = null;
 
+              // Wait for the Angular KYC page to finish loading before searching
               try {
-                // Primary selector: ng-click directive with selectDoc('upload')
-                uploadDocDiv = await driver.wait(
-                  until.elementLocated(
-                    By.css("div[ng-click=\"selectDoc('upload')\"]")
-                  ),
-                  8000
+                await driver.wait(
+                  async () =>
+                    driver.executeScript("return document.readyState === 'complete'"),
+                  15000
                 );
-                console.log("✅ Found UPLOAD DOCUMENT div by ng-click selector");
-              } catch (e1) {
-                try {
-                  // Fallback: XPath with text content
-                  uploadDocDiv = await driver.wait(
-                    until.elementLocated(
-                      By.xpath("//div[contains(@ng-click, 'selectDoc') and contains(., 'UPLOAD')]")
-                    ),
-                    8000
-                  );
-                  console.log("✅ Found UPLOAD DOCUMENT div by XPath");
-                } catch (e2) {
-                  try {
-                    // Fallback: Any div with class containing 'doc-type' and containing 'UPLOAD'
-                    uploadDocDiv = await driver.wait(
-                      until.elementLocated(
-                        By.xpath("//div[@class='doc-type' and contains(., 'UPLOAD DOCUMENT')]")
-                      ),
-                      8000
-                    );
-                    console.log("✅ Found UPLOAD DOCUMENT div by doc-type class");
-                  } catch (e3) {
-                    // Fallback: Find div with text containing UPLOAD DOCUMENT
-                    uploadDocDiv = await driver.wait(
-                      until.elementLocated(
-                        By.xpath("//div[contains(text(), 'UPLOAD DOCUMENT')]")
-                      ),
-                      8000
-                    );
-                    console.log("✅ Found UPLOAD DOCUMENT div by text content");
+              } catch (e) {
+                console.log("⚠️ KYC page still loading after 15s, searching anyway...");
+              }
+              await driver.sleep(1000);
+
+              // Case-insensitive search across any element type, run in page context
+              const findUploadEl = () =>
+                driver.executeScript(`
+                  var byNgClick = document.querySelector("[ng-click*='selectDoc']");
+                  if (byNgClick) return byNgClick;
+                  var all = document.querySelectorAll('div, button, li, span, a, label');
+                  for (var i = 0; i < all.length; i++) {
+                    var t = (all[i].textContent || '').trim().toUpperCase();
+                    if (t.length < 40 && t.indexOf('UPLOAD') !== -1 && t.indexOf('DOCUMENT') !== -1) {
+                      return all[i];
+                    }
                   }
+                  return null;
+                `);
+
+              // Poll the main document, then inside each iframe (KYC widgets
+              // often render in one). If found in a frame, STAY in that frame so
+              // the following file-input steps run in the same context.
+              const uploadSearchDeadline = Date.now() + 25000;
+              let uploadFoundInFrame = false;
+              while (Date.now() < uploadSearchDeadline && !uploadDocDiv) {
+                uploadDocDiv = await findUploadEl();
+                if (uploadDocDiv) break;
+
+                const kycIframes = await driver.findElements(By.css("iframe"));
+                for (let fi = 0; fi < kycIframes.length && !uploadDocDiv; fi++) {
+                  try {
+                    await driver.switchTo().frame(fi);
+                    uploadDocDiv = await findUploadEl();
+                    if (uploadDocDiv) {
+                      uploadFoundInFrame = true;
+                      console.log(`✅ Found UPLOAD DOCUMENT inside iframe #${fi} — staying in frame`);
+                      break;
+                    }
+                  } catch (frameErr) {
+                    // frame may have detached — keep looking
+                  }
+                  await driver.switchTo().defaultContent();
                 }
+                if (!uploadDocDiv) await driver.sleep(1000);
+              }
+
+              if (!uploadDocDiv) {
+                // Log what the page actually shows so the next failure is diagnosable
+                try {
+                  const pageTitle = await driver.getTitle();
+                  const iframeCount = (await driver.findElements(By.css("iframe"))).length;
+                  const bodySnippet = await driver.executeScript(
+                    "return (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').substring(0, 300);"
+                  );
+                  console.log(`🔎 KYC page diagnostics — title: "${pageTitle}", iframes: ${iframeCount}`);
+                  console.log(`🔎 Page text starts: ${bodySnippet}`);
+                } catch (diagErr) {
+                  // best-effort only
+                }
+                throw new Error(
+                  "UPLOAD DOCUMENT option not found on KYC page (searched main page + iframes for 25s)"
+                );
+              }
+              if (!uploadFoundInFrame) {
+                console.log("✅ Found UPLOAD DOCUMENT element in main document");
               }
 
               if (uploadDocDiv) {
@@ -4495,9 +4714,14 @@ async function fillRelianceForm(
             }
           } catch (err) {
             console.log("Error uploading document:", err.message);
+            documentUploadError = `Aadhaar document upload to portal failed: ${err.message}`;
           }
 
-          console.log("✅ All new flow steps completed successfully!");
+          if (documentUploadError) {
+            console.log("⚠️ New flow steps completed WITH WARNINGS (document upload failed)");
+          } else {
+            console.log("✅ All new flow steps completed successfully!");
+          }
 
 
           // === OLD FLOW COMMENTED OUT ===
@@ -4894,13 +5118,16 @@ async function fillRelianceForm(
         },
         reliancePdfPath: reliancePdfPath,
         mergedPdf: mergedPdfInfo,
+        documentUploadError: documentUploadError,
       };
     } catch (briskError) {
       console.error("❌ Failed to create Brisk Certificate:", briskError.message);
-      // Don't fail the entire job if Brisk API fails, just log it
+      // Don't retry the job (form already submitted, money involved) but report
+      // the failure so the job is marked completed_with_errors, not completed
       return {
         success: true,
         briskCertificateError: briskError.message,
+        documentUploadError: documentUploadError,
       };
     }
   } catch (e) {
