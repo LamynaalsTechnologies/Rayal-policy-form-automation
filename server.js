@@ -142,6 +142,8 @@ const db = mongoose.connection;
 // Persistent Queue System using MongoDB
 let activeRelianceJobs = 0;
 const MAX_PARALLEL_JOBS = 1; // Process only one job at a time as per user request
+const JOB_TIMEOUT = 300000; // 5 minutes max per job run
+const ZOMBIE_GRACE_MS = 90000; // Extra grace before a stuck "processing" job is reclaimed
 let jobQueueCollection = null; // Will be initialized after DB connection
 let auditLogCollection = null; // For audit logging
 
@@ -160,7 +162,7 @@ const JOB_STATUS = {
  * 🛡️ Enhanced Job Enqueue with Validation & Duplicate Detection
  * CRITICAL: Since money is involved, we validate and check for duplicates
  */
-const enqueueRelianceJob = async (formData, captchaId = null) => {
+const enqueueRelianceJob = async (formData, captchaId = null, operationType = null) => {
   const startTime = Date.now();
 
   try {
@@ -202,22 +204,38 @@ const enqueueRelianceJob = async (formData, captchaId = null) => {
       });
     }
 
-    // Step 3: Check for duplicate submissions (CRITICAL: Prevent double charges)
-    const idempotencyKey = generateIdempotencyKey(sanitizedData);
-    const existingJob = await checkDuplicateSubmission(jobQueueCollection, idempotencyKey, 60);
+    // Step 3a: Check if a job ALREADY exists for this same policy document.
+    // Insert + later Aadhaar/PAN uploads fire separate change events for the same
+    // document — that is the same work item, NOT a duplicate submission.
+    let sameDocJob = null;
+    if (captchaId) {
+      sameDocJob = await jobQueueCollection.findOne({
+        captchaId: captchaId,
+        status: { $in: [JOB_STATUS.PENDING, JOB_STATUS.PROCESSING, JOB_STATUS.COMPLETED] }
+      });
+    }
 
-    if (existingJob) {
-      console.warn(`[Reliance Queue] ⚠️ Duplicate submission detected for ${sanitizedData.firstName}`);
-      console.warn(`   Existing Job ID: ${existingJob._id}, Status: ${existingJob.status}`);
+    // A re-INSERT after the old job completed means the document was deleted and
+    // re-created — that's new work, not a re-notification of the finished job
+    if (sameDocJob && sameDocJob.status === JOB_STATUS.COMPLETED && operationType === "insert") {
+      console.log(`[Reliance Queue] 🔁 Document re-created after completed job ${sameDocJob._id} — starting a fresh job`);
+      sameDocJob = null;
+    }
 
-      // NEW logic: If the existing job is missing Aadhaar/PAN but the new data has it, update the job in-place
-      const needsAadharUpdate = sanitizedData.aadharCard?.key && !existingJob.formData.aadharCard?.key;
-      const needsPanUpdate = sanitizedData.panCard?.key && !existingJob.formData.panCard?.key;
-      const needsNomineeAgeUpdate = sanitizedData.nomineeAge && !existingJob.formData.nomineeAge;
-      const needsPaCoverYearsUpdate = sanitizedData.paCoverYears && !existingJob.formData.paCoverYears;
+    if (sameDocJob) {
+      const runningForSec = sameDocJob.startedAt
+        ? Math.round((Date.now() - new Date(sameDocJob.startedAt).getTime()) / 1000)
+        : null;
+      console.log(`[Reliance Queue] ℹ️ Job already exists for this policy document (Job ID: ${sameDocJob._id}, Status: ${sameDocJob.status}${runningForSec !== null ? `, running for ${runningForSec}s` : ""})`);
+
+      // If the existing job is missing Aadhaar/PAN but the new data has it, update the job in-place
+      const needsAadharUpdate = sanitizedData.aadharCard?.key && !sameDocJob.formData.aadharCard?.key;
+      const needsPanUpdate = sanitizedData.panCard?.key && !sameDocJob.formData.panCard?.key;
+      const needsNomineeAgeUpdate = sanitizedData.nomineeAge && !sameDocJob.formData.nomineeAge;
+      const needsPaCoverYearsUpdate = sanitizedData.paCoverYears && !sameDocJob.formData.paCoverYears;
 
       if (needsAadharUpdate || needsPanUpdate || needsNomineeAgeUpdate || needsPaCoverYearsUpdate) {
-        console.log(`[Reliance Queue] 🔄 Updating existing job ${existingJob._id} with missing fields...`);
+        console.log(`[Reliance Queue] 🔄 Updating existing job ${sameDocJob._id} with missing fields...`);
         const updateFields = {};
         if (needsAadharUpdate) updateFields["formData.aadharCard"] = sanitizedData.aadharCard;
         if (needsPanUpdate) updateFields["formData.panCard"] = sanitizedData.panCard;
@@ -225,19 +243,40 @@ const enqueueRelianceJob = async (formData, captchaId = null) => {
         if (needsPaCoverYearsUpdate) updateFields["formData.paCoverYears"] = sanitizedData.paCoverYears;
 
         await jobQueueCollection.updateOne(
-          { _id: existingJob._id },
+          { _id: sameDocJob._id },
           { $set: updateFields }
         );
-        console.log(`[Reliance Queue] ✅ In-place update successful for job ${existingJob._id}`);
+        console.log(`[Reliance Queue] ✅ In-place update successful for job ${sameDocJob._id}`);
       }
+
+      // Log audit entry
+      await logAuditEntry('JOB_MERGED_SAME_DOCUMENT', {
+        captchaId,
+        customerName: `${sanitizedData.firstName} ${sanitizedData.lastName}`,
+        existingJobId: sameDocJob._id,
+        existingJobStatus: sameDocJob.status,
+        upgraded: needsAadharUpdate || needsPanUpdate
+      });
+
+      // Return existing job ID
+      return sameDocJob._id;
+    }
+
+    // Step 3b: Check for duplicate submissions from a DIFFERENT document
+    // (CRITICAL: Prevent double charges — same customer data submitted twice)
+    const idempotencyKey = generateIdempotencyKey(sanitizedData);
+    const existingJob = await checkDuplicateSubmission(jobQueueCollection, idempotencyKey, 60, captchaId);
+
+    if (existingJob) {
+      console.warn(`[Reliance Queue] ⚠️ Duplicate submission detected for ${sanitizedData.firstName}`);
+      console.warn(`   Existing Job ID: ${existingJob._id}, Status: ${existingJob.status}, from document: ${existingJob.captchaId}`);
 
       // Log audit entry
       await logAuditEntry('DUPLICATE_DETECTED', {
         captchaId,
         customerName: `${sanitizedData.firstName} ${sanitizedData.lastName}`,
         existingJobId: existingJob._id,
-        existingJobStatus: existingJob.status,
-        upgraded: needsAadharUpdate || needsPanUpdate
+        existingJobStatus: existingJob.status
       });
 
       // Return existing job ID
@@ -329,6 +368,22 @@ const processRelianceQueue = async () => {
   }
 
   try {
+    // Watchdog: reclaim zombie jobs stuck in "processing" past timeout + grace.
+    // The Promise.race timeout normally handles this; this covers handler crashes.
+    const zombieCutoff = new Date(Date.now() - (JOB_TIMEOUT + ZOMBIE_GRACE_MS));
+    const zombies = await jobQueueCollection.updateMany(
+      { status: JOB_STATUS.PROCESSING, startedAt: { $lt: zombieCutoff } },
+      {
+        $set: { status: JOB_STATUS.PENDING, recoveredAt: new Date() },
+        $unset: { nextRetryAt: "" },
+      }
+    );
+    if (zombies.modifiedCount > 0) {
+      console.warn(
+        `[Reliance Queue] 🧟 Reclaimed ${zombies.modifiedCount} zombie job(s) stuck in processing > ${(JOB_TIMEOUT + ZOMBIE_GRACE_MS) / 1000}s`
+      );
+    }
+
     // Count how many jobs are currently processing
     const processingCount = await jobQueueCollection.countDocuments({
       status: JOB_STATUS.PROCESSING,
@@ -359,7 +414,18 @@ const processRelianceQueue = async () => {
       .toArray();
 
     if (pendingJobs.length === 0) {
-      return; // No pending jobs
+      // Not silent: if jobs exist but are waiting on retry backoff, say when the next is due
+      const nextDue = await jobQueueCollection
+        .find({ status: JOB_STATUS.PENDING, nextRetryAt: { $gt: new Date() } })
+        .sort({ nextRetryAt: 1 })
+        .limit(1)
+        .toArray();
+
+      if (nextDue.length > 0) {
+        const waitSec = Math.ceil((nextDue[0].nextRetryAt.getTime() - Date.now()) / 1000);
+        console.log(`[Reliance Queue] ⏳ Pending job(s) waiting on retry backoff — next due in ${waitSec}s`);
+      }
+      return; // No pending jobs ready
     }
 
     console.log(
@@ -426,7 +492,6 @@ const processRelianceQueue = async () => {
 
 const runPolicyJob = async (job) => {
   const jobIdentifier = `${job.formData.firstName}_${job._id}`;
-  const JOB_TIMEOUT = 300000; // 5 minutes timeout per job
   const processingStartTime = Date.now();
   const companyName = (job.formData.Companyname || job.formData.company || "reliance").toLowerCase();
   const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
@@ -711,6 +776,9 @@ const runPolicyJob = async (job) => {
           }
         );
 
+        // Wake the queue exactly when the retry is due (30s poll is only a backstop)
+        setTimeout(() => void processRelianceQueue(), retryDelay + 1000);
+
         console.warn(`\n${'🟡'.repeat(35)}`);
         console.warn(`[Reliance Queue] ⚠️ FAILED (LOGIN FORM) for ${job.formData.firstName}`);
         console.warn(`[Reliance Queue] 🔄 Will retry in ${retryDelay / 1000}s (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`);
@@ -816,6 +884,9 @@ const runPolicyJob = async (job) => {
         }
       );
 
+      // Wake the queue exactly when the retry is due (30s poll is only a backstop)
+      setTimeout(() => void processRelianceQueue(), retryDelay + 1000);
+
       console.warn(
         `[Reliance Queue] ⚠️ Will retry [${classified.code}] in ${retryDelay / 1000}s (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
       );
@@ -865,6 +936,19 @@ db.once("open", async () => {
     );
   }
 
+  // Clear stale retry backoff on restart — otherwise "will start processing" waits
+  // silently until an old nextRetryAt (1-16 min backoff) expires + next 30s poll tick
+  const clearedBackoff = await jobQueueCollection.updateMany(
+    { status: JOB_STATUS.PENDING, nextRetryAt: { $exists: true } },
+    { $unset: { nextRetryAt: "" } }
+  );
+
+  if (clearedBackoff.modifiedCount > 0) {
+    console.log(
+      `[Job Queue] ⏩ Cleared retry backoff on ${clearedBackoff.modifiedCount} pending job(s) — running them now`
+    );
+  }
+
   // Count pending jobs and start processing
   const pendingCount = await jobQueueCollection.countDocuments({
     status: JOB_STATUS.PENDING,
@@ -907,19 +991,42 @@ db.once("open", async () => {
     },
   ]);
 
-  changeStream.on("change", async (change) => {
-    console.log(`📡 Change detected: ${change.operationType}`);
+  // ⏳ Debounce per document: insert + follow-up Aadhaar/PAN updates fire separate
+  // change events for the SAME document. Each new event restarts the 4s timer, so
+  // only ONE processing run happens per document after the data stops changing.
+  const pendingDocTimers = new Map();
+  const STABILIZATION_MS = 4000;
 
-    let data = change?.fullDocument;
+  changeStream.on("change", (change) => {
     const documentId = change.documentKey?._id;
+    if (!documentId) return;
+    const idStr = documentId.toString();
 
-    // ⏳ User requested 3-4 second delay for data entry (Aadhaar/PAN sync)
-    console.log(`[MongoDB Watch] ⏳ Waiting 4 seconds for data stabilization (ID: ${documentId})...`);
-    await sleep(4000);
+    console.log(`📡 Change detected: ${change.operationType} (ID: ${idStr})`);
 
-    // 📥 Fetch FRESH full document AFTER the wait to ensure all fields are captured
+    const existing = pendingDocTimers.get(idStr);
+    // "insert" wins for the window: a re-created document must be treated as new work
+    const opType = existing?.opType === "insert" ? "insert" : change.operationType;
+    if (existing) {
+      clearTimeout(existing.timer);
+      console.log(`[MongoDB Watch] 🔁 Another change for ${idStr} during stabilization window, restarting 4s wait...`);
+    } else {
+      console.log(`[MongoDB Watch] ⏳ Waiting 4 seconds for data stabilization (ID: ${idStr})...`);
+    }
+
+    const timer = setTimeout(() => {
+      pendingDocTimers.delete(idStr);
+      processPolicyDocument(documentId, opType).catch((error) => {
+        console.error(`[MongoDB Watch] ❌ Failed processing document ${idStr}:`, error.message);
+      });
+    }, STABILIZATION_MS);
+    pendingDocTimers.set(idStr, { timer, opType });
+  });
+
+  const processPolicyDocument = async (documentId, operationType) => {
+    // 📥 Fetch FRESH full document to ensure all fields are captured
     console.log(`[MongoDB Watch] 📥 Fetching fresh document state...`);
-    data = await collection.findOne({ _id: documentId });
+    const data = await collection.findOne({ _id: documentId });
 
     if (!data) {
       console.warn(`[MongoDB Watch] ⚠️ Document ${documentId} not found after wait. Skipping.`);
@@ -937,7 +1044,7 @@ db.once("open", async () => {
       console.log(`[MongoDB Watch] ✅ Aadhaar card verified for ${documentId}.`);
     }
 
-    console.log(`[MongoDB Watch] ✅ Data verified for ${change.operationType} (ID: ${documentId}), processing policy...`);
+    console.log(`[MongoDB Watch] ✅ Data verified for ${operationType} (ID: ${documentId}), processing policy...`);
 
     console.log("data: ******* ******* ******* ******* ******* ******* ", data);
 
@@ -1076,8 +1183,8 @@ db.once("open", async () => {
     );
 
     // Add to queue with captchaId reference
-    await enqueueRelianceJob(formData, captchaId);
-  });
+    await enqueueRelianceJob(formData, captchaId, operationType);
+  };
 });
 
 // Setup Express app for API routes
