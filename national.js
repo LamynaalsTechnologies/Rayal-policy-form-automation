@@ -84,7 +84,7 @@ Examples:
 async function waitForLoaderToDisappear(
   driver,
   locator = By.css(".k-loading-mask"),
-  timeout = 20000
+  timeout = 40000
 ) {
   console.log(`Waiting for loader (${locator}) to disappear...`);
   try {
@@ -109,25 +109,424 @@ async function waitForLoaderToDisappear(
   }
 }
 
-async function waitForPortalLoaderToDisappear(driver, timeout = 5000, pollInterval = 400) {
-  const locator = By.css("div.loading-text");
+// The National portal's real page-level busy indicators. These mirror the
+// proven loader detection used by the National PDF automation
+// (waitForNationalLoader): the NIC bouncing-GIF spinner, the loading-text
+// overlay, and the sr-only "loading" announcement — plus the Kendo mask.
+//
+// Do NOT add mat-progress-bar / mat-progress-spinner here: Angular Material
+// dialogs render their own spinners, so an OPEN POPUP would be read as "the
+// page is still loading" and every wait would stall while the dialog sat there
+// waiting for input.
+const PORTAL_BUSY_SELECTOR = [
+  "img[src*='NIC-Bouncing']",
+  "img[src*='loading']",
+  "img[src*='loader']",
+  "img[alt='NIC_Page_Loading']",
+  "div[class*='loading-text']",
+  ".k-loading-mask",
+  "span[class*='sr-only']", // only counts when its text says "loading" — see isPortalBusy
+].join(", ");
+
+// The premium/payment flow was written against the OLD version of
+// waitForPortalLoaderToDisappear, which never actually waited — it looked once
+// and returned. That flow already has its own fixed settle sleeps and popup
+// handling and is known-good, so its calls stay non-blocking. Making them wait
+// stalled the run with a payment popup sitting open on screen.
+const NON_BLOCKING_LOADER_CHECK = 0;
+
+// Popups this portal raises that BLOCK further work until they are dismissed
+// (e.g. the "Road Side Assistance … not opted currently!" Confirm box after
+// Generate Quick Quote). Includes the portal's own confirm/alert buttons by
+// name, because several of these dialogs are plain divs with no ARIA role.
+const BLOCKING_DIALOG_SELECTOR = [
+  "mat-dialog-container",
+  ".mat-mdc-dialog-container",
+  "[role='dialog']",
+  "[role='alertdialog']",
+  ".modal.show",
+  "[name='confirm_btn_yes_01']",
+  "[name='alert_btn_data_01']",
+].join(", ");
+
+/**
+ * True when a popup is on screen waiting for the user to dismiss it.
+ *
+ * A visible dialog means the portal has FINISHED its request and is asking for
+ * input — it is the opposite of "still loading". Treating one as busy
+ * deadlocks the run: the wait blocks on a loader that only clears once the
+ * dialog is dismissed, and the code that would dismiss it never runs.
+ */
+async function isBlockingDialogOpen(driver) {
   try {
-    const loaders = await driver.findElements(locator);
-    for (const loader of loaders) {
-      try {
-        if (await loader.isDisplayed()) {
-          console.log("Portal loader visible but skipping wait as requested.");
-          return;
+    return await driver.executeScript(`
+      const nodes = document.querySelectorAll(arguments[0]);
+      for (const el of nodes) {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+        if (parseFloat(style.opacity || '1') < 0.05) continue;
+        if (el.getAttribute('aria-hidden') === 'true') continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        return true;
+      }
+      return false;
+    `, BLOCKING_DIALOG_SELECTOR);
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * True when a loader/spinner is actually visible on screen. One round-trip.
+ */
+async function isPortalBusy(driver) {
+  try {
+    return await driver.executeScript(`
+      const nodes = document.querySelectorAll(arguments[0]);
+      for (const el of nodes) {
+        // sr-only spans are used all over the page for accessibility labels —
+        // only the one that actually announces "loading" is a busy signal.
+        if (el.className && String(el.className).indexOf('sr-only') !== -1) {
+          const srText = (el.innerText || el.textContent || '').toLowerCase();
+          if (srText.indexOf('loading') === -1) continue;
         }
-      } catch (error) {
-        if (error.name !== "StaleElementReferenceError") {
-          throw error;
+        // A spinner INSIDE a dialog/overlay means "this popup is busy", not
+        // "the page is loading" — and a popup that is simply open and waiting
+        // for input must never be mistaken for in-flight work.
+        if (el.closest && el.closest('mat-dialog-container, .mat-mdc-dialog-container, .cdk-overlay-pane, .modal')) continue;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+        if (parseFloat(style.opacity || '1') < 0.05) continue;
+        if (el.getAttribute('aria-hidden') === 'true') continue;
+        // display:none on any ancestor
+        if (el.offsetParent === null && style.position !== 'fixed') continue;
+        // A collapsed-height progress bar (height 0, full width) is the normal
+        // Angular Material "idle" state — require BOTH dimensions to be real,
+        // otherwise this latches on "busy" forever and every wait burns its
+        // full timeout.
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        return true;
+      }
+      return false;
+    `, PORTAL_BUSY_SELECTOR);
+  } catch (e) {
+    // Page is mid-navigation or the script was blocked — treat as idle and
+    // let the caller's own element wait be the real gate.
+    return false;
+  }
+}
+
+/**
+ * Wait until every portal loader has cleared.
+ *
+ * The previous version never waited: it looked once, logged "skipping wait as
+ * requested" and returned. Every caller therefore had to guard itself with a
+ * fixed driver.sleep(), which is both slower (a flat 2-4s even when the portal
+ * responded in 200ms) and less safe (a slow response was raced, not waited
+ * out). This now really waits, so those fixed sleeps can go.
+ *
+ * Never throws — on timeout it logs and lets the caller's own element wait
+ * decide, exactly like waitForLoaderToDisappear above.
+ */
+async function waitForPortalLoaderToDisappear(driver, timeout = 40000, pollInterval = 120) {
+  // timeout 0 = explicit non-blocking probe. Used by the payment flow, which
+  // was written and proven against the old no-op version of this helper and
+  // carries its own settle sleeps — see NON_BLOCKING_LOADER_CHECK below.
+  if (timeout <= 0) return true;
+
+  const startedAt = Date.now();
+  const deadline = startedAt + timeout;
+  let sawBusy = false;
+  let lastLogged = -1;
+
+  while (Date.now() < deadline) {
+    // A popup asking for input means the request already finished — stop
+    // waiting and hand control back so the caller can dismiss it. Without
+    // this the run deadlocks: the loader only clears once the dialog is
+    // dismissed, and the code that dismisses it is stuck behind this wait.
+    if (await isBlockingDialogOpen(driver)) {
+      console.log("Popup is open (portal is waiting for input) — not a loader, continuing.");
+      return true;
+    }
+
+    if (!(await isPortalBusy(driver))) {
+      if (sawBusy) {
+        console.log(`✅ Portal loader cleared after ${Math.round((Date.now() - startedAt) / 1000)}s`);
+      }
+      return true;
+    }
+    if (!sawBusy) {
+      sawBusy = true;
+      console.log("⏳ Portal loader visible, waiting for it to clear...");
+    } else {
+      // Make a long wait visible in the logs instead of looking like a hang.
+      const remaining = Math.ceil((deadline - Date.now()) / 1000);
+      if (remaining !== lastLogged && (remaining % 5 === 0 || remaining <= 3)) {
+        console.log(`   🐢 National still loading... ${remaining}s left before giving up`);
+        lastLogged = remaining;
+      }
+    }
+    await driver.sleep(pollInterval);
+  }
+
+  console.log("⚠️ Portal loader still visible after wait (continuing anyway).");
+  return false;
+}
+
+/**
+ * Wait for the portal to go idle after an action that may fire a request.
+ *
+ * A request that was just fired has not rendered its spinner yet, so we give
+ * the loader a short window to appear before concluding "nothing happened".
+ * Bounded by appearGrace (a few hundred ms) instead of the multi-second blind
+ * sleeps this replaces — and if work IS in flight we wait for all of it.
+ */
+async function waitForPortalIdle(driver, timeout = 40000, appearGrace = 400) {
+  const graceDeadline = Date.now() + appearGrace;
+  let busy = false;
+
+  while (Date.now() < graceDeadline) {
+    // A popup that appeared during the grace window IS the response — the
+    // portal is done and waiting on us, so stop immediately.
+    if (await isBlockingDialogOpen(driver)) {
+      console.log("Popup appeared — portal finished, continuing to handle it.");
+      return true;
+    }
+    if (await isPortalBusy(driver)) {
+      busy = true;
+      break;
+    }
+    await driver.sleep(60);
+  }
+
+  if (!busy) return true; // nothing ever started — already idle
+  return waitForPortalLoaderToDisappear(driver, timeout);
+}
+
+/**
+ * Probe several locators at once and return the first that is actually
+ * present, without burning a full timeout per miss.
+ *
+ * findElements returns immediately (no implicit wait), so a chain of
+ * "try locator A for 5s, then B for 5s, then C for 5s" — which costs 15s
+ * whenever the page uses the last variant — becomes a single bounded poll.
+ * Returns { element, locator } or null.
+ *
+ * requireVisible defaults to true. Pass false when the caller clicks via
+ * executeScript, which works on hidden elements — otherwise a control inside a
+ * collapsed panel would be reported missing and silently skipped.
+ */
+async function firstPresentLocator(
+  driver,
+  locators,
+  timeout = 8000,
+  { pollInterval = 120, requireVisible = true } = {}
+) {
+  const list = Array.isArray(locators) ? locators : [locators];
+  const deadline = Date.now() + timeout;
+
+  do {
+    for (const locator of list) {
+      try {
+        const found = await driver.findElements(locator);
+        for (const el of found) {
+          try {
+            if (!requireVisible || (await el.isDisplayed())) {
+              return { element: el, locator };
+            }
+          } catch (staleError) {
+            // element vanished between find and check — try the next one
+          }
+        }
+      } catch (lookupError) {
+        // bad/unsupported locator — skip it rather than abort the chain
+      }
+    }
+    if (Date.now() >= deadline) break;
+    await driver.sleep(pollInterval);
+  } while (true);
+
+  return null;
+}
+
+/**
+ * Wait for an Angular Material overlay (dropdown/autocomplete panel) to close.
+ * Used instead of a fixed sleep after picking an option, so the next field is
+ * not clicked through a still-open backdrop.
+ */
+async function waitForOverlayGone(driver, timeout = 3000, pollInterval = 80) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    try {
+      const open = await driver.executeScript(`
+        return document.querySelectorAll(
+          '.cdk-overlay-pane mat-option, .mat-mdc-autocomplete-panel, .mat-mdc-select-panel'
+        ).length > 0;
+      `);
+      if (!open) return true;
+    } catch (e) {
+      return true; // cannot inspect — do not block the flow
+    }
+    await driver.sleep(pollInterval);
+  }
+  return false;
+}
+
+/**
+ * Type into an Angular Material autocomplete and pick the right option.
+ *
+ * Replaces the "sendKeys -> sleep(2000) -> click first mat-option" pattern.
+ * Two wins: it returns as soon as the options render (typically 100-400ms
+ * instead of a flat 2s), and because it matches on the option TEXT it can no
+ * longer click a stale option left over from the previously-open panel — the
+ * exact failure the old blind sleep was there to paper over.
+ *
+ * Falls back to the old "click whatever is showing" behaviour when nothing
+ * matches, so a portal that formats its options differently still works.
+ */
+async function selectAutocompleteOption(
+  driver,
+  input,
+  text,
+  description = "field",
+  { timeout = 10000, matchWindow = 2000, appearTimeout = 5000 } = {}
+) {
+  await input.clear();
+  await input.sendKeys(text);
+
+  const normalize = (value) =>
+    String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const target = normalize(text);
+  // Same selector string for both findElements and the querySelectorAll below,
+  // so the element list and the label list stay index-aligned.
+  const OPTION_CSS =
+    ".mat-mdc-autocomplete-panel mat-option, .cdk-overlay-pane mat-option, mat-option";
+  const optionSelector = By.css(OPTION_CSS);
+
+  const startedAt = Date.now();
+  const deadline = startedAt + timeout;
+  let firstSeenAt = null;
+
+  while (Date.now() < deadline) {
+    let options = [];
+    try {
+      options = await driver.findElements(optionSelector);
+    } catch (lookupError) {
+      options = [];
+    }
+
+    // Nothing has rendered yet — this field has no suggestion list. Give up on
+    // the same budget the old code used rather than burning the full timeout.
+    // Only bails when the list is genuinely still empty, so a slow lookup that
+    // lands just after appearTimeout is still used.
+    if (options.length === 0 && firstSeenAt === null && Date.now() - startedAt >= appearTimeout) {
+      break;
+    }
+
+    if (options.length > 0) {
+      if (firstSeenAt === null) firstSeenAt = Date.now();
+
+      // Pick the option that best matches what we typed. Read every label in
+      // ONE round-trip instead of a getText() per option.
+      //
+      // Ranking matters: a plain "contains either way" test lets a SHORTER
+      // option win — typing "Chennai - North West" would match a "Chennai"
+      // entry listed first and silently select the wrong RTO zone. So:
+      //   3 = exact match
+      //   2 = option contains everything we typed (prefer the shortest)
+      //   1 = we typed more than the option shows (prefer the longest/most specific)
+      let matched = null;
+      try {
+        // Read the labels off the SAME element handles we are about to click,
+        // not a fresh querySelectorAll. A second document query could be taken
+        // after Angular re-filtered the panel, and because Material reuses DOM
+        // nodes via trackBy the handles would still be valid — so a positional
+        // match could silently click an option with different text.
+        const labels = await driver.executeScript(
+          "return arguments[0].map(function (el) { return (el.innerText || el.textContent || ''); });",
+          options
+        );
+
+        let bestIndex = -1;
+        let bestScore = 0;
+        let bestLength = 0;
+
+        for (let i = 0; i < labels.length && i < options.length; i++) {
+          const optionText = normalize(labels[i]);
+          if (!optionText || !target) continue;
+
+          let score = 0;
+          if (optionText === target) score = 3;
+          else if (optionText.includes(target)) score = 2;
+          else if (target.includes(optionText)) score = 1;
+          if (score === 0) continue;
+
+          const better =
+            score > bestScore ||
+            (score === bestScore &&
+              (score === 2
+                ? optionText.length < bestLength   // tightest superset
+                : optionText.length > bestLength)); // most specific subset
+
+          if (bestIndex === -1 || better) {
+            bestIndex = i;
+            bestScore = score;
+            bestLength = optionText.length;
+          }
+        }
+
+        if (bestIndex !== -1) matched = options[bestIndex];
+      } catch (readError) {
+        // panel re-rendered mid-scan — next poll picks up the new list
+      }
+
+      // Click the match OUTSIDE the text-reading try. If this click fails
+      // (intercepted by a backdrop, not yet interactable) we must retry the
+      // match on the next poll — never silently fall through to "first
+      // available option", which would pick the wrong value and report success.
+      if (matched) {
+        try {
+          await matched.click();
+          console.log(`Selected ${description} option matching "${text}".`);
+          await waitForOverlayGone(driver, 2000);
+          return true;
+        } catch (clickError) {
+          try {
+            await driver.executeScript("arguments[0].click();", matched);
+            console.log(`Selected ${description} option matching "${text}" (JS click).`);
+            await waitForOverlayGone(driver, 2000);
+            return true;
+          } catch (jsClickError) {
+            // still blocked — retry on the next poll rather than guessing
+            await driver.sleep(100);
+            continue;
+          }
+        }
+      }
+
+      // Options are showing but none matched. Give the list a moment to
+      // finish filtering before falling back to the old behaviour.
+      if (Date.now() - firstSeenAt >= matchWindow) {
+        try {
+          await options[0].click();
+          console.log(
+            `No exact match for ${description} "${text}", selected first available option.`
+          );
+          await waitForOverlayGone(driver, 2000);
+          return true;
+        } catch (clickError) {
+          // fall through and retry on the next poll
         }
       }
     }
-  } catch (lookupError) {
-    console.log("Portal loader lookup error (ignored):", lookupError.message);
+
+    await driver.sleep(100);
   }
+
+  console.log(`Could not select ${description} from autocomplete, continuing...`);
+  return false;
 }
 
 async function safeClick(driver, locator, timeout = 15000) {
@@ -163,7 +562,40 @@ async function scrollAndClick(driver, locator, timeout = 5000) {
     return buttonParent || element;
   `, el);
   await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", target);
-  await driver.sleep(150);
+  await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
+  try {
+    await target.click();
+  } catch (clickError) {
+    await driver.executeScript("arguments[0].click();", target);
+  }
+  return target;
+}
+
+/**
+ * Click an element handle you have ALREADY validated, resolving the clickable
+ * ancestor first (same walk scrollAndClick does for a locator).
+ *
+ * Use this instead of re-resolving a locator when the page renders more than
+ * one match: until.elementLocated returns the first match in DOM order
+ * regardless of visibility, which may not be the element you checked.
+ */
+async function scrollAndClickResolved(driver, element) {
+  if (!element) {
+    throw new Error("scrollAndClickResolved received null element");
+  }
+  const target = (await driver.executeScript(`
+    const element = arguments[0];
+    if (!element) return null;
+    const tag = (element.tagName || '').toLowerCase();
+    if (['button', 'a'].includes(tag)) return element;
+    const role = element.getAttribute ? element.getAttribute('role') : null;
+    if (role && ['button', 'link'].includes(role)) return element;
+    const buttonParent = element.closest ? element.closest('button, a, [role="button"], [role="link"]') : null;
+    return buttonParent || element;
+  `, element)) || element;
+
+  await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", target);
+  await driver.sleep(60);
   try {
     await target.click();
   } catch (clickError) {
@@ -178,7 +610,7 @@ async function scrollAndClickElement(driver, element) {
   }
   await driver.wait(until.elementIsVisible(element), 10000);
   await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", element);
-  await driver.sleep(150);
+  await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
   try {
     await element.click();
   } catch (clickError) {
@@ -190,13 +622,26 @@ async function safeSelectOption(driver, dropdownLocator, optionText, timeout = 1
   // Click on dropdown to open it
   await safeClick(driver, dropdownLocator, timeout);
 
-  // Wait a bit for options to load
-  await driver.sleep(1500);
+  // Wait for the panel to actually render its options instead of guessing at
+  // a fixed delay — returns as soon as the list is up, and keeps waiting if
+  // the portal is slow to populate it.
+  try {
+    await driver.wait(
+      until.elementLocated(
+        By.css(".mat-mdc-select-panel mat-option, .cdk-overlay-pane mat-option, mat-option")
+      ),
+      Math.min(timeout, 10000)
+    );
+  } catch (panelError) {
+    console.log("Dropdown panel did not render options in time, continuing...");
+  }
 
-  // Find and click the option with the specified text
+  // Find and click the option with the specified text. The panel is confirmed
+  // open by now, so a missing option is a genuine miss — no need to spend the
+  // full timeout before trying the fallback below.
   try {
     const optionLocator = By.xpath(`//mat-option[contains(., '${optionText}')]`);
-    await safeClick(driver, optionLocator, timeout);
+    await safeClick(driver, optionLocator, Math.min(timeout, 5000));
   } catch (optionError) {
     console.log(`Could not find option "${optionText}", listing available options...`);
 
@@ -236,14 +681,12 @@ async function safeSelectOption(driver, dropdownLocator, optionText, timeout = 1
     }
   }
 
-  // Wait for option to be selected
-  await driver.sleep(500);
-
-  // Close the dropdown panel by clicking outside
+  // Close the dropdown panel by clicking outside, then wait for the overlay to
+  // actually detach — otherwise the next field can be clicked through a
+  // still-open backdrop. Condition-based, so it costs ~0 once it is closed.
   try {
-    // Click on the page body to close any open dropdowns/overlays
     await driver.executeScript("document.body.click();");
-    await driver.sleep(500);
+    await waitForOverlayGone(driver, 3000);
   } catch (e) {
     console.log("Could not close dropdown, continuing...");
   }
@@ -288,7 +731,7 @@ async function enableSlideToggle(
 
   await driver.wait(until.elementIsVisible(slideToggle), 10000);
   await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", slideToggle);
-  await driver.sleep(200);
+  await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
   const isOn = await driver.executeScript(
     "const toggle = arguments[0]; return toggle.getAttribute && toggle.getAttribute('aria-checked') === 'true';",
@@ -345,13 +788,13 @@ async function openFinancierSection(driver) {
 
       if (!isExpanded) {
         await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", tabElement);
-        await driver.sleep(200);
+        await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
         await driver.executeScript("arguments[0].click();", tabElement);
         await driver.sleep(800);
       }
     } else {
       await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", tabElement);
-      await driver.sleep(200);
+      await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
       await driver.executeScript("arguments[0].click();", tabElement);
       await driver.sleep(800);
     }
@@ -366,20 +809,32 @@ async function openVehicleInformationSection(driver) {
     const vehicleHeader = By.xpath("//mat-expansion-panel-header[.//h4[contains(., 'Vehicle Information')]]");
     const panelHeader = await driver.wait(until.elementLocated(vehicleHeader), 5000);
     await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", panelHeader);
-    await driver.sleep(200);
-    const isExpanded = await driver.executeScript(`
-      const header = arguments[0];
-      const panel = header.closest ? header.closest('mat-expansion-panel') : null;
-      if (!panel) return true;
-      if (panel.hasAttribute && panel.hasAttribute('aria-expanded')) {
-        return panel.getAttribute('aria-expanded') === 'true';
-      }
-      return panel.classList && panel.classList.contains('mat-expanded');
-    `, panelHeader);
-    if (!isExpanded) {
+    await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
+    // On this portal aria-expanded sits on the HEADER itself
+    // (<mat-expansion-panel-header ... aria-expanded="false">), not on the
+    // mat-expansion-panel — so check the header first.
+    const readExpanded = async () =>
+      driver.executeScript(`
+        const header = arguments[0];
+        if (header.hasAttribute && header.hasAttribute('aria-expanded')) {
+          return header.getAttribute('aria-expanded') === 'true';
+        }
+        const panel = header.closest ? header.closest('mat-expansion-panel') : null;
+        if (!panel) return true;
+        if (panel.hasAttribute && panel.hasAttribute('aria-expanded')) {
+          return panel.getAttribute('aria-expanded') === 'true';
+        }
+        return panel.classList && panel.classList.contains('mat-expanded');
+      `, panelHeader);
+
+    if (!(await readExpanded())) {
       console.log("Vehicle Information panel collapsed, expanding...");
       await driver.executeScript("arguments[0].click();", panelHeader);
-      await driver.sleep(600);
+      // Wait for it to actually open instead of guessing at 600ms.
+      const opened = await driver
+        .wait(async () => readExpanded(), 8000)
+        .catch(() => false);
+      console.log(`Vehicle Information panel expanded: ${opened}`);
     }
   } catch (e) {
     console.log("Vehicle Information expansion check failed:", e.message);
@@ -493,6 +948,287 @@ async function checkForValidationErrors(driver, data, stage) {
  * @returns {string} - User-friendly error message
  */
 
+// The Vahan result popup, in PRIORITY order. <app-check-vahan-dialog> is the
+// real component (it wraps the "Vahan Information" title, the .no-data-msg
+// blocks and the field grid), so it is preferred — a plain querySelectorAll on
+// a combined selector returns document order instead, which yields the outer
+// mat-dialog-container and a scope wider than the popup itself.
+const VAHAN_DIALOG_SELECTORS = [
+  "app-check-vahan-dialog",
+  ".cd-popup",
+  "mat-dialog-container",
+  ".mat-mdc-dialog-container",
+];
+// Flat form, for the bulk force-hide fallback.
+const VAHAN_DIALOG_SELECTOR = VAHAN_DIALOG_SELECTORS.join(", ");
+
+/** The visible Vahan popup element, or null. */
+async function getVisibleVahanDialog(driver) {
+  try {
+    return await driver.executeScript(`
+      const selectors = arguments[0];
+      for (const selector of selectors) {
+        const nodes = document.querySelectorAll(selector);
+        for (const el of nodes) {
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          if (parseFloat(style.opacity || '1') < 0.05) continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) continue;
+          return el;
+        }
+      }
+      return null;
+    `, VAHAN_DIALOG_SELECTORS);
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Wait for the Vahan popup to be FULLY rendered — visible, loader finished,
+ * and its fields actually populated (Vahan Vehicle Make / Remark fill in only
+ * once the RTO response has been applied). Closing it before that would
+ * discard the lookup.
+ */
+async function waitForVahanDialogReady(driver, jobId, timeout = 40000) {
+  const deadline = Date.now() + timeout;
+
+  // a) the popup itself must be on screen
+  let dialog = null;
+  while (Date.now() < deadline) {
+    dialog = await getVisibleVahanDialog(driver);
+    if (dialog) break;
+    await driver.sleep(200);
+  }
+  if (!dialog) return null;
+  console.log(`[${jobId}] Vahan popup is open, waiting for it to finish loading...`);
+
+  // b) the loader must be finished
+  await waitForPortalLoaderToDisappear(driver, Math.max(1000, deadline - Date.now()));
+
+  // c) its fields must be populated. Bounded — some lookups legitimately come
+  //    back with blank fields, so this must not block forever.
+  const filled = await driver
+    .wait(async () => {
+      try {
+        return await driver.executeScript(`
+          const dialog = arguments[0];
+          if (!dialog) return false;
+          const inputs = dialog.querySelectorAll('input');
+          for (const input of inputs) {
+            if (input.value && input.value.trim() !== '') return true;
+          }
+          return false;
+        `, dialog);
+      } catch (e) {
+        return false;
+      }
+    }, Math.min(10000, Math.max(1000, deadline - Date.now())))
+    .catch(() => false);
+
+  console.log(`[${jobId}] Vahan popup fully loaded (fields populated: ${filled})`);
+  return dialog;
+}
+
+/**
+ * Read the Vahan popup's failure message, if it shows one.
+ *
+ * The portal reports a failed lookup INSIDE the popup rather than as an HTTP
+ * error, e.g.
+ *   <div class="no-data-msg">The request successfully completed !!!.
+ *    Please provide valid RegNo, EngineNo and ChassisNo.</div>
+ * Note the wording says "successfully completed" even though no vehicle was
+ * found — so any non-empty message here means the lookup did NOT return data.
+ *
+ * Returns the message text, or null when the lookup was fine.
+ */
+async function readVahanErrorMessage(driver, dialog) {
+  try {
+    return await driver.executeScript(`
+      const dialog = arguments[0];
+      const scope = dialog || document;
+      const nodes = scope.querySelectorAll('.no-data-msg, .error-msg, .alert-danger, .text-danger');
+      for (const el of nodes) {
+        // The dialog ships BOTH messages and hides the inactive one on an
+        // ANCESTOR (<div class="card-body" hidden>). getComputedStyle(el) on
+        // the child still reports display:'block' in that case — display:none
+        // on a parent does not appear in the child's own computed style — so
+        // test LAYOUT instead: anything inside a hidden subtree has no client
+        // rects. Without this the hidden "Please wait for some time..." text
+        // was reported instead of the real error.
+        if (el.closest && el.closest('[hidden]')) continue;
+        if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+        if (parseFloat(style.opacity || '1') < 0.05) continue;
+        const text = (el.innerText || el.textContent || '').trim();
+        if (text) return text;
+      }
+      return null;
+    `, dialog);
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Close the Vahan popup via its X button and confirm it is gone.
+ */
+async function closeVahanDialog(driver, jobId, attempts = 4) {
+  const closeLocators = [
+    By.css("span.cd-popup-close"),
+    By.css(".cd-popup-close"),
+    By.xpath("//span[contains(@class,'cd-popup-close')]"),
+    By.xpath("//*[contains(@class,'cd-popup')]//span[normalize-space(.)='X']"),
+  ];
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (!(await getVisibleVahanDialog(driver))) {
+      console.log(`[${jobId}] ✅ Vahan popup closed.`);
+      return true;
+    }
+
+    const closeMatch = await firstPresentLocator(driver, closeLocators, 3000);
+    if (!closeMatch) {
+      console.log(`[${jobId}] Vahan close (X) button not found on attempt ${attempt}.`);
+    } else {
+      try {
+        await scrollAndClickResolved(driver, closeMatch.element);
+        console.log(`[${jobId}] Clicked Vahan close (X) [attempt ${attempt}]`);
+      } catch (clickErr) {
+        // Native click blocked by the overlay — go straight through the DOM.
+        try {
+          await driver.executeScript("arguments[0].click();", closeMatch.element);
+        } catch (jsErr) {
+          console.log(`[${jobId}] Vahan close click failed: ${jsErr.message}`);
+        }
+      }
+    }
+
+    // Give it a moment to animate out, then re-check.
+    const gone = await driver
+      .wait(async () => !(await getVisibleVahanDialog(driver)), 4000)
+      .catch(() => false);
+    if (gone) {
+      console.log(`[${jobId}] ✅ Vahan popup closed.`);
+      return true;
+    }
+  }
+
+  // Last resort: press ESC, then force-hide so a leftover backdrop cannot
+  // swallow the Calculate Premium click.
+  try {
+    await driver.actions().sendKeys(Key.ESCAPE).perform();
+  } catch (e) { /* ignore */ }
+
+  if (!(await getVisibleVahanDialog(driver))) {
+    console.log(`[${jobId}] ✅ Vahan popup closed (ESC).`);
+    return true;
+  }
+
+  console.log(`[${jobId}] ⚠️ Vahan popup would not close — force-hiding it.`);
+  try {
+    await driver.executeScript(`
+      document.querySelectorAll(arguments[0]).forEach(function (el) {
+        el.style.display = 'none';
+        el.classList.remove('is-visible');
+      });
+      document.querySelectorAll('.cd-popup-container, .cdk-overlay-backdrop, .modal-backdrop')
+        .forEach(function (el) { el.style.display = 'none'; });
+      document.body.classList.remove('modal-open');
+      document.body.style.overflow = '';
+    `, VAHAN_DIALOG_SELECTOR);
+  } catch (e) {
+    console.log(`[${jobId}] Force-hide failed: ${e.message}`);
+  }
+  return false;
+}
+
+/**
+ * Full "Check Vahan" step, in the order the portal actually requires:
+ *   1. expand the "Vehicle Information" card (the button lives inside it and
+ *      is not visible while it is collapsed)
+ *   2. click the Check Vahan button
+ *      (<span name="mcod_btn_addCover_01" class="badge badge-info checkbtn">)
+ *   3. wait for the loader to finish
+ *   4. wait for the Vahan Information popup to be fully rendered
+ *   5. close it via <span class="cd-popup-close">X</span>
+ *
+ * Runs more than once per job: the discount percentage invalidates the earlier
+ * lookup, so it is repeated before Calculate Premium.
+ */
+async function runCheckVahan(driver, jobId, label = "", data = {}) {
+  const stage = label ? ` (${label})` : "";
+  console.log(`[${jobId}] ===== Check Vahan${stage} =====`);
+
+  try {
+    // 1. The Check Vahan button sits inside the collapsible "Vehicle
+    //    Information" card — expand it first or the button is not visible.
+    await openVehicleInformationSection(driver);
+
+    // 2. Click the button.
+    const vahanLocators = [
+      By.css("span[name='mcod_btn_addCover_01'].checkbtn"),
+      By.css("span[name='mcod_btn_addCover_01']"),
+      By.xpath("//span[contains(@class,'checkbtn') and normalize-space(.)='Check Vahan']"),
+      By.name("mcod_btn_addCover_01"),
+    ];
+
+    const vahanMatch = await firstPresentLocator(driver, vahanLocators, 20000);
+    if (!vahanMatch) {
+      console.log(`[${jobId}] ⚠️ Check Vahan button not found — skipping${stage}.`);
+      return false;
+    }
+
+    await scrollAndClickResolved(driver, vahanMatch.element);
+    console.log(`[${jobId}] Clicked Check Vahan using: ${vahanMatch.locator.toString()}`);
+
+    // 3 + 4. Loader runs, then the popup renders with the RTO response.
+    const dialog = await waitForVahanDialogReady(driver, jobId);
+    if (!dialog) {
+      console.log(`[${jobId}] No Vahan popup appeared${stage} — continuing.`);
+      await waitForPortalLoaderToDisappear(driver, 40000);
+      return false;
+    }
+
+    // 5. If the popup reports a failed lookup, screenshot it (while the
+    //    message is still on screen) and fail the job — continuing would
+    //    submit a policy with unverified vehicle details.
+    const vahanError = await readVahanErrorMessage(driver, dialog);
+    if (vahanError) {
+      console.error(`[${jobId}] ❌ Vahan lookup failed${stage}: ${vahanError}`);
+      const err = new Error(vahanError);
+      err.isVahanError = true;
+      const { screenshotUrl } = await captureErrorScreenshot(
+        driver,
+        err,
+        data,
+        "vahan_lookup_failed"
+      );
+      err.screenshotUrl = screenshotUrl;
+      err.stage = "check-vahan";
+      throw err;
+    }
+    console.log(`[${jobId}] ✅ Vahan lookup returned valid data.`);
+
+    // 6. No error — close it so the next step is not blocked by the overlay.
+    await closeVahanDialog(driver, jobId);
+    await waitForOverlayGone(driver, 3000);
+    return true;
+  } catch (e) {
+    // A failed Vahan lookup must stop the job, not be swallowed like a
+    // transient click problem.
+    if (e && e.isVahanError) throw e;
+    console.log(`[${jobId}] Check Vahan flow failed${stage}: ${e.message}`);
+    return false;
+  } finally {
+    console.log(`[${jobId}] ===== Check Vahan${stage} done =====`);
+  }
+}
+
 async function fillNationalForm(
   data = { username: "9364646564", password: "Pond@2123" }
 ) {
@@ -524,9 +1260,15 @@ async function fillNationalForm(
       await driver.get(CONFIG.LOGIN_URL);
       console.log(`✅ [${jobId}] Navigation successful!`);
 
-      await driver.sleep(3000);
+      // Wait for the login page itself to render rather than a flat 3s. The
+      // duplicated portal-loader call below was harmless when that helper was
+      // a no-op, but now that it really waits it would double the timeout.
+      await driver
+        .wait(until.elementLocated(By.name("log_txtfield_iUsername_01")), 30000)
+        .catch(() => {
+          console.log(`[${jobId}] Login form not detected yet, continuing...`);
+        });
       await waitForLoaderToDisappear(driver);
-      await waitForPortalLoaderToDisappear(driver);
       await waitForPortalLoaderToDisappear(driver);
 
       const currentUrl = await driver.getCurrentUrl();
@@ -710,7 +1452,26 @@ async function fillNationalForm(
       }
 
       console.log(`[${jobId}] Waiting for login to complete...`);
-      await driver.sleep(5000);
+      // Wait for the login page to actually go away rather than guessing at a
+      // fixed delay: the username field disappearing (or the URL leaving
+      // /signin/login) IS the success signal the verification below checks for.
+      // A slow portal is still waited out, up to the full timeout.
+      try {
+        await driver.wait(async () => {
+          try {
+            const url = await driver.getCurrentUrl();
+            if (url.includes("/signin/login")) return false;
+            const stillOnLogin = await driver.findElements(
+              By.name("log_txtfield_iUsername_01")
+            );
+            return stillOnLogin.length === 0;
+          } catch (pollError) {
+            return false; // mid-navigation — keep polling
+          }
+        }, 30000);
+      } catch (loginWaitError) {
+        console.log(`[${jobId}] Login did not complete in time, verifying...`);
+      }
       await waitForPortalLoaderToDisappear(driver);
 
       // Verify login was successful
@@ -733,21 +1494,20 @@ async function fillNationalForm(
       const currentUrl = await driver.getCurrentUrl();
       console.log("Current URL after login:", currentUrl);
 
-      // Check for any links on the page
-      const allLinks = await driver.findElements(By.css("a"));
-      console.log(`Found ${allLinks.length} links on the page`);
-
-      // List some of the link texts
-      for (let i = 0; i < Math.min(allLinks.length, 10); i++) {
-        try {
-          const linkText = await allLinks[i].getText();
-          if (linkText.trim()) {
-            console.log(`Link ${i}: "${linkText.trim()}"`);
-          }
-        } catch (e) {
-          // Skip if can't get text
-        }
-      }
+      // Debug-only listing. Pulled in ONE round-trip instead of a getText()
+      // call per link — the loop version cost ~10 browser round-trips purely
+      // to write log lines.
+      const linkInfo = await driver.executeScript(`
+        const links = Array.from(document.querySelectorAll('a'));
+        return {
+          total: links.length,
+          texts: links.slice(0, 10)
+            .map(a => (a.innerText || a.textContent || '').trim())
+            .filter(Boolean)
+        };
+      `);
+      console.log(`Found ${linkInfo.total} links on the page`);
+      linkInfo.texts.forEach((text, i) => console.log(`Link ${i}: "${text}"`));
     } catch (debugError) {
       console.log("Debug info after login failed:", debugError.message);
     }
@@ -755,9 +1515,6 @@ async function fillNationalForm(
     // Check for modal and close it if present
     console.log("Checking for modal after login...");
     try {
-      // Wait a bit for any modal to appear
-      await driver.sleep(2000);
-
       // Try multiple modal close button selectors
       const modalSelectors = [
         By.css("button.close_flash"),
@@ -770,59 +1527,57 @@ async function fillNationalForm(
         By.xpath("//button[contains(text(), 'Close')]")
       ];
 
-      let modalClosed = false;
-      for (const selector of modalSelectors) {
-        try {
-          const modalButton = await driver.findElement(selector);
-          if (await modalButton.isDisplayed()) {
-            await safeClick(driver, selector, 3000);
-            console.log("Closed modal with selector:", selector.toString());
-            modalClosed = true;
-            break;
-          }
-        } catch (e) {
-          // Continue to next selector
-        }
-      }
+      // Poll all selectors together for a short window: returns the instant a
+      // modal shows up (instead of always paying a flat 2s wait for one), and
+      // still catches a modal that renders late.
+      const modal = await firstPresentLocator(driver, modalSelectors, 2500);
 
-      if (!modalClosed) {
+      if (modal) {
+        // Click the exact element we validated. Re-resolving via the locator
+        // would re-run elementLocated, which returns the first DOM match
+        // regardless of visibility — with broad selectors like ".close" that
+        // can be a hidden button, leaving the real modal open.
+        await scrollAndClickElement(driver, modal.element);
+        console.log("Closed modal with selector:", modal.locator.toString());
+        // Wait for the modal to actually detach before moving on.
+        await driver.wait(until.stalenessOf(modal.element), 3000).catch(() => { });
+      } else {
         console.log("No modal found or already closed");
       }
-
-      // Wait a bit after closing modal
-      await driver.sleep(1000);
-
     } catch (error) {
       console.log("Modal handling failed:", error.message);
     }
 
-    // Wait for page to fully load after modal close
-    await driver.sleep(3000);
+    // Wait for the page to settle after modal close — real loader check
+    // instead of a blind 3s.
+    await waitForPortalIdle(driver);
 
     // Navigate to Motor Two Wheelers
     console.log("Navigating to Motor Two Wheelers...");
 
     // Debug: List some of the available links to find the right one
     try {
-      const allLinks = await driver.findElements(By.css("a"));
-      console.log(`Found ${allLinks.length} links on the page after login`);
-
-      // Look for links that might contain "Motor" or "Two" or "Wheeler"
-      for (let i = 0; i < Math.min(allLinks.length, 30); i++) {
+      // Debug-only listing, gathered in ONE round-trip. The previous loop made
+      // a getText() AND a getAttribute() call per link for up to 30 links —
+      // ~60 browser round-trips just to produce log output.
+      const navInfo = await driver.executeScript(`
+        const keywords = ['motor', 'two', 'wheeler', 'vehicle', 'premium'];
+        const links = Array.from(document.querySelectorAll('a'));
+        return {
+          total: links.length,
+          matches: links.slice(0, 30).map((a, i) => ({
+            index: i,
+            text: (a.innerText || a.textContent || '').trim(),
+            href: a.getAttribute('href')
+          })).filter(l => l.text && keywords.some(k => l.text.toLowerCase().includes(k)))
+        };
+      `);
+      console.log(`Found ${navInfo.total} links on the page after login`);
+      for (const link of navInfo.matches) {
         try {
-          const linkText = await allLinks[i].getText();
-          const linkHref = await allLinks[i].getAttribute('href');
-          if (linkText.trim() && (
-            linkText.toLowerCase().includes('motor') ||
-            linkText.toLowerCase().includes('two') ||
-            linkText.toLowerCase().includes('wheeler') ||
-            linkText.toLowerCase().includes('vehicle') ||
-            linkText.toLowerCase().includes('premium')
-          )) {
-            console.log(`Potential link ${i}: "${linkText.trim()}" -> ${linkHref}`);
-          }
+          console.log(`Potential link ${link.index}: "${link.text}" -> ${link.href}`);
         } catch (e) {
-          // Skip if can't get text
+          // Skip if can't log
         }
       }
     } catch (debugError) {
@@ -968,9 +1723,7 @@ async function fillNationalForm(
     }
 
     // Wait for form to load
-    await driver.sleep(3000);
-
-    // Wait for loader to disappear
+    await waitForPortalIdle(driver);
     await waitForLoaderToDisappear(driver);
 
     // Select Vehicle Type
@@ -978,7 +1731,10 @@ async function fillNationalForm(
     const vehicleTypeDropdown = By.name("mcy_dropdown_vehicleType_01");
     await safeSelectOption(driver, vehicleTypeDropdown, "New", 15000);
 
-    await driver.sleep(2000);
+    // These dropdowns cascade — selecting one can trigger a reload of the
+    // next. Wait on the loader instead of a flat 2s: if a request is in
+    // flight we wait for all of it, and if not we move on immediately.
+    await waitForPortalIdle(driver, 40000, 900);
 
     // Select Your Plan
     console.log("Selecting Your Plan...");
@@ -996,7 +1752,7 @@ async function fillNationalForm(
       }
     }
 
-    await driver.sleep(2000);
+    await waitForPortalIdle(driver, 40000, 900);
 
     // Select Class Of Vehicle
     console.log("Selecting Class Of Vehicle...");
@@ -1014,18 +1770,16 @@ async function fillNationalForm(
       }
     }
 
-    await driver.sleep(2000);
+    await waitForPortalIdle(driver, 40000, 900);
 
     // Fill RTO location (autocomplete field)
     console.log("Filling RTO location...");
-    await driver.sleep(1000);
     const rtoLocationField = By.name("mcy_dropdown_newRtoLocation_01");
     const rtoInput = await driver.wait(until.elementLocated(rtoLocationField), 15000);
     await driver.wait(until.elementIsVisible(rtoInput), 15000);
     await driver.wait(until.elementIsEnabled(rtoInput), 15000);
 
-    // Type the RTO location
-    await rtoInput.clear();
+    // Type the RTO location (selectAutocompleteOption clears the field first)
     let rtoText = data.RTOCity || "Chennai";
     console.log("RTO Text: ", rtoText);
     if (data.RTORegion) {
@@ -1035,82 +1789,49 @@ async function fillNationalForm(
       console.log("RTO City not found, using fallback");
       rtoText = "Chennai - North West";
     }
-    await rtoInput.sendKeys(rtoText);
-    await driver.sleep(2000); // Wait for autocomplete options to appear
-
-    // Click on the first autocomplete option
-    try {
-      const rtoOption = await driver.wait(until.elementLocated(By.css("mat-option")), 5000);
-      await rtoOption.click();
-      await driver.sleep(500);
-    } catch (e) {
-      console.log("Could not select RTO from autocomplete, continuing...");
-    }
+    await selectAutocompleteOption(driver, rtoInput, rtoText, "RTO location");
 
     // Fill make (autocomplete field)
     console.log("Filling make...");
-    await driver.sleep(1000);
     const makeField = By.name("mcy_dropdown_make_01");
     const makeInput = await driver.wait(until.elementLocated(makeField), 15000);
     await driver.wait(until.elementIsVisible(makeInput), 15000);
     await driver.wait(until.elementIsEnabled(makeInput), 15000);
 
-    await makeInput.clear();
-    await makeInput.sendKeys(data.vehicleMake || "BAJAJ");
-    await driver.sleep(2000); // Wait for autocomplete options to appear
-
-    // Click on the first autocomplete option
-    try {
-      const makeOption = await driver.wait(until.elementLocated(By.css("mat-option")), 5000);
-      await makeOption.click();
-      await driver.sleep(500);
-    } catch (e) {
-      console.log("Could not select Make from autocomplete, continuing...");
-    }
+    await selectAutocompleteOption(
+      driver,
+      makeInput,
+      data.vehicleMake || "BAJAJ",
+      "make"
+    );
 
     // Wait for Model to load and fill it (autocomplete field)
     console.log("Filling model...");
-    await driver.sleep(1000);
     const modelField = By.name("mcy_dropdown_model_01");
     const modelInput = await driver.wait(until.elementLocated(modelField), 15000);
     await driver.wait(until.elementIsVisible(modelInput), 15000);
     await driver.wait(until.elementIsEnabled(modelInput), 15000);
 
-    await modelInput.clear();
-    await modelInput.sendKeys(data.vehicleModel || "PULSAR 150 (2024-2025)"); // Default model - Honda SHINE model variant
-    await driver.sleep(2000); // Wait for autocomplete options to appear
-
-    // Click on the first autocomplete optionm
-    try {
-      const modelOption = await driver.wait(until.elementLocated(By.css("mat-option")), 5000);
-      await modelOption.click();
-      await driver.sleep(500);
-    } catch (e) {
-      console.log("Could not select Model from autocomplete, continuing...");
-    }
+    await selectAutocompleteOption(
+      driver,
+      modelInput,
+      data.vehicleModel || "PULSAR 150 (2024-2025)", // Default model - Honda SHINE model variant
+      "model"
+    );
 
     // Wait for Variant to load and fill it (autocomplete field)
     console.log("Filling variant...");
-    await driver.sleep(1000);
     const variantField = By.name("mcy_dropdown_variant_01");
     const variantInput = await driver.wait(until.elementLocated(variantField), 15000);
     await driver.wait(until.elementIsVisible(variantInput), 15000);
     await driver.wait(until.elementIsEnabled(variantInput), 15000);
 
-    await variantInput.clear();
-    await variantInput.sendKeys(data.vehicleVariant || "standard");
-    await driver.sleep(2000); // Wait for autocomplete options to appear
-
-    // Click on the first autocomplete option
-    try {
-      const variantOption = await driver.wait(until.elementLocated(By.css("mat-option")), 5000);
-      await variantOption.click();
-      await driver.sleep(500);
-    } catch (e) {
-      console.log("Could not select Variant from autocomplete, continuing...");
-    }
-
-    await driver.sleep(1000);
+    await selectAutocompleteOption(
+      driver,
+      variantInput,
+      data.vehicleVariant || "standard",
+      "variant"
+    );
 
     // Fill percentage field
     console.log("Filling percentage...");
@@ -1222,7 +1943,7 @@ async function fillNationalForm(
 
       // Scroll to button
       await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", generateBtn);
-      await driver.sleep(500);
+      await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
       // Try multiple click strategies
       if (isEnabled && !isDisabledAttr) {
@@ -1244,8 +1965,9 @@ async function fillNationalForm(
       }
 
       console.log("Successfully clicked Generate Quick Quote button");
-      await driver.sleep(4000); // Wait for quote to generate or errors to appear
-      await waitForPortalLoaderToDisappear(driver);
+      // Wait for the quote request to actually finish (loader appears then
+      // clears) instead of a flat 4s. Slow quotes are still waited out in full.
+      await waitForPortalIdle(driver);
 
       // Post-click verification: If button still exists and is displayed, check for errors
       try {
@@ -1269,8 +1991,7 @@ async function fillNationalForm(
         const generateBtn = await driver.wait(until.elementLocated(generateByText), 5000);
         await driver.executeScript("arguments[0].click();", generateBtn);
         console.log("Clicked Generate Quick Quote button (alternative)");
-        await driver.sleep(3000);
-        await waitForPortalLoaderToDisappear(driver);
+        await waitForPortalIdle(driver);
       } catch (e2) {
         console.log("All strategies failed for Generate Quick Quote button:", e2.message);
       }
@@ -1280,9 +2001,8 @@ async function fillNationalForm(
     console.log("Extracting IDV value after quote generation...");
     let idvValue = null;
     try {
-      // Wait for IDV field to be populated
-      await driver.sleep(2000);
-
+      // No fixed wait needed here — the "field has a value" poll a few lines
+      // below is exactly the "wait for IDV to be populated" condition.
       // Find IDV input field by name
       const idvField = By.name("pc_text_idv_01");
       const idvInput = await driver.wait(until.elementLocated(idvField), 10000);
@@ -1308,17 +2028,45 @@ async function fillNationalForm(
     // === POST-QUOTE INTERACTIONS ===
     console.log("Handling post-quote interactions...");
 
-    // Click OK button (if present)
+    // Click OK button (if present).
+    // The confirm dialog is optional, so instead of always paying a 5s timeout
+    // when it does not appear, race it against the Convert Quote button that
+    // comes next: whichever shows up first ends the wait. The dialog still
+    // wins if both are present, so it can never be clicked through.
+    const okButton = By.name("confirm_btn_yes_01");
+    const convertButton = By.name("main_btn_convert_01");
     try {
       console.log("Looking for OK button...");
-      const okButton = By.name("confirm_btn_yes_01");
-      const okBtn = await driver.wait(until.elementLocated(okButton), 5000);
-      if (await okBtn.isDisplayed()) {
-        await safeClick(driver, okButton, 5000);
+      // Give the confirm dialog its own window first. Racing it against the
+      // Convert Quote button would usually lose — that button is already on
+      // the quote screen, so the race would end before the dialog finished
+      // animating in, and the later Convert click would fire underneath the
+      // still-open backdrop.
+      let okMatch = await firstPresentLocator(driver, [okButton], 3000);
+
+      // No dialog yet: if Convert Quote is already available there is nothing
+      // to confirm, otherwise keep waiting for the dialog a little longer.
+      if (!okMatch) {
+        const convertReady = await firstPresentLocator(driver, [convertButton], 0);
+        if (!convertReady) {
+          okMatch = await firstPresentLocator(driver, [okButton], 3000);
+        }
+      }
+
+      if (okMatch) {
+        await scrollAndClickElement(driver, okMatch.element);
         console.log("✅ Clicked OK button");
-        await driver.sleep(1000);
+        // Wait for the dialog to detach rather than guessing at 1s.
+        await driver.wait(until.stalenessOf(okMatch.element), 3000).catch(() => { });
+        await waitForOverlayGone(driver, 2000);
+
+        // NOW wait for the loader. While the popup was up the loader wait
+        // deliberately bails (the portal is waiting on us, not working), so
+        // this is the first point where the quote render can actually be
+        // waited out — skipping it left Convert Quote still disabled.
+        await waitForPortalIdle(driver, 40000, 800);
       } else {
-        console.log("OK button located but not visible, skipping...");
+        console.log("OK button not present at this stage, continuing...");
       }
     } catch (e) {
       console.log("OK button not found or not needed at this stage:", e.message);
@@ -1327,15 +2075,34 @@ async function fillNationalForm(
     // Click Convert Quote button
     try {
       console.log("Looking for Convert Quote button...");
-      const convertButton = By.name("main_btn_convert_01");
-      const convertBtn = await driver.wait(until.elementLocated(convertButton), 5000);
+      await driver.wait(until.elementLocated(convertButton), 15000);
 
-      if (await convertBtn.isDisplayed() && await convertBtn.isEnabled()) {
-        await safeClick(driver, convertButton, 5000);
+      // The quote finishes rendering a moment AFTER the confirm popup is
+      // dismissed, so the button is briefly present-but-disabled. The old
+      // single snapshot check threw "visible but not clickable" on a perfectly
+      // healthy run — poll until it really becomes clickable instead.
+      // Re-located each pass so a re-render cannot leave us holding a stale
+      // handle.
+      const clickableConvertBtn = await driver
+        .wait(async () => {
+          const found = await driver.findElements(convertButton);
+          for (const el of found) {
+            try {
+              if ((await el.isDisplayed()) && (await el.isEnabled())) return el;
+            } catch (staleErr) {
+              // re-render mid-check — next poll picks up the fresh element
+            }
+          }
+          return null;
+        }, 20000)
+        .catch(() => null);
+
+      if (clickableConvertBtn) {
+        await scrollAndClickResolved(driver, clickableConvertBtn);
         console.log("✅ Clicked Convert Quote button");
-        await driver.sleep(2000);
+        await waitForPortalIdle(driver);
       } else {
-        throw new Error("Convert Quote button is visible but not clickable (disabled or hidden)");
+        throw new Error("Convert Quote button never became clickable (still disabled after waiting)");
       }
     } catch (e) {
       console.error(`❌ [National] Convert Quote button error: ${e.message}`);
@@ -1358,7 +2125,8 @@ async function fillNationalForm(
       const createCustomerSpan = By.name("custmain_span_create_01");
       await safeClick(driver, createCustomerSpan, 5000);
       console.log("Clicked Create New Customer");
-      await driver.sleep(2000); // Wait for dialog to open
+      // The KYC radio wait immediately below is the real "dialog is open"
+      // signal, so no fixed wait is needed here.
     } catch (e) {
       console.log("Create New Customer not found:", e.message);
     }
@@ -1367,41 +2135,68 @@ async function fillNationalForm(
     try {
       console.log("Selecting Manual KYC radio button...");
 
-      // Wait for the dialog to be fully loaded
-      await driver.sleep(2000);
+      // "mat-radio-21-input" is an AUTO-GENERATED Angular Material id — the
+      // number comes from a global component counter, so it shifts whenever
+      // the portal is rebuilt or an extra dialog is instantiated earlier in
+      // the session. Waiting on it alone meant a silent 10s stall before the
+      // stable locators below were ever tried. Race all three instead: this
+      // IS the "dialog is open" wait, and whichever locator the current build
+      // renders wins immediately.
+      // STABLE locators first. The portal renders this radio with a drifting
+      // auto-generated id (the sibling checkbox shows up as
+      // mat-mdc-checkbox-40-input, not -4-), so the id is a last resort only.
+      const kycLocators = [
+        By.xpath("//input[@name='ekyc_sel_type' and @value='ManualKYC']"),
+        By.css("mat-radio-button[value='ManualKYC'] input[type='radio']"),
+        By.xpath("//mat-radio-button[contains(normalize-space(.), 'Manual KYC')]//input[@type='radio']"),
+        By.id("mat-radio-21-input"),
+      ];
 
-      // Primary strategy: click the input by its stable id
-      const manualKycInput = By.id("mat-radio-21-input");
-      let inputElement = await driver.wait(until.elementLocated(manualKycInput), 10000);
+      // requireVisible:false — the click below goes through executeScript, and
+      // the radio can still be mid-animation inside the freshly-opened dialog.
+      const kycMatch = await firstPresentLocator(driver, kycLocators, 15000, {
+        requireVisible: false,
+      });
+      if (!kycMatch) {
+        throw new Error("Manual KYC radio not found with any locator");
+      }
+      const inputElement = kycMatch.element;
+      console.log(`Found Manual KYC radio using: ${kycMatch.locator.toString()}`);
 
       // Ensure it's in view
       await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", inputElement);
-      await driver.sleep(300);
+      await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
       // Click using JS to avoid overlay/ripple issues in Angular Material
       await driver.executeScript("arguments[0].click();", inputElement);
 
       // Verify selected; if not, try clicking the associated label
-      await driver.sleep(500);
-      let isSelected = false;
-      try {
-        isSelected = await inputElement.isSelected();
-      } catch (_) { }
+      let isSelected = await driver
+        .wait(async () => inputElement.isSelected().catch(() => false), 1500)
+        .catch(() => false);
+
       if (!isSelected) {
         try {
-          const manualKycLabel = By.css("label[for='mat-radio-21-input']");
-          const labelEl = await driver.wait(until.elementLocated(manualKycLabel), 3000);
-          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", labelEl);
-          await driver.sleep(200);
-          await driver.executeScript("arguments[0].click();", labelEl);
-          await driver.sleep(400);
-          isSelected = await inputElement.isSelected().catch(() => false);
+          // Derive the label from the element's ACTUAL id rather than assuming
+          // the generated one, for the same reason as above.
+          const inputId = await inputElement.getAttribute("id");
+          if (inputId) {
+            const labelEl = await driver.wait(
+              until.elementLocated(By.css(`label[for='${inputId}']`)),
+              3000
+            );
+            await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", labelEl);
+            await driver.sleep(60);
+            await driver.executeScript("arguments[0].click();", labelEl);
+            isSelected = await driver
+              .wait(async () => inputElement.isSelected().catch(() => false), 1500)
+              .catch(() => false);
+          }
         } catch (labelErr) {
           console.log("Manual KYC label click fallback failed:", labelErr.message);
         }
       }
       console.log(`Manual KYC radio selected state: ${isSelected}`);
-      await driver.sleep(500);
     } catch (e) {
       console.log("Manual KYC radio not found by id, trying alternative:", e.message);
 
@@ -1410,7 +2205,7 @@ async function fillNationalForm(
         const altByValue = By.xpath("//input[@name='ekyc_sel_type' and @value='ManualKYC']");
         const radioElement = await driver.wait(until.elementLocated(altByValue), 5000);
         await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", radioElement);
-        await driver.sleep(200);
+        await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
         await driver.executeScript("arguments[0].click();", radioElement);
         console.log("Selected Manual KYC via name/value fallback");
         await driver.sleep(500);
@@ -1422,7 +2217,7 @@ async function fillNationalForm(
           const matRadio = By.css("mat-radio-button[value='ManualKYC'] input[type='radio']");
           const radioInput = await driver.wait(until.elementLocated(matRadio), 5000);
           await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", radioInput);
-          await driver.sleep(200);
+          await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
           await driver.executeScript("arguments[0].click();", radioInput);
           console.log("Selected Manual KYC via mat-radio-button fallback");
           await driver.sleep(500);
@@ -1432,36 +2227,103 @@ async function fillNationalForm(
       }
     }
 
-    // Check disclaimer checkbox BEFORE filling customer form
+    // Tick the "KYC Verification is completed manually..." checkbox that the
+    // Manual KYC radio reveals, BEFORE submitting the Create Customer dialog.
     try {
-      console.log("Checking disclaimer checkbox...");
+      console.log("Checking KYC verification (disclaimer) checkbox...");
 
-      // Find the checkbox by ID (most reliable from the HTML)
-      const disclaimerCheckboxInput = By.id("mat-mdc-checkbox-4-input");
-      const checkboxElement = await driver.wait(until.elementLocated(disclaimerCheckboxInput), 10000);
+      // name="vQuote_list_disclaimerAgree_01" is the STABLE attribute and is
+      // listed first. The mat-mdc-checkbox-N-input id is an auto-generated
+      // Material counter — on the live portal it renders as
+      // mat-mdc-checkbox-40-input, not the -4- this code used to hardcode,
+      // so it is only kept as a last-resort fallback.
+      const disclaimerLocators = [
+        By.name("vQuote_list_disclaimerAgree_01"),
+        By.css("input[type='checkbox'][name='vQuote_list_disclaimerAgree_01']"),
+        By.css("mat-checkbox[name='vQuote_list_disclaimerAgree_01'] input[type='checkbox']"),
+        By.css("input[type='checkbox'][id^='mat-mdc-checkbox-']"),
+      ];
+
+      const disclaimerMatch = await firstPresentLocator(driver, disclaimerLocators, 10000, {
+        requireVisible: false,
+      });
+      if (!disclaimerMatch) {
+        throw new Error("Disclaimer checkbox not found with any locator");
+      }
+      const checkboxElement = disclaimerMatch.element;
+      console.log(`Found KYC verification checkbox using: ${disclaimerMatch.locator.toString()}`);
 
       // Scroll to element
       await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", checkboxElement);
-      await driver.sleep(500);
+      await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
-      // Always click the checkbox to ensure it's checked (even if already checked)
-      // This is important to trigger any necessary events
-      try {
-        // Click using JavaScript
+      // Read the real checked state off the input itself.
+      const readChecked = async () =>
+        driver
+          .executeScript("return arguments[0].checked === true;", checkboxElement)
+          .catch(() => false);
+
+      // Selecting Manual KYC can tick this box automatically. The old code
+      // clicked unconditionally "to trigger events", which UNCHECKS an
+      // already-ticked box and leaves KYC unconfirmed on submit. Only click
+      // when it is actually unchecked.
+      let isChecked = await readChecked();
+
+      if (isChecked) {
+        console.log("KYC verification checkbox already ticked — leaving it as is.");
+      } else {
         await driver.executeScript("arguments[0].click();", checkboxElement);
-        console.log("Clicked disclaimer checkbox");
+        console.log("Clicked KYC verification checkbox");
+        isChecked = await driver.wait(async () => readChecked(), 2000).catch(() => false);
 
-        // Wait for any animations/state changes
-        await driver.sleep(1000);
-
-        // Verify it was checked
-        const isChecked = await checkboxElement.isSelected();
-        console.log(`Disclaimer checkbox isChecked: ${isChecked}`);
-      } catch (e) {
-        console.log("Error clicking checkbox:", e.message);
+        // Some Material builds only respond to the label/ripple, not the
+        // hidden native input.
+        if (!isChecked) {
+          try {
+            const inputId = await checkboxElement.getAttribute("id");
+            const labelLocators = [];
+            if (inputId) labelLocators.push(By.css(`label[for='${inputId}']`));
+            labelLocators.push(
+              By.xpath("//mat-checkbox[.//input[@name='vQuote_list_disclaimerAgree_01']]//label")
+            );
+            const labelMatch = await firstPresentLocator(driver, labelLocators, 2000, {
+              requireVisible: false,
+            });
+            if (labelMatch) {
+              await driver.executeScript("arguments[0].click();", labelMatch.element);
+              isChecked = await driver.wait(async () => readChecked(), 2000).catch(() => false);
+              console.log("Clicked KYC verification checkbox via its label");
+            }
+          } catch (labelErr) {
+            console.log("KYC checkbox label fallback failed:", labelErr.message);
+          }
+        }
       }
 
-      await driver.sleep(1000);
+      // Last resort: force the checked state and notify Angular, so the box
+      // always ends up TICKED. Every path above is "make it checked" — none
+      // of them can ever leave it unchecked.
+      if (!isChecked) {
+        try {
+          await driver.executeScript(`
+            const el = arguments[0];
+            if (!el.checked) {
+              el.checked = true;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          `, checkboxElement);
+          isChecked = await driver.wait(async () => readChecked(), 1500).catch(() => false);
+          if (isChecked) console.log("Forced KYC verification checkbox to checked.");
+        } catch (forceErr) {
+          console.log("Could not force KYC checkbox state:", forceErr.message);
+        }
+      }
+
+      if (!isChecked) {
+        console.log("⚠️ KYC verification checkbox could NOT be ticked — Submit will likely be rejected.");
+      }
+      console.log(`KYC verification checkbox isChecked: ${isChecked}`);
     } catch (e) {
       console.log("Disclaimer checkbox not found, trying alternative:", e.message);
 
@@ -1503,7 +2365,7 @@ async function fillNationalForm(
 
       // Scroll to button
       await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", submitBtn);
-      await driver.sleep(500);
+      await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
       // Try multiple click strategies
       if (isEnabled && !isDisabledAttr) {
@@ -1525,7 +2387,8 @@ async function fillNationalForm(
       }
 
       console.log("Successfully clicked Submit button");
-      await driver.sleep(3000); // Wait for processing
+      // Wait for the submit round-trip to actually finish rather than a flat 3s.
+      await waitForPortalIdle(driver, 40000, 600);
     } catch (e) {
       console.log("Submit button not found before form fill, continuing anyway:", e.message);
     }
@@ -1540,32 +2403,9 @@ async function fillNationalForm(
       const titleInput = await driver.wait(until.elementLocated(titleField), 10000);
       await driver.wait(until.elementIsVisible(titleInput), 10000);
 
-      // Clear any existing text
-      await titleInput.clear();
-
       // Type the value - default to "Mr" if not provided
       const title = ("Mr").trim() || "Mr";
-      await titleInput.sendKeys(title);
-      await driver.sleep(1500); // Wait for autocomplete to appear
-
-      // Try to select from autocomplete - wait for options to appear
-      try {
-        console.log("Waiting for Title autocomplete options...");
-        const titleOptions = await driver.wait(until.elementsLocated(By.css("mat-option")), 5000);
-        console.log(`Found ${titleOptions.length} Title autocomplete options`);
-
-        if (titleOptions.length > 0) {
-          // Click the first option
-          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", titleOptions[0]);
-          await driver.sleep(300);
-          await driver.executeScript("arguments[0].click();", titleOptions[0]);
-          console.log("Selected Title from autocomplete");
-        }
-      } catch (e) {
-        console.log("Could not select Title from autocomplete:", e.message);
-      }
-
-      await driver.sleep(500);
+      await selectAutocompleteOption(driver, titleInput, title, "Title");
     } catch (e) {
       console.log("Could not fill Title:", e.message);
     }
@@ -1661,7 +2501,7 @@ async function fillNationalForm(
         const strictXpath = `//mat-option[normalize-space(.)='${gender}']`;
         const optionEl = await driver.wait(until.elementLocated(By.xpath(strictXpath)), 5000);
         await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", optionEl);
-        await driver.sleep(200);
+        await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
         await optionEl.click();
         console.log(`[Gender Selection] Selected "${gender}" using strict match.`);
       } catch (e) {
@@ -1704,33 +2544,10 @@ async function fillNationalForm(
       const occupationInput = await driver.wait(until.elementLocated(occupationField), 10000);
       await driver.wait(until.elementIsVisible(occupationInput), 10000);
 
-      // Clear any existing text
-      await occupationInput.clear();
-
       // Type the value
       const occupation = data.occupation || "Engineer";
       await occupationInput.click();
-      await occupationInput.sendKeys(occupation);
-      await driver.sleep(1500); // Wait for autocomplete to appear
-
-      // Try to select from autocomplete - wait for options to appear
-      try {
-        console.log("Waiting for Occupation autocomplete options...");
-        const occupationOptions = await driver.wait(until.elementsLocated(By.css("mat-option")), 5000);
-        console.log(`Found ${occupationOptions.length} Occupation autocomplete options`);
-
-        if (occupationOptions.length > 0) {
-          // Click the first option
-          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", occupationOptions[0]);
-          await driver.sleep(300);
-          await driver.executeScript("arguments[0].click();", occupationOptions[0]);
-          console.log("Selected Occupation from autocomplete");
-        }
-      } catch (e) {
-        console.log("Could not select Occupation from autocomplete:", e.message);
-      }
-
-      await driver.sleep(500);
+      await selectAutocompleteOption(driver, occupationInput, occupation, "Occupation");
     } catch (e) {
       console.log("Could not fill Occupation:", e.message);
     }
@@ -1816,7 +2633,7 @@ async function fillNationalForm(
 
         if (!isExpanded) {
           await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", addressPanel);
-          await driver.sleep(300);
+          await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
           await driver.executeScript("arguments[0].click();", addressPanel);
           console.log("Expanded Address Information panel");
           await driver.sleep(1000);
@@ -2001,7 +2818,7 @@ async function fillNationalForm(
 
         if (!isExpanded) {
           await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", communicationPanel);
-          await driver.sleep(300);
+          await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
           await driver.executeScript("arguments[0].click();", communicationPanel);
           console.log("Expanded Communication Information panel");
           await driver.sleep(1000);
@@ -2076,7 +2893,7 @@ async function fillNationalForm(
 
       // Scroll to button
       await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", createCustBtn);
-      await driver.sleep(500);
+      await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
       // Try multiple click strategies
       if (isEnabled && !isDisabledAttr) {
@@ -2098,7 +2915,29 @@ async function fillNationalForm(
       }
 
       console.log("Successfully clicked Create Customer button");
-      await driver.sleep(3000); // Wait for processing
+      // Customer creation is a server round-trip — wait for it, not a flat 3s.
+      await waitForPortalIdle(driver, 40000, 600);
+
+      // The portal answers this click with EITHER the dynamic "Locality Name"
+      // field OR an alert popup. waitForPortalIdle returns as soon as a popup
+      // shows (the portal is then waiting on us), so on its own it can hand
+      // back control BEFORE the locality field has rendered — which silently
+      // skipped filling it. Wait for whichever response actually arrives.
+      const createCustomerResponse = await firstPresentLocator(
+        driver,
+        [
+          By.name("newcust_textfield_locality_name_01"),
+          By.name("alert_btn_data_01"),
+        ],
+        20000
+      );
+      if (createCustomerResponse) {
+        console.log(
+          `Create Customer responded with: ${createCustomerResponse.locator.toString()}`
+        );
+      } else {
+        console.log("No locality field or alert popup detected after Create Customer.");
+      }
     } catch (e) {
       console.error(`[${jobId}] ❌ Mandatory Button Error (Create Customer):`, e.message);
       throw new Error(`Mandatory Button Error: Could not click Create Customer. ${e.message}`);
@@ -2110,8 +2949,8 @@ async function fillNationalForm(
       // Check for the new field
       const localityNameField = By.name("newcust_textfield_locality_name_01");
 
-      // Wait a bit to see if it appears (it might take a moment after the first click)
-      // reducing timeout as we don't want to wait long if it doesn't appear
+      // The race above already waited for the portal's response, so this only
+      // needs to confirm which one we got.
       const localityInput = await driver.wait(until.elementLocated(localityNameField), 5000);
 
       // If we found it, try to interact
@@ -2128,7 +2967,7 @@ async function fillNationalForm(
         console.log("Clicking Create Customer button AGAIN...");
         const createCustBtnAgain = await driver.wait(until.elementLocated(By.name("newCust_btn_createCust_01")), 5000);
         await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", createCustBtnAgain);
-        await driver.sleep(500);
+        await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
         try {
           await createCustBtnAgain.click();
@@ -2136,7 +2975,7 @@ async function fillNationalForm(
           await driver.executeScript("arguments[0].click();", createCustBtnAgain);
         }
         console.log("Clicked Create Customer button again.");
-        await driver.sleep(3000);
+        await waitForPortalIdle(driver, 40000, 600);
       }
     } catch (e) {
       console.log("Locality Name field did not appear (proceeding):", e.message);
@@ -2152,7 +2991,7 @@ async function fillNationalForm(
       const closeBtn = await driver.wait(until.elementLocated(closeButton), 10000);
 
       await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", closeBtn);
-      await driver.sleep(500);
+      await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
       await driver.executeScript("arguments[0].click();", closeBtn);
       console.log("Clicked Close button");
       await driver.sleep(2000);
@@ -2174,7 +3013,7 @@ async function fillNationalForm(
 
       if (!isExpanded) {
         await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", vehiclePanel);
-        await driver.sleep(300);
+        await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
         await driver.executeScript("arguments[0].click();", vehiclePanel);
         console.log("Expanded Vehicle Information panel");
         await driver.sleep(1000);
@@ -2218,20 +3057,7 @@ async function fillNationalForm(
       console.log("Filling Color of Vehicle...");
       const colorField = By.name("mcy_dropdown_color_01");
       const colorInput = await driver.wait(until.elementLocated(colorField), 10000);
-      await colorInput.clear();
-      await colorInput.sendKeys("Blue");
-      await driver.sleep(1500); // Wait for autocomplete
-
-      try {
-        const colorOptions = await driver.wait(until.elementsLocated(By.css("mat-option")), 5000);
-        if (colorOptions.length > 0) {
-          await driver.executeScript("arguments[0].click();", colorOptions[0]);
-          console.log("Selected Color from autocomplete");
-        }
-      } catch (e) {
-        console.log("Could not select Color from autocomplete:", e.message);
-      }
-      await driver.sleep(500);
+      await selectAutocompleteOption(driver, colorInput, "Blue", "Color of Vehicle");
     } catch (e) {
       console.log("Could not fill Color:", e.message);
     }
@@ -2317,7 +3143,7 @@ async function fillNationalForm(
           if (toggleButton) {
             await driver.wait(until.elementIsVisible(toggleButton), 5000);
             await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", toggleButton);
-            await driver.sleep(500);
+            await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
             try {
               await toggleButton.click();
@@ -2407,7 +3233,7 @@ async function fillNationalForm(
           );
 
           await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", trigger);
-          await driver.sleep(500);
+          await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
           await driver.executeScript("arguments[0].click();", trigger);
           await driver.sleep(1000);
 
@@ -2443,13 +3269,19 @@ async function fillNationalForm(
         By.xpath("//h4[contains(., 'Compulsory PA')]/ancestor::mat-expansion-panel-header")
       ];
 
-      let paPanelHeader = null;
-      for (const locator of paHeaderLocators) {
-        try {
-          paPanelHeader = await driver.wait(until.elementLocated(locator), 5000);
-          console.log(`[${jobId}] Found Compulsory PA header using: ${locator.toString()}`);
-          break;
-        } catch (e) { }
+      // Probe all four locators together instead of waiting 5s on each in turn
+      // (which cost up to 20s whenever the page used the last variant). The
+      // combined poll still waits the full window for a slow render.
+      // Presence-only: the header is expanded via executeScript below, and the
+      // old code matched on presence too.
+      const paHeaderMatch = await firstPresentLocator(driver, paHeaderLocators, 6000, {
+        requireVisible: false,
+      });
+      const paPanelHeader = paHeaderMatch ? paHeaderMatch.element : null;
+      if (paHeaderMatch) {
+        console.log(
+          `[${jobId}] Found Compulsory PA header using: ${paHeaderMatch.locator.toString()}`
+        );
       }
 
       if (paPanelHeader) {
@@ -2461,7 +3293,7 @@ async function fillNationalForm(
 
         if (!isExpanded) {
           await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", paPanelHeader);
-          await driver.sleep(500);
+          await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
           await driver.executeScript("arguments[0].click();", paPanelHeader);
           console.log(`[${jobId}] Expanded Compulsory PA panel`);
           await driver.sleep(1000);
@@ -2494,18 +3326,24 @@ async function fillNationalForm(
               By.xpath(`//mat-radio-button[@value='${targetValue}']`)
             ];
 
-            let radioSelect = null;
-            for (const locator of radioLocators) {
-              try {
-                radioSelect = await driver.wait(until.elementLocated(locator), 5000);
-                console.log(`[${jobId}] Found PA Radio button using: ${locator.toString()}`);
-                break;
-              } catch (e) { }
+            // Probe all three together rather than 5s each in sequence.
+            // requireVisible:false because the click below goes through
+            // executeScript, which works on hidden elements — the old code
+            // matched on presence only, and requiring visibility here would
+            // silently skip PA selection whenever the panel stayed collapsed.
+            const radioMatch = await firstPresentLocator(driver, radioLocators, 6000, {
+              requireVisible: false,
+            });
+            const radioSelect = radioMatch ? radioMatch.element : null;
+            if (radioMatch) {
+              console.log(
+                `[${jobId}] Found PA Radio button using: ${radioMatch.locator.toString()}`
+              );
             }
 
             if (radioSelect) {
               await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", radioSelect);
-              await driver.sleep(300);
+              await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
               const isChecked = await driver.executeScript(
                 "return arguments[0].classList.contains('mat-mdc-radio-checked') || arguments[0].classList.contains('mat-radio-checked');",
@@ -2538,7 +3376,7 @@ async function fillNationalForm(
 
             const yearSelect = await driver.findElement(By.css("mat-select[name='mcy_dropdown_noy_01']"));
             await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", yearSelect);
-            await driver.sleep(300);
+            await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
             const currentYearText = await yearSelect.getText();
             if (!currentYearText.includes(targetYearText)) {
@@ -2565,7 +3403,7 @@ async function fillNationalForm(
             try {
               const nameInput = await driver.findElement(By.css("input[name='mcy_text_cpaNomineeName_01']"));
               await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", nameInput);
-              await driver.sleep(200);
+              await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
               await driver.executeScript(`
       const input = arguments[0];
@@ -2587,7 +3425,7 @@ async function fillNationalForm(
             try {
               const ageInput = await driver.findElement(By.css("input[name='mcy_dropdown_cpaNomineeAge_01']"));
               await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", ageInput);
-              await driver.sleep(200);
+              await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
               // Use nativeInputValueSetter to properly trigger Angular change detection
               await driver.executeScript(`
@@ -2610,7 +3448,7 @@ async function fillNationalForm(
             try {
               const relSelect = await driver.findElement(By.css("mat-select[name='mcy_dropdown_nomineeRelation_01']"));
               await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", relSelect);
-              await driver.sleep(300);
+              await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
               await driver.executeScript("arguments[0].click();", relSelect);
               await driver.sleep(1200); // wait for CDK overlay to fully render
 
@@ -2668,7 +3506,7 @@ async function fillNationalForm(
                 By.xpath("//mat-label[contains(., 'Appointee Name')]/ancestor::mat-form-field//input")
               );
               await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", appointeeInput);
-              await driver.sleep(200);
+              await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
 
               await driver.executeScript(`
             const input = arguments[0];
@@ -2866,49 +3704,102 @@ async function fillNationalForm(
         const interestType = data.financierType || "Hypothecation";
         let interestSelected = false;
 
-        for (const locator of interestLocators) {
+        // Narrow the chain to the locators that are actually on the page
+        // (one instant findElements poll) instead of paying a 5s click timeout
+        // per miss. The retry across candidates is kept: the first two entries
+        // are auto-generated Material ids (mat-select-41) that drift between
+        // builds and can resolve to an unrelated mat-select, so if one turns
+        // out to be the wrong dropdown we must still try the next.
+        const firstInterestMatch = await firstPresentLocator(driver, interestLocators, 8000);
+        const presentInterestLocators = [];
+        if (firstInterestMatch) {
+          for (const locator of interestLocators) {
+            try {
+              const found = await driver.findElements(locator);
+              if (found.length > 0) presentInterestLocators.push(locator);
+            } catch (e) { /* skip unusable locator */ }
+          }
+        }
+
+        if (presentInterestLocators.length === 0) {
+          console.log("Financier Interest Type dropdown not found.");
+        }
+
+        for (const interestLocator of presentInterestLocators) {
+          if (interestSelected) break;
+          const interestMatch = { locator: interestLocator };
           try {
             // 1. Click to open dropdown
-            await safeClick(driver, locator, 5000);
-            await driver.sleep(1000);
+            await safeClick(driver, interestMatch.locator, 5000);
 
-            // 2. Search for the option
-            // Try to find a search input inside the dropdown panel
+            // 2. Wait for the panel to render, then search within it if the
+            //    dropdown offers a search box.
+            await driver.wait(
+              until.elementLocated(By.css(".mat-mdc-select-panel, .cdk-overlay-pane mat-option, mat-option")),
+              5000
+            ).catch(() => { });
+
+            let searched = false;
             try {
-              const searchInput = await driver.findElement(By.css("input[aria-label='dropdown search'], input[placeholder='Search'], .mat-select-search-input"));
-              if (searchInput) {
-                await searchInput.sendKeys(interestType);
-                await driver.sleep(1000); // Wait for filter
+              const searchInputs = await driver.findElements(
+                By.css("input[aria-label='dropdown search'], input[placeholder='Search'], .mat-select-search-input")
+              );
+              if (searchInputs.length > 0) {
+                await searchInputs[0].sendKeys(interestType);
+                searched = true;
               }
             } catch (searchErr) {
-              // No search input found, maybe typing directly works or it's not searchable
               console.log("No search input found in dropdown, trying to select directly from options...");
             }
 
-            // 3. Wait for options to appear (filtered or all)
-            const options = await driver.wait(until.elementsLocated(By.css("mat-option")), 5000);
+            // 3. Wait for the options to reflect what we typed. The old code
+            //    waited only for "some mat-option exists", which passes on the
+            //    UNFILTERED list — so it could click the wrong financier type.
+            const normalize = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+            const wanted = normalize(interestType);
+            let options = [];
+
+            await driver.wait(async () => {
+              options = await driver.findElements(By.css(".cdk-overlay-pane mat-option, mat-option"));
+              if (options.length === 0) return false;
+              if (!searched || !wanted) return true;
+              try {
+                return normalize(await options[0].getText()).includes(wanted);
+              } catch (staleErr) {
+                return false; // list is re-rendering — keep polling
+              }
+            }, searched ? 5000 : 3000).catch(() => { });
 
             if (options.length > 0) {
-              // 4. Select the FIRST option
-              console.log(`Found ${options.length} options. Selecting the first one.`);
-              const firstOption = options[0];
-              await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", firstOption);
-              await driver.sleep(200);
-              await firstOption.click();
-              console.log(`Selected first available option for "${interestType}".`);
+              // 4. Prefer an option that matches the requested type, else fall
+              //    back to the first one (previous behaviour).
+              let chosen = options[0];
+              for (const option of options) {
+                try {
+                  if (wanted && normalize(await option.getText()).includes(wanted)) {
+                    chosen = option;
+                    break;
+                  }
+                } catch (staleErr) { /* try the next option */ }
+              }
+
+              await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", chosen);
+              await driver.sleep(60);
+              await chosen.click();
+              console.log(`Selected option for "${interestType}".`);
               interestSelected = true;
 
               // Close dropdown if it didn't close automatically
-              await driver.sleep(500);
               try { await driver.executeScript("document.body.click()"); } catch (e) { }
-
-              break;
+              await waitForOverlayGone(driver, 2000);
             } else {
               console.log("No options found in dropdown.");
               try { await driver.executeScript("document.body.click()"); } catch (e) { }
             }
           } catch (interestError) {
-            console.log(`Financier Interest Type selection failed for ${locator.toString()}: ${interestError.message}`);
+            console.log(
+              `Financier Interest Type selection failed for ${interestLocator.toString()}: ${interestError.message}`
+            );
             try { await driver.executeScript("document.body.click()"); } catch (e) { }
           }
         }
@@ -2967,7 +3858,7 @@ async function fillNationalForm(
             const checkbox = await driver.wait(until.elementLocated(locator), 5000);
             await driver.wait(until.elementIsVisible(checkbox), 5000);
             await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", checkbox);
-            await driver.sleep(200);
+            await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
             const isChecked = await checkbox.isSelected().catch(() => false);
             if (!isChecked) {
               await driver.executeScript("arguments[0].click();", checkbox);
@@ -2999,455 +3890,8 @@ async function fillNationalForm(
       console.log("Financier Interest NOT applicable (hasFinancier=false). Skipping section.");
     }
 
-    // Click Check Vahan button and handle popup
-    try {
-      console.log("Clicking Check Vahan button...");
-      await openVehicleInformationSection(driver);
-      const checkVahanLocators = [
-        By.xpath("//span[contains(@class, 'checkbtn') and contains(normalize-space(.), 'Check Vahan')]"),
-        By.xpath("//button[contains(@class, 'checkbtn') and contains(normalize-space(.), 'Check Vahan')]"),
-        By.name("mcod_btn_addCover_01"),
-        By.xpath("//span[@name='mcod_btn_addCover_01']"),
-      ];
-      let vahanClicked = false;
-
-      try {
-        const vahanButtonsByName = await driver.findElements(By.name("mcod_btn_addCover_01"));
-        if (vahanButtonsByName.length > 1) {
-          console.log(`Multiple Check Vahan buttons found (${vahanButtonsByName.length}), clicking the second.`);
-          await scrollAndClickElement(driver, vahanButtonsByName[1]);
-          vahanClicked = true;
-        } else if (vahanButtonsByName.length === 1) {
-          console.log("Single Check Vahan button found by name, clicking it.");
-          await scrollAndClickElement(driver, vahanButtonsByName[0]);
-          vahanClicked = true;
-        }
-      } catch (multiError) {
-        console.log("Direct Check Vahan name-based click failed:", multiError.message);
-      }
-
-      for (const locator of checkVahanLocators) {
-        if (vahanClicked) {
-          break;
-        }
-        try {
-          await scrollAndClick(driver, locator, 12000);
-          vahanClicked = true;
-          console.log(`Clicked Check Vahan using locator: ${locator.toString()}`);
-          break;
-        } catch (vahanError) {
-          console.log(`Check Vahan click failed for ${locator.toString()}: ${vahanError.message}`);
-        }
-      }
-
-      if (vahanClicked) {
-        console.log(`[${jobId}] Waiting for Vahan response to complete...`);
-        await driver.sleep(3000); // Wait for initial response
-        await waitForLoaderToDisappear(driver, undefined, 20000);
-        await waitForPortalLoaderToDisappear(driver);
-        await driver.sleep(2000); // Additional wait for response to process
-
-        try {
-          console.log(`[${jobId}] Checking for Vahan popup/modal after response...`);
-
-          // Try multiple times to ensure popup is closed
-          let attempts = 0;
-          const maxAttempts = 5;
-          let popupStillVisible = true;
-
-          while (attempts < maxAttempts && popupStillVisible) {
-            attempts++;
-            console.log(`[${jobId}] Close attempt ${attempts}/${maxAttempts}...`);
-
-            // Use JavaScript to find and close the popup directly - try ALL methods
-            const closeResult = await driver.executeScript(`
-              // Find the Vahan dialog by multiple methods
-              let dialog = document.querySelector('app-check-vahan-dialog') ||
-                          document.querySelector('[app-check-vahan-dialog]') ||
-                          document.querySelector('mat-dialog-container') ||
-                          document.querySelector('.cd-popup.is-visible') || 
-                          document.querySelector('.cd-popup[class*="is-visible"]') ||
-                          document.querySelector('div[class*="cd-popup"][class*="is-visible"]');
-              
-              if (!dialog) {
-                // Try finding by visibility - check for Material dialog
-                const allDialogs = document.querySelectorAll('app-check-vahan-dialog, mat-dialog-container, .cd-popup, [class*="cd-popup"]');
-                for (let d of allDialogs) {
-                  const style = window.getComputedStyle(d);
-                  if (d.classList.contains('is-visible') || 
-                      style.display !== 'none' ||
-                      style.visibility !== 'hidden' ||
-                      d.offsetParent !== null) {
-                    dialog = d;
-                    break;
-                  }
-                }
-              }
-              
-              if (dialog) {
-                console.log('Found Vahan dialog, attempting ALL close methods...');
-                
-                // Method 1: Find and click close button - specific to Vahan dialog structure
-                // The close button is inside h2.mat-mdc-dialog-title
-                let closeBtn = dialog.querySelector('h2.mat-mdc-dialog-title span.cd-popup-close') ||
-                              dialog.querySelector('h2[mat-dialog-title] span.cd-popup-close') ||
-                              dialog.querySelector('h2 span.cd-popup-close') ||
-                              dialog.querySelector('span.cd-popup-close') ||
-                              dialog.querySelector('.cd-popup-close') ||
-                              dialog.querySelector('span[class*="cd-popup-close"]') ||
-                              dialog.querySelector('button.close') ||
-                              dialog.querySelector('[aria-label="Close"]') ||
-                              dialog.querySelector('[aria-label*="close" i]') ||
-                              dialog.querySelector('[class*="close"]');
-                
-                // Also search in parent elements (mat-dialog-container)
-                if (!closeBtn) {
-                  let parent = dialog.parentElement;
-                  while (parent && parent !== document.body) {
-                    closeBtn = parent.querySelector('h2.mat-mdc-dialog-title span.cd-popup-close') ||
-                              parent.querySelector('span.cd-popup-close');
-                    if (closeBtn) break;
-                    parent = parent.parentElement;
-                  }
-                }
-                
-                // Search entire document if not found in dialog
-                if (!closeBtn) {
-                  closeBtn = document.querySelector('h2.mat-mdc-dialog-title span.cd-popup-close') ||
-                            document.querySelector('h2[mat-dialog-title] span.cd-popup-close') ||
-                            document.querySelector('span.cd-popup-close') ||
-                            document.querySelector('.cd-popup-close') ||
-                            document.querySelector('span[class*="cd-popup-close"]');
-                }
-                
-                if (closeBtn) {
-                  console.log('Found close button, attempting multiple click methods...');
-                  
-                  // Try multiple click methods
-                  try {
-                    closeBtn.click();
-                  } catch (e) {
-                    console.log('Standard click failed:', e);
-                  }
-                  
-                  try {
-                    closeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                  } catch (e) {
-                    console.log('MouseEvent click failed:', e);
-                  }
-                  
-                  try {
-                    closeBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                    closeBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                  } catch (e) {
-                    console.log('MouseEvent mousedown/up failed:', e);
-                  }
-                  
-                  // Try triggering any close handlers
-                  try {
-                    if (closeBtn.onclick) closeBtn.onclick();
-                    if (closeBtn.parentElement && closeBtn.parentElement.onclick) closeBtn.parentElement.onclick();
-                  } catch (e) {
-                    console.log('onclick handler failed:', e);
-                  }
-                  
-                  // Force focus and click
-                  try {
-                    closeBtn.focus();
-                    closeBtn.click();
-                  } catch (e) {
-                    console.log('Focus and click failed:', e);
-                  }
-                  
-                  console.log('All close button click methods attempted');
-                } else {
-                  console.log('Close button not found in popup');
-                }
-                
-                // Method 2: Close Material dialog using Angular Material methods
-                // Try to find and close the dialog using Material's close method
-                try {
-                  const dialogContainer = dialog.closest('mat-dialog-container') || 
-                                        document.querySelector('mat-dialog-container');
-                  if (dialogContainer) {
-                    // Try to trigger Material dialog close
-                    const closeEvent = new Event('close', { bubbles: true });
-                    dialogContainer.dispatchEvent(closeEvent);
-                  }
-                } catch (e) {
-                  console.log('Material dialog close event failed:', e);
-                }
-                
-                // Method 3: Remove is-visible class and all visibility classes
-                dialog.classList.remove('is-visible');
-                dialog.classList.remove('visible');
-                dialog.classList.remove('show');
-                dialog.classList.add('is-hidden');
-                dialog.classList.add('hidden');
-                
-                // Method 4: Set display to none and visibility hidden
-                dialog.style.display = 'none';
-                dialog.style.visibility = 'hidden';
-                dialog.style.opacity = '0';
-                dialog.style.zIndex = '-1';
-                
-                // Method 5: Hide backdrop/overlay (Material dialog backdrop)
-                const backdrop = dialog.querySelector('.cd-popup-backdrop') ||
-                               dialog.closest('mat-dialog-container')?.querySelector('.cdk-overlay-backdrop') ||
-                               document.querySelector('.cdk-overlay-backdrop') ||
-                               document.querySelector('.cd-popup-backdrop');
-                if (backdrop) {
-                  backdrop.style.display = 'none';
-                  backdrop.style.visibility = 'hidden';
-                  backdrop.classList.remove('is-visible', 'visible', 'show', 'cdk-overlay-backdrop-showing');
-                }
-                
-                // Method 6: Close Material dialog container
-                const matDialogContainer = dialog.closest('mat-dialog-container') ||
-                                        document.querySelector('mat-dialog-container');
-                if (matDialogContainer) {
-                  matDialogContainer.style.display = 'none';
-                  matDialogContainer.style.visibility = 'hidden';
-                  matDialogContainer.classList.remove('cdk-overlay-pane');
-                }
-                
-                // Method 7: Remove pointer events
-                dialog.style.pointerEvents = 'none';
-                
-                // Check if still visible
-                const style = window.getComputedStyle(dialog);
-                const isStillVisible = style.display !== 'none' && 
-                                     style.visibility !== 'hidden' && 
-                                     dialog.offsetParent !== null;
-                
-                return { 
-                  success: !isStillVisible, 
-                  found: true,
-                  stillVisible: isStillVisible,
-                  methods: 'all',
-                  dialogType: dialog.tagName
-                };
-              }
-              
-              return { success: true, found: false, reason: 'dialog not found' };
-            `);
-
-            console.log(`[${jobId}] Close attempt ${attempts} result:`, closeResult);
-
-            // Check if dialog is actually closed
-            await driver.sleep(500);
-            popupStillVisible = await driver.executeScript(`
-              // Check for Vahan dialog or Material dialog
-              const dialog = document.querySelector('app-check-vahan-dialog') ||
-                            document.querySelector('mat-dialog-container') ||
-                            document.querySelector('.cd-popup.is-visible') ||
-                            document.querySelector('.cd-popup[class*="is-visible"]');
-              
-              if (dialog) {
-                const style = window.getComputedStyle(dialog);
-                if (style.display !== 'none' && style.visibility !== 'hidden' && dialog.offsetParent !== null) {
-                  return true;
-                }
-              }
-              
-              // Check all dialogs by computed style
-              const allDialogs = document.querySelectorAll('app-check-vahan-dialog, mat-dialog-container, .cd-popup');
-              for (let d of allDialogs) {
-                const style = window.getComputedStyle(d);
-                if (style.display !== 'none' && style.visibility !== 'hidden' && d.offsetParent !== null) {
-                  return true;
-                }
-              }
-              return false;
-            `);
-
-            if (!popupStillVisible) {
-              console.log(`[${jobId}] ✅ Popup confirmed closed after attempt ${attempts}`);
-              break;
-            } else {
-              console.log(`[${jobId}] ⚠️ Popup still visible, will retry...`);
-              await driver.sleep(500);
-            }
-          }
-
-          // Final aggressive close attempt
-          if (popupStillVisible) {
-            console.log(`[${jobId}] Dialog still visible after ${maxAttempts} attempts, forcing close...`);
-            await driver.executeScript(`
-              // Close ALL dialogs aggressively - Vahan dialog and Material dialogs
-              document.querySelectorAll('app-check-vahan-dialog, mat-dialog-container, .cd-popup, [class*="cd-popup"]').forEach(d => {
-                d.classList.remove('is-visible', 'visible', 'show', 'cdk-overlay-pane');
-                d.classList.add('is-hidden', 'hidden');
-                d.style.display = 'none';
-                d.style.visibility = 'hidden';
-                d.style.opacity = '0';
-                d.style.zIndex = '-1';
-                d.style.pointerEvents = 'none';
-              });
-              
-              // Hide all backdrops (Material and custom)
-              document.querySelectorAll('.cdk-overlay-backdrop, .cd-popup-backdrop, [class*="backdrop"]').forEach(b => {
-                b.style.display = 'none';
-                b.style.visibility = 'hidden';
-                b.classList.remove('is-visible', 'visible', 'show', 'cdk-overlay-backdrop-showing');
-              });
-              
-              // Close overlay container
-              const overlayContainer = document.querySelector('.cdk-overlay-container');
-              if (overlayContainer) {
-                const dialogs = overlayContainer.querySelectorAll('mat-dialog-container, app-check-vahan-dialog');
-                dialogs.forEach(d => {
-                  d.style.display = 'none';
-                  d.style.visibility = 'hidden';
-                });
-              }
-            `);
-            await driver.sleep(1000);
-          }
-
-          await driver.sleep(1000);
-
-          // Also try Selenium-based approach to click X icon button
-          try {
-            console.log(`[${jobId}] Trying Selenium-based X icon click...`);
-
-            const closeButtonLocators = [
-              // Specific to Vahan dialog structure - close button inside h2 title
-              By.xpath("//h2[@class='mat-mdc-dialog-title']//span[@class='cd-popup-close']"),
-              By.xpath("//h2[contains(@class, 'mat-mdc-dialog-title')]//span[@class='cd-popup-close']"),
-              By.xpath("//h2[@mat-dialog-title]//span[@class='cd-popup-close']"),
-              By.xpath("//h2//span[@class='cd-popup-close']"),
-              // General selectors
-              By.css("span.cd-popup-close"),
-              By.xpath("//span[@class='cd-popup-close']"),
-              By.xpath("//span[contains(@class, 'cd-popup-close')]"),
-              By.xpath("//span[contains(@class, 'cd-popup-close') and normalize-space(text())='X']"),
-              By.xpath("//span[contains(@class, 'cd-popup-close') and contains(text(), 'X')]"),
-              By.xpath("//span[contains(@class, 'cd-popup-close') and (text()='X' or text()='×')]"),
-              By.xpath("//*[@class='cd-popup-close' and contains(text(), 'X')]"),
-              // Inside app-check-vahan-dialog
-              By.xpath("//app-check-vahan-dialog//span[@class='cd-popup-close']"),
-              By.xpath("//app-check-vahan-dialog//h2//span[@class='cd-popup-close']"),
-              // Material dialog close
-              By.xpath("//mat-dialog-container//span[@class='cd-popup-close']"),
-              By.xpath("//button[contains(@class, 'close')]"),
-              By.xpath("//button[@aria-label='Close']"),
-              By.xpath("//*[contains(@class, 'close') and contains(text(), 'X')]"),
-              By.xpath("//*[contains(@class, 'close')]"),
-            ];
-
-            let closed = false;
-            for (const closeLocator of closeButtonLocators) {
-              try {
-                const closeButtons = await driver.findElements(closeLocator);
-                console.log(`[${jobId}] Found ${closeButtons.length} close buttons with locator: ${closeLocator.toString()}`);
-
-                for (const closeButton of closeButtons) {
-                  try {
-                    const isDisplayed = await closeButton.isDisplayed();
-                    const isEnabled = await closeButton.isEnabled();
-                    console.log(`[${jobId}] Close button - displayed: ${isDisplayed}, enabled: ${isEnabled}`);
-
-                    if (isDisplayed) {
-                      // Scroll to button
-                      await driver.executeScript("arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", closeButton);
-                      await driver.sleep(300);
-
-                      // Try multiple click methods
-                      try {
-                        await closeButton.click();
-                        console.log(`[${jobId}] ✅ Clicked close button (standard click)`);
-                        closed = true;
-                      } catch (clickError) {
-                        console.log(`[${jobId}] Standard click failed, trying JavaScript click...`);
-                        try {
-                          await driver.executeScript("arguments[0].click();", closeButton);
-                          console.log(`[${jobId}] ✅ Clicked close button (JavaScript click)`);
-                          closed = true;
-                        } catch (jsClickError) {
-                          console.log(`[${jobId}] JavaScript click failed, trying event dispatch...`);
-                          try {
-                            await driver.executeScript(`
-                              arguments[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                              arguments[0].dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                              arguments[0].dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                            `, closeButton);
-                            console.log(`[${jobId}] ✅ Dispatched click events`);
-                            closed = true;
-                          } catch (eventError) {
-                            console.log(`[${jobId}] Event dispatch failed:`, eventError.message);
-                          }
-                        }
-                      }
-
-                      if (closed) {
-                        await driver.sleep(1000);
-                        break;
-                      }
-                    }
-                  } catch (e) {
-                    console.log(`[${jobId}] Error checking/clicking button:`, e.message);
-                  }
-                }
-                if (closed) break;
-              } catch (closeError) {
-                console.log(`[${jobId}] Error with locator ${closeLocator.toString()}:`, closeError.message);
-              }
-            }
-
-            if (!closed) {
-              console.log(`[${jobId}] Could not click X icon, force closing with JavaScript...`);
-              // Force close with JavaScript
-              await driver.executeScript(`
-                const popups = document.querySelectorAll('.cd-popup.is-visible, [class*="cd-popup"][class*="is-visible"]');
-                popups.forEach(p => {
-                  p.classList.remove('is-visible');
-                  p.style.display = 'none';
-                  p.style.visibility = 'hidden';
-                });
-              `);
-              console.log(`[${jobId}] Force closed popup using JavaScript`);
-            } else {
-              console.log(`[${jobId}] ✅ Successfully clicked X icon button`);
-            }
-          } catch (seleniumError) {
-            console.error(`[${jobId}] Selenium close attempt error:`, seleniumError.message);
-          }
-
-          // Final verification
-          await driver.sleep(500);
-          const stillVisible = await driver.executeScript(`
-            const popup = document.querySelector('.cd-popup.is-visible');
-            return popup ? false : true;
-          `);
-
-          if (stillVisible) {
-            console.log(`[${jobId}] ✅ Vahan modal successfully closed`);
-          } else {
-            console.log(`[${jobId}] ⚠️ Vahan modal may still be visible`);
-          }
-
-        } catch (popupError) {
-          console.error(`[${jobId}] Error while handling Vahan popup:`, popupError.message);
-          // Try emergency close
-          try {
-            await driver.executeScript(`
-              document.querySelectorAll('.cd-popup').forEach(p => {
-                p.classList.remove('is-visible');
-                p.style.display = 'none';
-              });
-            `);
-            console.log(`[${jobId}] Emergency close attempted`);
-          } catch (e) {
-            console.log(`[${jobId}] Emergency close failed:`, e.message);
-          }
-        }
-      } else {
-        console.log(`[${jobId}] Check Vahan button could not be clicked; continuing.`);
-      }
-    } catch (e) {
-      console.log("Check Vahan flow failed:", e.message);
-    }
+    // Check Vahan (initial pass, before premium calculation)
+    // await runCheckVahan(driver, jobId, "initial", data);
 
 
     // Check declaration checkbox after Vahan - force check with events
@@ -3603,6 +4047,7 @@ async function fillNationalForm(
 
     await driver.sleep(500);
 
+
     // Handle Discount/Percentage if provided
     if (formData.discount) {
       try {
@@ -3632,6 +4077,18 @@ async function fillNationalForm(
       }
     }
 
+    // Re-run Check Vahan AFTER the discount percentage is set. Changing the
+    // discount invalidates the earlier Vahan result, so the portal needs a
+    // fresh lookup before Calculate Premium will use the updated values.
+    // runCheckVahan clicks the button, waits out the loader, and closes the
+    // result popup before we continue.
+    await runCheckVahan(driver, jobId, "after discount", data);
+
+    // Make sure the Vahan popup is really gone before submitting — a leftover
+    // backdrop would swallow the Calculate Premium click.
+    await waitForOverlayGone(driver, 3000);
+    await waitForPortalIdle(driver, 40000, 600);
+
     // Click Calculate Premium button
     console.log(`[${jobId}] Clicking Calculate Premium button...`);
     const calculatePremiumLocators = [
@@ -3657,7 +4114,7 @@ async function fillNationalForm(
       throw new Error("Critical Error: Unable to click Calculate Premium button. Automation cannot proceed.");
     }
     await driver.sleep(3000);
-    await waitForPortalLoaderToDisappear(driver);
+    await waitForPortalLoaderToDisappear(driver, NON_BLOCKING_LOADER_CHECK);
     console.log(`[${jobId}] ✅ Calculate Premium button clicked successfully`);
 
     // Confirm popup OK
@@ -3666,7 +4123,7 @@ async function fillNationalForm(
       const confirmOkButton = By.xpath("//span[contains(., 'OK')]/ancestor::button");
       await safeClick(driver, confirmOkButton, 5000);
       await driver.sleep(1000);
-      await waitForPortalLoaderToDisappear(driver);
+      await waitForPortalLoaderToDisappear(driver, NON_BLOCKING_LOADER_CHECK);
     } catch (e) {
       console.log("Confirmation popup OK button not found or not needed:", e.message);
     }
@@ -3703,7 +4160,7 @@ async function fillNationalForm(
         }
 
         await driver.sleep(2000);
-        await waitForPortalLoaderToDisappear(driver);
+        await waitForPortalLoaderToDisappear(driver, NON_BLOCKING_LOADER_CHECK);
 
         // Step 2: Select Payment Option (Value 5)
         console.log(`[${jobId}] Selecting Payment Option (Value 5)...`);
@@ -3763,7 +4220,7 @@ async function fillNationalForm(
         }
 
         await driver.sleep(2000);
-        await waitForPortalLoaderToDisappear(driver);
+        await waitForPortalLoaderToDisappear(driver, NON_BLOCKING_LOADER_CHECK);
 
         // Step 4: Close confirmation popup
         console.log(`[${jobId}] Waiting for confirmation popup and clicking Close...`);
@@ -3832,7 +4289,11 @@ async function fillNationalForm(
       error.message.includes("Convert Quote button") ||
       error.message.includes("not found") ||
       error.stage === "post-quote-generation" ||
-      error.stage === "post_quote_generation_click_failure";
+      error.stage === "post_quote_generation_click_failure" ||
+      // A failed Vahan lookup means the RegNo / EngineNo / ChassisNo in the
+      // data are wrong — retrying with the same values can never succeed.
+      error.isVahanError === true ||
+      error.stage === "check-vahan";
 
     const errorStage = error.stage || "login-form";
 
@@ -3852,7 +4313,7 @@ async function fillNationalForm(
 
     return {
       success: false,
-      error: beautifyError(error),
+      error: beautifyError(error, "national"),
       errorStack: error.stack,
       screenshotUrl: errorDetails.screenshotUrl,
       screenshotKey: errorDetails.screenshotKey,
