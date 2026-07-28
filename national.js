@@ -1098,7 +1098,7 @@ async function fillNationalForm(
     await driver.wait(until.elementIsEnabled(variantInput), 15000);
 
     await variantInput.clear();
-    await variantInput.sendKeys(data.vehicleVariant || "SINGLE DISC - BLUETOOTH (2024-2025)");
+    await variantInput.sendKeys(data.vehicleVariant || "standard");
     await driver.sleep(2000); // Wait for autocomplete options to appear
 
     // Click on the first autocomplete option

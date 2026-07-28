@@ -685,7 +685,11 @@ async function createBriskCertificate(data) {
       PaymentMode: data.paymentMode || "FromWallet",
       Address_Line1: data.addressLine1 || data.address_Line1 || `${data.flatDoorNo || data.flatNo || "TEST"} ${data.buildingName || data.premisesName || "ADDR 1"}`.trim(),
       Address_Line2: data.addressLine2 || data.address_Line2 || `${data.roadStreetLane || data.road || "TEST"} ${data.areaAndLocality || data.area || "ADDR 2"}`.trim(),
-      PlanName: data.planName || "TWHRN30K3S244",
+      // Plan must exist in the live Brisk plan list (GET /briskPlanList) —
+      // stale plan names make the Brisk API fail with "Something went wrong".
+      // Current live plan is the FLAX (flexible-price) plan; Flaxprice below
+      // sets the actual amount. Override with BRISK_PLAN_NAME in .env.
+      PlanName: data.planName || process.env.BRISK_PLAN_NAME || "FLAXTWHRT40K5S",
       CustomerDOB: data.dob || data.customerDOB || formatDate(data.dateOfBirth, "01-01-2000"),
       loginid: data.loginid || "masterwallet@gmail.com",
       VehicleType: data.vehicleType || "TW",
@@ -1136,6 +1140,103 @@ function beautifyError(error) {
   return msg;
 }
 
+/**
+ * Verified Kendo autocomplete fill: types the text, polls until a matching
+ * suggestion is actually visible, clicks it, verifies the input took a value,
+ * and retries the whole cycle. Throws after all attempts fail (pre-submission
+ * stages are safe to fail — the job queue retries them).
+ */
+async function selectKendoAutocomplete(driver, inputId, searchText, options = {}) {
+  const {
+    label = inputId,
+    attempts = 3,
+    suggestionTimeoutMs = 10000,
+    matchText = searchText,
+  } = options;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    console.log(`${label} attempt ${attempt}/${attempts}: typing "${searchText}"...`);
+    const input = await driver.wait(until.elementLocated(By.id(inputId)), 10000);
+    await driver.wait(until.elementIsVisible(input), 5000);
+    await driver.wait(until.elementIsEnabled(input), 5000);
+    await driver.executeScript(
+      "arguments[0].scrollIntoView({block: 'center'});",
+      input
+    );
+
+    // Clear and re-type with events so the autocomplete re-triggers
+    await driver.executeScript(
+      "arguments[0].value = ''; arguments[0].dispatchEvent(new Event('input', { bubbles: true }));",
+      input
+    );
+    await driver.sleep(200);
+    await input.click();
+    await input.sendKeys(searchText);
+    await driver.executeScript(
+      `
+      var el = arguments[0];
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('keyup', { bubbles: true }));
+      `,
+      input
+    );
+
+    // Poll for a VISIBLE suggestion, preferring one that matches the text
+    let item = null;
+    const deadline = Date.now() + suggestionTimeoutMs;
+    while (Date.now() < deadline && !item) {
+      item = await driver.executeScript(
+        `
+        var match = String(arguments[0]).toUpperCase();
+        var listSelector = '#' + arguments[1] + '_listbox li, .k-animation-container li, ul.k-list li, .k-list-container li';
+        var els = document.querySelectorAll(listSelector);
+        var firstVisible = null;
+        for (var i = 0; i < els.length; i++) {
+          var el = els[i];
+          if (el.offsetParent === null) continue;
+          if (!firstVisible) firstVisible = el;
+          var t = (el.textContent || '').toUpperCase();
+          if (t.indexOf(match) !== -1) return el;
+        }
+        return firstVisible;
+        `,
+        matchText,
+        inputId
+      );
+      if (!item) await driver.sleep(400);
+    }
+
+    if (!item) {
+      console.log(`⚠️ No suggestions appeared for "${searchText}" (${label}, attempt ${attempt})`);
+      continue;
+    }
+
+    try {
+      await driver.executeScript("arguments[0].click();", item);
+    } catch (clickErr) {
+      await input.sendKeys(Key.ARROW_DOWN);
+      await driver.sleep(300);
+      await input.sendKeys(Key.ENTER);
+    }
+    await driver.sleep(500);
+
+    // Verify the input actually holds a selection now
+    const valueNow = await driver.executeScript(
+      "var el = document.getElementById(arguments[0]); return el ? el.value : '';",
+      inputId
+    );
+    if (valueNow && valueNow.trim() !== "") {
+      console.log(`✅ ${label} selected: "${valueNow}" (attempt ${attempt})`);
+      return valueNow;
+    }
+    console.log(`⚠️ ${label} input empty after selection (attempt ${attempt}), retrying...`);
+  }
+
+  throw new Error(
+    `${label}: no suggestion could be selected for "${searchText}" after ${attempts} attempts`
+  );
+}
+
 async function fillRelianceForm(
   // data = { username: "TNAGAR2W", password: "Pass@123" }
   data = { username: "rfcpolicy", password: "Pass@123" }
@@ -1298,7 +1399,8 @@ async function fillRelianceForm(
         "Motors → Two Wheeler menu never became clickable after 4 attempts (portal slow/unresponsive)"
       );
     }
-    await driver.sleep(4000);
+    // The next step waits for the product dropdown itself (15s) — no long sleep needed
+    await driver.sleep(1000);
     // === STEP 4: select "Two Wheeler Package Bundled (Only New Veh.)" ===
     console.log("Selecting Sub Product...");
 
@@ -1405,8 +1507,9 @@ async function fillRelianceForm(
       await driver.switchTo().frame(iframeEl);
       console.log("Switched to modal iframe");
 
-      // Wait for form to be fully loaded
-      await driver.sleep(5000);
+      // Wait for form to be fully loaded (field lookups below have their own waits)
+      await waitForLoaderToDisappear(driver);
+      await driver.sleep(1500);
 
       // === Fill mandatory fields with safe methods ===
       console.log("Filling form fields...");
@@ -1564,8 +1667,9 @@ async function fillRelianceForm(
       await waitForElementAndRetry(driver, By.id("btnSubmit"), "click");
       console.log("Clicked Submit button!");
 
-      // Wait for submission to process
-      await driver.sleep(5000);
+      // Wait for submission to process (post-submission lookups have 15s waits)
+      await waitForLoaderToDisappear(driver);
+      await driver.sleep(2000);
       console.log("Form submission attempted!");
 
       // Back to main content
@@ -1662,102 +1766,20 @@ async function fillRelianceForm(
         // === STEP 9: Fill Vehicle Details ===
         console.log("Filling vehicle details...");
 
-        // Vehicle Make/Model autocomplete
+        // Vehicle Make/Model autocomplete (verified with retries)
         console.log("Filling vehicle make/model...");
-        const vehicleMakeInput = await driver.wait(
-          until.elementLocated(By.id("VehicleDetailsMakeModel")),
-          10000
-        );
-        await driver.wait(until.elementIsVisible(vehicleMakeInput), 5000);
-        await driver.wait(until.elementIsEnabled(vehicleMakeInput), 5000);
-        await driver.executeScript(
-          "arguments[0].scrollIntoView({block: 'center'});",
-          vehicleMakeInput
-        );
-        await driver.sleep(500);
-
-        // Clear the field first
-        await vehicleMakeInput.clear();
-        await driver.sleep(500);
-
-        // Click on the input to focus it
-        await vehicleMakeInput.click();
-        await driver.sleep(500);
-
-        // Type the search text and trigger events
         const vehicleSearchText = data.vehicleModel
           ? `${data.vehicleMake} ${data.vehicleModel}`
           : "tvs scooty zest";
-        await vehicleMakeInput.sendKeys(vehicleSearchText);
-        await driver.sleep(1000);
-
-        // Trigger additional events to ensure autocomplete works
-        await driver.executeScript(
-          `
-          var input = arguments[0];
-          var event = new Event('input', { bubbles: true });
-          input.dispatchEvent(event);
-          
-          var keyupEvent = new Event('keyup', { bubbles: true });
-          input.dispatchEvent(keyupEvent);
-          
-          var changeEvent = new Event('change', { bubbles: true });
-          input.dispatchEvent(changeEvent);
-        `,
-          vehicleMakeInput
-        );
-
-        // Wait for API call to complete and dropdown to appear
-        await driver.sleep(4000);
-        console.log("Waiting for dropdown options to appear...");
-
-        // Try multiple selectors for the dropdown items
-        let firstResult = null;
-        try {
-          // Try Kendo autocomplete listbox items
-          firstResult = await driver.wait(
-            until.elementLocated(
-              By.xpath("//ul[@id='VehicleDetailsMakeModel_listbox']//li[1]")
-            ),
-            5000
-          );
-        } catch (e) {
-          try {
-            // Try general k-item class
-            firstResult = await driver.wait(
-              until.elementLocated(
-                By.xpath("//li[contains(@class, 'k-item')][1]")
-              ),
-              5000
-            );
-          } catch (e2) {
-            try {
-              // Try any li element in autocomplete
-              firstResult = await driver.wait(
-                until.elementLocated(
-                  By.xpath("//li[contains(@class, 'k-list-item')][1]")
-                ),
-                5000
-              );
-            } catch (e3) {
-              console.log(
-                "Could not find dropdown options, trying alternative approach..."
-              );
-              // Try to press Enter to select if no dropdown appears
-              await vehicleMakeInput.sendKeys(Key.ENTER);
-              await driver.sleep(1000);
-              console.log("Pressed Enter to confirm selection");
-              return; // Exit this section
-            }
+        await selectKendoAutocomplete(
+          driver,
+          "VehicleDetailsMakeModel",
+          vehicleSearchText,
+          {
+            label: "Vehicle make/model",
+            matchText: data.vehicleModel || vehicleSearchText,
           }
-        }
-
-        if (firstResult) {
-          await driver.wait(until.elementIsVisible(firstResult), 5000);
-          await firstResult.click();
-          console.log("Selected first vehicle make/model result");
-          await driver.sleep(1000);
-        }
+        );
 
         // Purchase Date - use data from MongoDB or today's date
         console.log("Filling purchase date...");
@@ -1877,111 +1899,15 @@ async function fillRelianceForm(
         console.log("Checked 'Is New Vehicle' checkbox");
         await driver.sleep(1000);
 
-        // RTO City Location autocomplete
+        // RTO City Location autocomplete (verified with retries — the old blind
+        // first-item click was silently missing the selection ~2/10 runs)
         console.log("Filling RTO city location...");
-        const rtoCityInput = await driver.wait(
-          until.elementLocated(By.id("RTOCityLocation")),
-          10000
+        await selectKendoAutocomplete(
+          driver,
+          "RTOCityLocation",
+          String(data.rtoCityLocation || "coimbatore"),
+          { label: "RTO city" }
         );
-        await driver.wait(until.elementIsVisible(rtoCityInput), 5000);
-        await driver.wait(until.elementIsEnabled(rtoCityInput), 5000);
-        await driver.executeScript(
-          "arguments[0].scrollIntoView({block: 'center'});",
-          rtoCityInput
-        );
-        await driver.sleep(500);
-
-        // Clear the field first
-        await rtoCityInput.clear();
-        await driver.sleep(500);
-
-        // Click on the input to focus it
-        await rtoCityInput.click();
-        await driver.sleep(500);
-
-        // Type the search text and trigger events
-        await rtoCityInput.sendKeys(data.rtoCityLocation || "coimbatore");
-        await driver.sleep(1000);
-
-        // Trigger additional events to ensure autocomplete works
-        await driver.executeScript(
-          `
-          var input = arguments[0];
-          var event = new Event('input', { bubbles: true });
-          input.dispatchEvent(event);
-          
-          var keyupEvent = new Event('keyup', { bubbles: true });
-          input.dispatchEvent(keyupEvent);
-          
-          var changeEvent = new Event('change', { bubbles: true });
-          input.dispatchEvent(changeEvent);
-        `,
-          rtoCityInput
-        );
-
-        // Wait for API call to complete and dropdown to appear
-        await driver.sleep(4000);
-        console.log("Waiting for RTO city dropdown options to appear...");
-
-        // Try multiple selectors for the dropdown items
-        let rtoCitySelected = false;
-        try {
-          // Try Kendo autocomplete listbox items
-          const firstRtoResult = await driver.wait(
-            until.elementLocated(
-              By.xpath("//ul[@id='RTOCityLocation_listbox']//li[1]")
-            ),
-            5000
-          );
-          await driver.wait(until.elementIsVisible(firstRtoResult), 3000);
-          await firstRtoResult.click();
-          console.log("Selected first RTO city result from listbox");
-          rtoCitySelected = true;
-        } catch (e) {
-          try {
-            // Try general k-item class
-            const firstRtoResult = await driver.wait(
-              until.elementLocated(
-                By.xpath("//li[contains(@class, 'k-item')][1]")
-              ),
-              5000
-            );
-            await driver.wait(until.elementIsVisible(firstRtoResult), 3000);
-            await firstRtoResult.click();
-            console.log("Selected first RTO city result from general items");
-            rtoCitySelected = true;
-          } catch (e2) {
-            try {
-              // Try any li element in autocomplete
-              const firstRtoResult = await driver.wait(
-                until.elementLocated(
-                  By.xpath("//li[contains(@class, 'k-list-item')][1]")
-                ),
-                5000
-              );
-              await driver.wait(until.elementIsVisible(firstRtoResult), 3000);
-              await firstRtoResult.click();
-              console.log("Selected first RTO city result from list items");
-              rtoCitySelected = true;
-            } catch (e3) {
-              console.log(
-                "Could not find RTO city dropdown options, trying alternative approach..."
-              );
-              // Try to press Enter to select if no dropdown appears
-              await rtoCityInput.sendKeys(Key.ENTER);
-              await driver.sleep(1000);
-              console.log("Pressed Enter to confirm RTO city selection");
-              rtoCitySelected = true;
-            }
-          }
-        }
-
-        if (rtoCitySelected) {
-          await driver.sleep(1000);
-          console.log("RTO city selection completed");
-        } else {
-          console.log("RTO city selection failed, continuing with form...");
-        }
 
         // Engine Number
         console.log("Filling engine number...");
@@ -2166,7 +2092,9 @@ async function fillRelianceForm(
         console.log(
           "Clicked 'Get Coverage Details' button with multiple methods"
         );
-        await driver.sleep(5000); // Wait longer for the API call to complete
+        // Wait for the coverage API call: loader-based instead of a blind 5s
+        await waitForLoaderToDisappear(driver);
+        await driver.sleep(1500);
 
         // PA to Owner Driver Handling
         const isCompanyPA = data.paCover === true && (String(data.paCoverCompany).toLowerCase() === "company" || String(data.paCoverCompany).toLowerCase() === "reliance");
@@ -3509,8 +3437,13 @@ async function fillRelianceForm(
             }
             console.log("✅ Clicked DO KYC link");
 
-            // Wait for new tab to open
-            await driver.sleep(4000);
+            // Wait for new tab to open (poll instead of a fixed sleep)
+            const kycTabDeadline = Date.now() + 8000;
+            while (Date.now() < kycTabDeadline) {
+              const handlesNow = await driver.getAllWindowHandles();
+              if (handlesNow.length > windowsBeforeKyc.length) break;
+              await driver.sleep(250);
+            }
 
             // Check for new window/tab
             const windowsAfterKyc = await driver.getAllWindowHandles();
@@ -3523,7 +3456,17 @@ async function fillRelianceForm(
                 kycWindowHandle = newWindow;
                 console.log(`📍 New window detected, switching to: ${kycWindowHandle}`);
                 await driver.switchTo().window(kycWindowHandle);
-                await driver.sleep(3000);
+                // Wait for the KYC page to load instead of a fixed 3s
+                try {
+                  await driver.wait(
+                    async () =>
+                      driver.executeScript("return document.readyState === 'complete'"),
+                    10000
+                  );
+                } catch (e) {
+                  // best effort — later steps have their own waits
+                }
+                await driver.sleep(500);
                 const newUrl = await driver.getCurrentUrl();
                 console.log(`✅ Switched to KYC window, URL: ${newUrl}`);
               }
@@ -3600,8 +3543,8 @@ async function fillRelianceForm(
             }
             console.log("✅ Clicked Continue (with OVD UPLOAD)");
 
-            // Wait for the document-type page to load
-            await driver.sleep(5000);
+            // Wait for the document-type page to load (readyState + small buffer)
+            await driver.sleep(1500);
             try {
               await driver.wait(
                 async () =>
