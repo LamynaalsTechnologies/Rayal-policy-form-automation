@@ -156,7 +156,19 @@ async function isUserLoggedIn(driver) {
  * Performs the login process
  * @param {WebDriver} driver - Selenium WebDriver instance
  */
-async function performLogin(driver) {
+/**
+ * Log in on the given driver.
+ *
+ * options (all optional — omitted values fall back to the shared CONFIG, which
+ * is what the single master-session path uses):
+ *   username / password : per-JOB credentials. Parallel jobs MUST pass these —
+ *                         CONFIG is one shared mutable object, and job B
+ *                         overwriting it mid-flight logged job A in under the
+ *                         wrong client.
+ *   captchaTag          : unique tag (jobId) for the captcha screenshot file so
+ *                         parallel logins don't solve each other's captcha.
+ */
+async function performLogin(driver, options = {}) {
   const MAX_RETRIES = 5;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -180,13 +192,18 @@ async function performLogin(driver) {
       }
 
       console.log("→ Filling login credentials...");
-      // ... same as before ...
-      const username = CONFIG.USERNAME || "rfcpolicy";
-      const password = CONFIG.PASSWORD || "Pass@123";
+      // Per-job credentials win; the shared CONFIG is only the master-session
+      // fallback.
+      const username = options.username || CONFIG.USERNAME || "rfcpolicy";
+      const password = options.password || CONFIG.PASSWORD || "Pass@123";
 
-      // Get captcha text
+      // Get captcha text — unique file per job so parallel logins can't
+      // overwrite each other's screenshot.
+      const captchaFile = options.captchaTag
+        ? `reliance_captcha_${options.captchaTag}`
+        : "reliance_captcha";
       console.log("📸 Capturing captcha...");
-      const captchaText = await getCaptchaText(driver, "reliance_captcha");
+      const captchaText = await getCaptchaText(driver, captchaFile);
       if (!captchaText) {
         console.log("⚠️ Failed to extract captcha text, retrying...");
         continue;
@@ -325,6 +342,22 @@ function createClonedProfileOptions(clonedProfileInfo) {
   );
   options.addArguments("--no-first-run");
   options.addArguments("--no-default-browser-check");
+
+  // Per-JOB download directory. Without it every window downloaded into the
+  // same place and the PDF pick-up ("newest file in reliance_pdf/") could grab
+  // ANOTHER customer's policy PDF when two jobs ran in parallel — a severe
+  // data mix-up. sessionManager passes downloadDir per job.
+  if (clonedProfileInfo.downloadDir) {
+    try {
+      fs.mkdirSync(clonedProfileInfo.downloadDir, { recursive: true });
+    } catch (e) { /* Chrome will surface a real problem on download */ }
+    options.setUserPreferences({
+      "download.default_directory": clonedProfileInfo.downloadDir,
+      "download.prompt_for_download": false,
+      "download.directory_upgrade": true,
+      "plugins.always_open_pdf_externally": true,
+    });
+  }
 
   // Hide automation indicators
   options.excludeSwitches(["enable-automation"]);

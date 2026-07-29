@@ -1,20 +1,17 @@
 /**
- * National Session Manager - Manages master session and cloned profiles for National Insurance
+ * National Session Manager - per-job browsers for National Insurance
  *
- * Architecture:
- * 1. Master Profile: Contains the logged-in session
- * 2. Cloned Profiles: Each job gets a clone of the master profile
- * 3. Session Check: Verifies login before processing jobs
+ * There is no master session and no profile cloning: every job gets a FRESH,
+ * empty Chrome profile and logs in on its own. That is what makes National
+ * jobs safe to run in parallel — no shared driver, profile or login state.
+ *
+ * Each profile directory is unique per attempt and is deleted in
+ * cleanupNationalJobBrowser (which the caller runs in a `finally`).
  */
 
 const {
-  createMasterBrowser,
   createClonedBrowser,
-  cloneChromeProfile,
-  isNationalUserLoggedIn,
-  performNationalLogin,
   CONFIG,
-  PATHS,
 } = require("./nationalBrowserConfig");
 const fs = require("fs");
 const path = require("path");
@@ -23,372 +20,10 @@ const path = require("path");
 // STATE MANAGEMENT
 // ============================================
 
-let masterDriver = null;
-let isSessionActive = false;
-let sessionLastChecked = null;
-
-/**
- * Get National session status
- */
-function getNationalSessionStatus() {
-  return {
-    isActive: isSessionActive,
-    lastChecked: sessionLastChecked,
-    hasMasterDriver: masterDriver !== null,
-  };
-}
-
-// ============================================
-// MASTER SESSION RECOVERY MANAGER
-// ============================================
-
-/**
- * Multi-Level National Master Session Recovery
- */
-class NationalMasterSessionRecovery {
-  constructor() {
-    this.recoveryAttempts = {
-      soft: { count: 0, max: 3 },
-      hard: { count: 0, max: 2 },
-      nuclear: { count: 0, max: 1 },
-    };
-
-    this.lastRecoveryTime = null;
-    this.recoveryHistory = [];
-    this.isRecovering = false;
-  }
-
-  async attemptRecovery(level, recoveryFn) {
-    const attempt = this.recoveryAttempts[level];
-    
-    if (attempt.count >= attempt.max) {
-      console.log(`⚠️  [National Recovery] ${level} recovery max attempts (${attempt.max}) reached`);
-      return false;
-    }
-
-    this.isRecovering = true;
-    attempt.count++;
-    this.lastRecoveryTime = new Date();
-
-    console.log(`🔄 [National Recovery] Attempting ${level} recovery (${attempt.count}/${attempt.max})...`);
-
-    try {
-      const result = await recoveryFn();
-      
-      if (result) {
-        console.log(`✅ [National Recovery] ${level} recovery successful!`);
-        this.recoveryHistory.push({
-          level,
-          success: true,
-          timestamp: this.lastRecoveryTime,
-        });
-        // Reset counters on success
-        this.recoveryAttempts.soft.count = 0;
-        this.recoveryAttempts.hard.count = 0;
-        this.recoveryAttempts.nuclear.count = 0;
-        this.isRecovering = false;
-        return true;
-      } else {
-        throw new Error(`${level} recovery function returned false`);
-      }
-    } catch (error) {
-      console.error(`❌ [National Recovery] ${level} recovery failed:`, error.message);
-      this.recoveryHistory.push({
-        level,
-        success: false,
-        error: error.message,
-        timestamp: this.lastRecoveryTime,
-      });
-      this.isRecovering = false;
-      return false;
-    }
-  }
-
-  getHistory() {
-    return {
-      attempts: this.recoveryAttempts,
-      lastRecoveryTime: this.lastRecoveryTime,
-      recentHistory: this.recoveryHistory.slice(-10), // Last 10 attempts
-    };
-  }
-}
-
-// Create recovery manager instance
-const recoveryManager = new NationalMasterSessionRecovery();
-
-// ============================================
-// SESSION INITIALIZATION
-// ============================================
-
-/**
- * Initialize National master session - called once on server start
- * This creates the master browser and ensures user is logged in
- */
-async function initializeNationalMasterSession(policyId = null) {
-  try {
-    console.log("\n" + "=".repeat(60));
-    console.log("  🔐 INITIALIZING NATIONAL MASTER SESSION");
-    console.log("=".repeat(60) + "\n");
-
-    // Ensure MongoDB connection
-    const mongoose = require("mongoose");
-    const { ProviderCredential } = require("./models");
-    
-    if (mongoose.connection.readyState === 0) {
-      if (process.env.MONGODB_URI) {
-        await mongoose.connect(process.env.MONGODB_URI);
-        console.log("✓ Connected to MongoDB");
-      } else {
-        console.warn("⚠️ MONGODB_URI not found in env, skipping DB connection");
-      }
-    }
-
-    // Fetch credentials logic - Matching Reliance implementation
-    let creds = null;
-
-    if (policyId) {
-      console.log(`→ Fetching policy data for ID: ${policyId}...`);
-      const policy = await mongoose.connection.db
-        .collection("onlinePolicy")
-        .findOne({ _id: new mongoose.Types.ObjectId(policyId) });
-
-      if (policy && policy.clientId) {
-        console.log(
-          `→ Policy found with clientId: ${policy.clientId}. Fetching credentials...`
-        );
-        creds = await ProviderCredential.findOne({
-          clientId: policy.clientId,
-          provider: "national",
-          isActive: true,
-        });
-        
-        if (creds) {
-          console.log(
-            `✓ Found specific credentials for clientId: ${policy.clientId} (username: ${creds.username})`
-          );
-        } else {
-          console.log(
-            `⚠ No specific credentials found for clientId: ${policy.clientId}. Falling back to default.`
-          );
-        }
-      }
-    }
-
-    // Fallback to default credentials if no specific ones found
-    if (!creds) {
-      console.log("→ Fetching default National credentials from database...");
-      creds = await ProviderCredential.findOne({
-        provider: "national",
-        isActive: true,
-      });
-    }
-
-    // If found in DB, update CONFIG
-    if (creds) {
-      console.log(`✓ Using credentials for: ${creds.username}`);
-      CONFIG.USERNAME = creds.username;
-      CONFIG.PASSWORD = creds.password;
-      if (creds.loginUrl) CONFIG.LOGIN_URL = creds.loginUrl;
-    } else {
-      throw new Error(
-        "No active National credentials found in the database. Please check the ProviderCredential collection."
-      );
-    }
-
-    // Step 1: Create master browser (this creates the base profile directory)
-    console.log("📂 Creating National master browser with profile...");
-    masterDriver = await createMasterBrowser();
-    console.log("✅ National master browser created\n");
-
-    // Step 2: Navigate to dashboard first to check if already logged in
-    console.log("🌐 Navigating to National dashboard to check session...");
-    await masterDriver.get(CONFIG.DASHBOARD_URL);
-    await masterDriver.sleep(3000);
-
-    // Step 3: Check if already logged in
-    console.log("🔍 Checking login status...");
-    const currentUrl = await masterDriver.getCurrentUrl();
-    const loginElements = await masterDriver.findElements(
-      require("selenium-webdriver").By.name("log_txtfield_iUsername_01")
-    );
-    const isOnLoginPage = loginElements.length > 0 || currentUrl.includes("/signin/login");
-    const isOnHomePage = currentUrl.includes("/home/hcontent") || currentUrl.includes("/nicportal/home");
-    
-    if (!isOnLoginPage && isOnHomePage) {
-      console.log("✅ Already logged in! Session is active, on home page.\n");
-      isSessionActive = true;
-      sessionLastChecked = new Date();
-    } else {
-      // Step 4: Navigate to login page and perform login
-      console.log("⚠️  Not logged in. Navigating to login page...");
-      await masterDriver.get(CONFIG.LOGIN_URL);
-      await masterDriver.sleep(3000);
-      
-      console.log("⚠️  Starting login process...\n");
-      const loginSuccess = await performNationalLogin(masterDriver);
-
-      if (loginSuccess) {
-        console.log("✅ Login successful! Session is now active.\n");
-        
-        // Verify we're on the home page after login
-        await masterDriver.sleep(2000);
-        const finalUrl = await masterDriver.getCurrentUrl();
-        console.log(`🔍 Final URL after login: ${finalUrl}`);
-        
-        if (!finalUrl.includes("/home/hcontent") && !finalUrl.includes("/nicportal/home")) {
-          console.log("⚠️  Not on expected home page, navigating to home...");
-          await masterDriver.get(CONFIG.DASHBOARD_URL);
-          await masterDriver.sleep(3000);
-        }
-        
-        // Save cookies to ensure they're persisted
-        const { saveCookies } = require("./nationalBrowserConfig");
-        await saveCookies(masterDriver);
-        
-        isSessionActive = true;
-        sessionLastChecked = new Date();
-      } else {
-        console.error("❌ Login failed!\n");
-        isSessionActive = false;
-        throw new Error("National login failed. Cannot proceed with job processing.");
-      }
-    }
-
-    console.log("=".repeat(60));
-    console.log("  ✅ NATIONAL MASTER SESSION READY");
-    console.log("=".repeat(60) + "\n");
-
-    return {
-      success: true,
-      isActive: isSessionActive,
-      masterDriver: masterDriver,
-    };
-  } catch (error) {
-    console.error("\n❌ Failed to initialize National master session:", error.message);
-    isSessionActive = false;
-    throw error;
-  }
-}
-
-/**
- * Check if National session is still active
- * Should be called periodically or before processing jobs
- */
-async function checkNationalSession() {
-  try {
-    if (!masterDriver) {
-      console.log("⚠️  [National Session] No master driver available");
-      return false;
-    }
-
-    const currentUrl = await masterDriver.getCurrentUrl();
-    const loginElements = await masterDriver.findElements(
-      require("selenium-webdriver").By.name("log_txtfield_iUsername_01")
-    );
-
-    const isOnLoginPage = loginElements.length > 0 || currentUrl.includes("/signin/login");
-    const isActive = !isOnLoginPage;
-
-    if (isActive) {
-      isSessionActive = true;
-      sessionLastChecked = new Date();
-      console.log("✅ [National Session] Session is active");
-    } else {
-      isSessionActive = false;
-      console.log("⚠️  [National Session] Session expired");
-    }
-
-    return isActive;
-  } catch (error) {
-    console.error("❌ [National Session] Error checking session:", error.message);
-    isSessionActive = false;
-    return false;
-  }
-}
-
-/**
- * Re-login to National if session expired
- */
-async function reLoginNationalIfNeeded() {
-  try {
-    if (!masterDriver) {
-      console.error("❌ [National Recovery] No master driver available");
-      return false;
-    }
-
-    // Try soft recovery first (re-login on existing browser)
-    const softRecovery = await recoveryManager.attemptRecovery("soft", async () => {
-      console.log("🔄 [National Recovery] Attempting soft recovery (re-login)...");
-      await masterDriver.get(CONFIG.LOGIN_URL);
-      await masterDriver.sleep(3000);
-      return await performNationalLogin(masterDriver);
-    });
-
-    if (softRecovery) {
-      isSessionActive = true;
-      sessionLastChecked = new Date();
-      return true;
-    }
-
-    // Try hard recovery (recreate browser)
-    const hardRecovery = await recoveryManager.attemptRecovery("hard", async () => {
-      console.log("🔄 [National Recovery] Attempting hard recovery (recreate browser)...");
-      try {
-        if (masterDriver) {
-          await masterDriver.quit();
-        }
-      } catch (e) {
-        // Ignore quit errors
-      }
-
-      masterDriver = await createMasterBrowser();
-      await masterDriver.get(CONFIG.LOGIN_URL);
-      await masterDriver.sleep(3000);
-      return await performNationalLogin(masterDriver);
-    });
-
-    if (hardRecovery) {
-      isSessionActive = true;
-      sessionLastChecked = new Date();
-      return true;
-    }
-
-    // Try nuclear recovery (delete profile and fresh start)
-    const nuclearRecovery = await recoveryManager.attemptRecovery("nuclear", async () => {
-      console.log("🔄 [National Recovery] Attempting nuclear recovery (fresh profile)...");
-      try {
-        if (masterDriver) {
-          await masterDriver.quit();
-        }
-      } catch (e) {
-        // Ignore quit errors
-      }
-
-      // Delete master profile
-      if (fs.existsSync(PATHS.MASTER_PROFILE)) {
-        fs.rmSync(PATHS.MASTER_PROFILE, { recursive: true, force: true });
-        console.log("🗑️  [National Recovery] Deleted corrupted profile");
-      }
-
-      masterDriver = await createMasterBrowser();
-      await masterDriver.get(CONFIG.LOGIN_URL);
-      await masterDriver.sleep(3000);
-      return await performNationalLogin(masterDriver);
-    });
-
-    if (nuclearRecovery) {
-      isSessionActive = true;
-      sessionLastChecked = new Date();
-      return true;
-    }
-
-    console.error("❌ [National Recovery] All recovery attempts failed");
-    return false;
-  } catch (error) {
-    console.error("❌ [National Recovery] Recovery error:", error.message);
-    return false;
-  }
-}
+// The National master-session / recovery subsystem was removed: nothing ever
+// called it (National logs in fresh per job), yet it held a single shared
+// masterDriver + recovery counters in module scope — unsafe now that National
+// jobs run in parallel.
 
 // ============================================
 // JOB PROCESSING
@@ -442,6 +77,9 @@ async function createNationalJobBrowser(jobId, policyId = null) {
 
     if (creds) {
       console.log(`✓ [Job ${jobId}] Using credentials for: ${creds.username}`);
+      // Kept for backward compatibility ONLY — CONFIG is one shared object, so
+      // with parallel jobs the values race. Job code must use the per-job
+      // credentials/loginUrl returned below, never CONFIG.
       CONFIG.USERNAME = creds.username;
       CONFIG.PASSWORD = creds.password;
       if (creds.loginUrl) CONFIG.LOGIN_URL = creds.loginUrl;
@@ -450,30 +88,47 @@ async function createNationalJobBrowser(jobId, policyId = null) {
     }
 
     // Create a fresh profile for this job (no cloning, no master session)
-    const { createClonedProfileOptions, createClonedBrowser } = require("./nationalBrowserConfig");
+    const { createClonedBrowser } = require("./nationalBrowserConfig");
     const fs = require("fs");
     const path = require("path");
-    const os = require("os");
-    const { PATHS } = require("./nationalBrowserConfig");
-    
-    // Create a unique profile directory for this job
-    const clonedUserDataDir = path.join(process.cwd(), "cloned_profiles_national", `national_job_${jobId}`);
+
+    // Unique per ATTEMPT, not just per job: a retry of the same jobId must
+    // never reuse a directory that a detached, timed-out first attempt still
+    // has open (Chrome locks the dir; the old attempt's cleanup would also
+    // rmSync it out from under the running retry).
+    const clonedUserDataDir = path.join(
+      process.cwd(),
+      "cloned_profiles_national",
+      `national_job_${jobId}_${Date.now()}`
+    );
     const clonedProfileDir = path.join(clonedUserDataDir, "Default");
-    
+
     // Ensure directory exists
     if (!fs.existsSync(clonedProfileDir)) {
       fs.mkdirSync(clonedProfileDir, { recursive: true });
     }
-    
+
     console.log(`📂 [National Job ${jobId}] Created fresh profile: ${clonedProfileDir}`);
 
-    // Create browser with fresh profile
+    // Create browser with fresh profile. If THIS throws, remove the dir we
+    // just created — the caller's finally can't (jobBrowser never assigned).
     console.log(`🌐 [National Job ${jobId}] Opening browser with fresh profile...`);
-    const clonedDriver = await createClonedBrowser({
-      userDataDir: clonedUserDataDir,
-      profileDirectory: "Default",
-      fullPath: clonedProfileDir,
-    });
+    let clonedDriver;
+    try {
+      clonedDriver = await createClonedBrowser({
+        userDataDir: clonedUserDataDir,
+        profileDirectory: "Default",
+        fullPath: clonedProfileDir,
+      });
+    } catch (driverError) {
+      try {
+        fs.rmSync(clonedUserDataDir, { recursive: true, force: true });
+        console.log(`🧹 [National Job ${jobId}] Removed profile after driver failure`);
+      } catch (rmError) {
+        console.warn(`⚠️ [National Job ${jobId}] Could not remove failed profile: ${rmError.message}`);
+      }
+      throw driverError;
+    }
 
     console.log(`✅ [National Job ${jobId}] Fresh browser created successfully\n`);
 
@@ -485,6 +140,11 @@ async function createNationalJobBrowser(jobId, policyId = null) {
         fullPath: clonedProfileDir,
       },
       jobId: jobId,
+      // Per-job values — job code MUST use these instead of the shared CONFIG
+      // (see the race note above).
+      loginUrl: (creds && creds.loginUrl) || CONFIG.LOGIN_URL,
+      username: creds ? creds.username : CONFIG.USERNAME,
+      password: creds ? creds.password : CONFIG.PASSWORD,
     };
   } catch (error) {
     console.error(
@@ -547,12 +207,7 @@ async function cleanupNationalJobBrowser(jobBrowserInfo) {
 
 // Export functions
 module.exports = {
-  initializeNationalMasterSession,
-  checkNationalSession,
-  reLoginNationalIfNeeded,
   createNationalJobBrowser,
   cleanupNationalJobBrowser,
-  getNationalSessionStatus,
-  recoveryManager,
 };
 

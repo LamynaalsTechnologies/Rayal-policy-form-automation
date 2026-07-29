@@ -1230,7 +1230,14 @@ async function fillRelianceForm(
 
     if (!isLoggedIn) {
       console.log("⚠️ Session not active in new window. Performing explicit login...");
-      const loginSuccess = await performLogin(driver);
+      // Per-job credentials + per-job captcha file: with parallel windows the
+      // shared CONFIG/captcha path would cross jobs (wrong client login,
+      // solving the other job's captcha).
+      const loginSuccess = await performLogin(driver, {
+        username: data.username,
+        password: data.password,
+        captchaTag: jobId,
+      });
       if (!loginSuccess) {
         throw new Error("Explicit login failed in new window.");
       }
@@ -3695,7 +3702,10 @@ async function fillRelianceForm(
                           }
                         }
 
-                        const tempFileName = `upload_${Date.now()}${ext}`;
+                        // jobId + random suffix: Date.now() alone collides when
+                        // two parallel jobs download a document in the same ms
+                        // — one job would then upload the OTHER customer's ID.
+                        const tempFileName = `upload_${jobId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
                         const tempFilePath = path.join(tempDir, tempFileName);
                         console.log(`📁 Saving as: ${tempFilePath} (extension: ${ext})`);
 
@@ -4961,8 +4971,15 @@ async function fillRelianceForm(
         try {
           console.log("🔍 Looking for Reliance PDF...");
 
-          // Find the latest PDF in reliance_pdf folder
-          const reliancePdfDir = path.join(__dirname, "reliance_pdf");
+          // Find the latest PDF in THIS JOB'S OWN download folder. The old
+          // code scanned the shared reliance_pdf/ root for the newest file —
+          // with parallel windows that could pick up ANOTHER customer's policy
+          // PDF and merge/upload it under this job's policyId. Each cloned
+          // browser now downloads into reliance_pdf/job_<jobId>/ (set in
+          // sessionManager/browserv2), so only this job's files are visible.
+          const reliancePdfDir =
+            jobBrowser?.profileInfo?.downloadDir ||
+            path.join(__dirname, "reliance_pdf", `job_${jobId}`);
 
           if (fs.existsSync(reliancePdfDir)) {
             const pdfFiles = fs.readdirSync(reliancePdfDir)

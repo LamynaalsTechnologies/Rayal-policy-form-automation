@@ -33,29 +33,16 @@ const path = require("path");
 // OPTIMIZATIONS
 // ============================================
 
-const ProfilePoolManager = require("./profilePoolManager");
-// const SessionHealthManager = require("./sessionHealthManager");
+// The ProfilePoolManager was removed: it was constructed with the wrong
+// baseProfileDir so initialize() ALWAYS threw, meaning every job silently fell
+// back to plain profile cloning. It also created empty dirs under
+// /dev/shm/chrome-profiles on each attempt, which nothing ever cleaned up, and
+// held per-job state in module scope — a hazard now that jobs run in parallel.
+// (profilePoolManager.js is left on disk but is no longer imported anywhere.)
 const {
   getMinimalChromeOptions,
-  isRamDiskAvailable,
   getRamDiskPath,
 } = require("./chromeOptimizedConfig");
-
-// Initialize optimization managers
-const useRamDisk = isRamDiskAvailable();
-const profilePoolManager = new ProfilePoolManager({
-  poolSize: 5, // 5 ready profiles
-  useRamDisk: useRamDisk,
-  maxProfileUses: 10, // Recycle after 10 uses
-  maxProfileLifetime: 30 * 60 * 1000, // 30 minutes
-});
-
-// const sessionHealthManager = new SessionHealthManager({
-//   sessionLifetime: 60 * 60 * 1000, // 1 hour
-//   heartbeatInterval: 5 * 60 * 1000, // 5 minutes
-//   warningThreshold: 0.8, // Warn at 80%
-//   refreshThreshold: 0.9, // Refresh at 90%
-// });
 
 // ============================================
 // STATE MANAGEMENT
@@ -624,24 +611,6 @@ async function _performInitialization(policyId = null) {
     masterDriver = await createMasterBrowser();
     console.log("✅ Master browser created\n");
 
-    /* 
-    // Ensure profile pool is initialized if optimizations are enabled
-    if (!optimizationsEnabled) {
-      console.log("🚀 Initializing performance optimizations...");
-      try {
-        await profilePoolManager.initialize();
-        console.log("✅ Profile pool ready\n");
-        optimizationsEnabled = true;
-      } catch (poolError) {
-        console.warn(
-          "⚠️  Profile pool initialization failed:",
-          poolError.message
-        );
-        optimizationsEnabled = false;
-      }
-    }
-    */
-    optimizationsEnabled = false; // Force disabled as per user request to remove "health something"
 
     // Step 2: Navigate to dashboard
     console.log("🌐 Navigating to dashboard...");
@@ -672,25 +641,6 @@ async function _performInitialization(policyId = null) {
         console.error("❌ Login failed!\n");
         isSessionActive = false;
         throw new Error("Login failed. Cannot proceed with job processing.");
-      }
-    }
-
-    // Step 5: Initialize optimizations AFTER master profile exists
-    if (!optimizationsEnabled) {
-      console.log("🚀 Initializing performance optimizations...");
-      try {
-        await profilePoolManager.initialize();
-        console.log("✅ Profile pool ready\n");
-        optimizationsEnabled = true;
-      } catch (poolError) {
-        console.warn(
-          "⚠️  Profile pool initialization failed:",
-          poolError.message
-        );
-        console.warn(
-          "⚠️  Continuing without optimizations (will use standard cloning)\n"
-        );
-        optimizationsEnabled = false;
       }
     }
 
@@ -982,61 +932,58 @@ async function createJobBrowser(jobId, clientId = null) {
     }
 
     // Step 2: Acquire profile from pool (OPTIMIZED!)
-    let profile = null;
-    let clonedDriver = null;
+    // (The old profile-pool branch is removed: its init always failed — wrong
+    // baseProfileDir — so it never ran, yet held shared state and littered
+    // /dev/shm on every boot.)
+    console.log(`📂 [Job ${jobId}] Cloning master profile...`);
+    const clonedProfileInfo = cloneChromeProfile(`job_${jobId}`);
 
-    if (optimizationsEnabled) {
-      console.log(`⚡ [Job ${jobId}] Acquiring profile from pool...`);
-      profile = await profilePoolManager.acquireProfile(jobId);
-      console.log(
-        `✅ [Job ${jobId}] Profile acquired instantly: ${profile.id}`
-      );
-
-      // Step 3: Create browser with pooled profile
-      console.log(`🌐 [Job ${jobId}] Opening browser with pooled profile...`);
-      clonedDriver = await createClonedBrowser({
-        fullPath: profile.path,
-        userDataDir: profile.path,
-        profileName: profile.id,
-      });
-
-      return {
-        driver: clonedDriver,
-        profile: profile,
-        profileInfo: {
-          fullPath: profile.path,
-          userDataDir: profile.path,
-          profileName: profile.id,
-        },
-        jobId: jobId,
-        usingPool: true,
-      };
-    } else {
-      // Fallback to old method (if optimizations not enabled)
-      console.log(`📂 [Job ${jobId}] Cloning master profile...`);
-      const clonedProfileInfo = cloneChromeProfile(`job_${jobId}`);
-
-      if (!clonedProfileInfo) {
-        throw new Error("Failed to clone profile");
-      }
-
-      console.log(
-        `✅ [Job ${jobId}] Profile cloned: ${clonedProfileInfo.fullPath}`
-      );
-
-      // Step 3: Create browser with cloned profile
-      console.log(`🌐 [Job ${jobId}] Opening browser with cloned profile...`);
-      clonedDriver = await createClonedBrowser(clonedProfileInfo);
-
-      console.log(`✅ [Job ${jobId}] Cloned browser created successfully\n`);
-
-      return {
-        driver: clonedDriver,
-        profileInfo: clonedProfileInfo,
-        jobId: jobId,
-        usingPool: false,
-      };
+    if (!clonedProfileInfo) {
+      throw new Error("Failed to clone profile");
     }
+
+    console.log(
+      `✅ [Job ${jobId}] Profile cloned: ${clonedProfileInfo.fullPath}`
+    );
+
+    // Per-JOB download directory so parallel jobs can never pick up each
+    // other's policy PDFs (read back in relianceForm via profileInfo).
+    clonedProfileInfo.downloadDir = path.join(
+      __dirname,
+      "reliance_pdf",
+      `job_${jobId}`
+    );
+
+    // Step 3: Create browser with cloned profile. If THIS throws, delete the
+    // clone we just made — the caller's finally can't do it (jobBrowser was
+    // never assigned), which is exactly how profiles used to leak.
+    console.log(`🌐 [Job ${jobId}] Opening browser with cloned profile...`);
+    let clonedDriver;
+    try {
+      clonedDriver = await createClonedBrowser(clonedProfileInfo);
+    } catch (driverError) {
+      try {
+        if (clonedProfileInfo.userDataDir && fs.existsSync(clonedProfileInfo.userDataDir)) {
+          fs.rmSync(clonedProfileInfo.userDataDir, { recursive: true, force: true });
+          console.log(`🧹 [Job ${jobId}] Removed cloned profile after driver failure`);
+        }
+        if (fs.existsSync(clonedProfileInfo.downloadDir)) {
+          fs.rmSync(clonedProfileInfo.downloadDir, { recursive: true, force: true });
+        }
+      } catch (rmError) {
+        console.warn(`⚠️  [Job ${jobId}] Could not remove failed clone: ${rmError.message}`);
+      }
+      throw driverError;
+    }
+
+    console.log(`✅ [Job ${jobId}] Cloned browser created successfully\n`);
+
+    return {
+      driver: clonedDriver,
+      profileInfo: clonedProfileInfo,
+      jobId: jobId,
+      usingPool: false,
+    };
   } catch (error) {
     console.error(
       `❌ [Job ${jobId}] Failed to create job browser:`,
@@ -1054,30 +1001,48 @@ async function cleanupJobBrowser(jobBrowserInfo) {
     const jobId = jobBrowserInfo.jobId;
     console.log(`\n🧹 [Job ${jobId}] Cleaning up...`);
 
-    // Close browser
+    // Close browser. Isolated try/catch on purpose: if quit() throws (browser
+    // already dead, session lost), the profile deletion below MUST still run.
+    // Without this the cloned profile was orphaned on disk every time a job
+    // crashed hard — each one is several MB.
     if (jobBrowserInfo.driver) {
-      await jobBrowserInfo.driver.quit();
-      console.log(`✅ [Job ${jobId}] Browser closed`);
+      try {
+        await jobBrowserInfo.driver.quit();
+        console.log(`✅ [Job ${jobId}] Browser closed`);
+      } catch (quitError) {
+        console.warn(
+          `⚠️  [Job ${jobId}] Error closing browser (continuing to profile cleanup):`,
+          quitError.message
+        );
+      }
     }
 
-    // Handle profile cleanup based on method used
-    if (jobBrowserInfo.usingPool && optimizationsEnabled) {
-      // Release profile back to pool (OPTIMIZED!)
-      console.log(`♻️  [Job ${jobId}] Releasing profile back to pool...`);
-      await profilePoolManager.releaseProfile(jobId);
-    } else {
-      // Delete cloned profile (old method)
-      if (
-        jobBrowserInfo.profileInfo &&
-        jobBrowserInfo.profileInfo.userDataDir
-      ) {
-        const profilePath = jobBrowserInfo.profileInfo.userDataDir;
-        if (fs.existsSync(profilePath)) {
-          deleteDirectoryRecursive(profilePath);
-          console.log(
-            `✅ [Job ${jobId}] Cloned profile deleted: ${profilePath}`
-          );
-        }
+    // Delete cloned profile
+    if (
+      jobBrowserInfo.profileInfo &&
+      jobBrowserInfo.profileInfo.userDataDir
+    ) {
+      const profilePath = jobBrowserInfo.profileInfo.userDataDir;
+      if (fs.existsSync(profilePath)) {
+        deleteDirectoryRecursive(profilePath);
+        console.log(
+          `✅ [Job ${jobId}] Cloned profile deleted: ${profilePath}`
+        );
+      }
+    }
+
+    // Delete this job's private download directory (its PDF has already been
+    // merged + uploaded to S3 by the time cleanup runs).
+    if (
+      jobBrowserInfo.profileInfo &&
+      jobBrowserInfo.profileInfo.downloadDir &&
+      fs.existsSync(jobBrowserInfo.profileInfo.downloadDir)
+    ) {
+      try {
+        fs.rmSync(jobBrowserInfo.profileInfo.downloadDir, { recursive: true, force: true });
+        console.log(`✅ [Job ${jobId}] Download dir deleted: ${jobBrowserInfo.profileInfo.downloadDir}`);
+      } catch (dlErr) {
+        console.warn(`⚠️  [Job ${jobId}] Could not delete download dir: ${dlErr.message}`);
       }
     }
 
@@ -1117,11 +1082,13 @@ function deleteDirectoryRecursive(dirPath) {
  * Get optimization statistics
  */
 function getOptimizationStats() {
+  // Pool + health managers are gone; kept as a stable shape for any caller.
+  // (This used to throw ReferenceError: sessionHealthManager is not defined.)
   return {
-    optimizationsEnabled,
-    profilePool: profilePoolManager.getStats(),
-    sessionHealth: sessionHealthManager.getStats(),
-    ramDiskEnabled: useRamDisk,
+    optimizationsEnabled: false,
+    profilePool: null,
+    sessionHealth: null,
+    ramDiskEnabled: false,
   };
 }
 
@@ -1147,14 +1114,6 @@ module.exports = {
     return recoveryManager;
   },
 
-  // Optimization managers
-  get profilePoolManager() {
-    return profilePoolManager;
-  },
-  get sessionHealthManager() {
-    return sessionHealthManager;
-  },
-
   // Direct access to state (read-only)
   get masterDriver() {
     return masterDriver;
@@ -1163,7 +1122,9 @@ module.exports = {
     return isSessionActive;
   },
 
-  // Export internal browser functions for direct use
+  // Export internal browser functions for direct use.
+  // performLogin passes options through so job code can supply per-job
+  // credentials + a unique captcha tag (required for parallel windows).
   isUserLoggedIn: async (driver) => isUserLoggedIn(driver),
-  performLogin: async (driver) => performLogin(driver),
+  performLogin: async (driver, options) => performLogin(driver, options),
 };

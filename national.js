@@ -2,8 +2,6 @@ const { By, until, Key } = require("selenium-webdriver");
 const {
   createNationalJobBrowser,
   cleanupNationalJobBrowser,
-  reLoginNationalIfNeeded,
-  recoveryManager,
 } = require("./nationalSessionManager");
 const { CONFIG } = require("./nationalBrowserConfig");
 const fs = require("fs");
@@ -1254,10 +1252,15 @@ async function fillNationalForm(
     // National uses simple approach: every job logs in fresh
     console.log(`🌐 [${jobId}] Navigating to National login page...`);
 
+    // PER-JOB login URL. CONFIG.LOGIN_URL is one shared object mutated by
+    // every job — with parallel windows, job B's write between our browser
+    // creation and this navigation sent job A to job B's portal URL.
+    const loginUrl = jobBrowser.loginUrl || CONFIG.LOGIN_URL;
+
     try {
-      console.log(`⏳ [${jobId}] Loading URL: ${CONFIG.LOGIN_URL}`);
+      console.log(`⏳ [${jobId}] Loading URL: ${loginUrl}`);
       // await driver.get("https://nicportal.nic.co.in/nicportal/signin/login");
-      await driver.get(CONFIG.LOGIN_URL);
+      await driver.get(loginUrl);
       console.log(`✅ [${jobId}] Navigation successful!`);
 
       // Wait for the login page itself to render rather than a flat 3s. The
@@ -1415,13 +1418,13 @@ async function fillNationalForm(
       // Fill username
       console.log(`[${jobId}] Looking for username field...`);
       const usernameField = By.name("log_txtfield_iUsername_01");
-      await safeType(driver, usernameField, data.username || CONFIG.USERNAME, 10000);
+      await safeType(driver, usernameField, data.username || jobBrowser.username || CONFIG.USERNAME, 10000);
       console.log(`[${jobId}] Filled username`);
 
       // Fill password
       console.log(`[${jobId}] Looking for password field...`);
       const passwordField = By.name("log_pwd_iPassword_01");
-      await safeType(driver, passwordField, data.password || CONFIG.PASSWORD, 10000);
+      await safeType(driver, passwordField, data.password || jobBrowser.password || CONFIG.PASSWORD, 10000);
       console.log(`[${jobId}] Filled password`);
 
       // Click login button

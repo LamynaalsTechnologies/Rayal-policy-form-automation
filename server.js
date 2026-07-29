@@ -49,11 +49,16 @@ const cleanupOldData = async () => {
     'reliance_pdf',
     'reliance_captcha',
     'temp_uploads',
-    'cloned_profiles_national'
+    'cloned_profiles_national',
+    // Litter left by the (now removed) profile pool's failed init — 25+ empty
+    // dirs were found here. Absolute path, cleaned like the rest.
+    '/dev/shm/chrome-profiles'
   ];
 
   for (const dirName of pathsToClean) {
-    const dirPath = path.join(__dirname, dirName);
+    // Absolute entries (e.g. /dev/shm/chrome-profiles) are used as-is;
+    // path.join would otherwise glue them under __dirname.
+    const dirPath = path.isAbsolute(dirName) ? dirName : path.join(__dirname, dirName);
     try {
       if (fs.existsSync(dirPath)) {
         // Use recursive delete for directories
@@ -94,6 +99,18 @@ const cleanupOldData = async () => {
 
 // Run cleanup immediately on script load
 cleanupOldData().catch(err => console.error("Cleanup error:", err));
+
+// Periodic orphan-profile sweep. Defined further down (needs JOB_TIMEOUT);
+// scheduled here so it actually RUNS — it was previously defined but never
+// called, so crashed jobs' profiles accumulated until a restart. Age-based
+// (3× JOB_TIMEOUT), so it can never touch a live job.
+setInterval(() => {
+  try {
+    sweepOrphanedProfiles();
+  } catch (err) {
+    console.error("[Profile Sweep] Error:", err.message);
+  }
+}, 5 * 60 * 1000);
 const {
   getDriver,
   openNewTab,
@@ -141,8 +158,179 @@ const db = mongoose.connection;
 
 // Persistent Queue System using MongoDB
 let activeRelianceJobs = 0;
-const MAX_PARALLEL_JOBS = 1; // Process only one job at a time as per user request
+
+// ---------------------------------------------------------------------------
+// Per-company parallelism (generic — no company names hard-coded)
+//
+// Every company gets its OWN browser-window budget, read from .env as:
+//   <COMPANY>_MAX_PARALLEL_JOBS
+// e.g.
+//   RELIANCE_MAX_PARALLEL_JOBS=2
+//   NATIONAL_MAX_PARALLEL_JOBS=2
+//   ICICI_MAX_PARALLEL_JOBS=3        <-- a new company needs ONLY this line
+// Anything not configured falls back to DEFAULT_MAX_PARALLEL_JOBS.
+//
+// Previously a single hard-coded MAX_PARALLEL_JOBS=1 was shared by ALL
+// companies, so a National job blocked a Reliance job (and vice versa) and only
+// one browser window could ever be open.
+// ---------------------------------------------------------------------------
+const parsePositiveInt = (value, fallback) => {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+const DEFAULT_MAX_PARALLEL_JOBS = parsePositiveInt(
+  process.env.DEFAULTMAXWINDOW ??
+  process.env.DEFAULT_MAX_WINDOW ??
+  process.env.DEFAULT_MAX_PARALLEL_JOBS,
+  1
+);
+
+/**
+ * Env keys checked for a company's window limit, most preferred first:
+ *   RELIANCEMAXWINDOW  ->  RELIANCE_MAX_WINDOW  ->  RELIANCE_MAX_PARALLEL_JOBS
+ */
+const maxParallelEnvKeys = (company) => {
+  const name = String(company).toUpperCase().replace(/[^A-Z0-9]+/g, "");
+  const snake = String(company).toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+  return [
+    `${name}MAXWINDOW`,
+    `${snake}_MAX_WINDOW`,
+    `${snake}_MAX_PARALLEL_JOBS`,
+  ];
+};
+
+/** Window budget for a company. Unknown companies use the default. */
+const maxParallelFor = (company) => {
+  for (const key of maxParallelEnvKeys(company)) {
+    if (process.env[key] !== undefined) {
+      return parsePositiveInt(process.env[key], DEFAULT_MAX_PARALLEL_JOBS);
+    }
+  }
+  return DEFAULT_MAX_PARALLEL_JOBS;
+};
+
+/** Normalized company name for a queued job. Any value is supported. */
+const companyOfJob = (job) => {
+  const raw = job?.formData?.Companyname || job?.formData?.company || "reliance";
+  return String(raw).trim().toLowerCase() || "reliance";
+};
+
+/** Pretty label for logs: "national" -> "National" */
+const companyLabel = (company) =>
+  String(company).charAt(0).toUpperCase() + String(company).slice(1);
+
+// Companies explicitly configured in .env — for the startup banner only. The
+// queue itself discovers companies from the jobs it sees, so a new company
+// works without touching this file.
+const CONFIGURED_COMPANIES = [
+  ...new Set(
+    Object.keys(process.env)
+      .map((k) => {
+        const m =
+          k.match(/^([A-Z0-9]+)MAXWINDOW$/) ||
+          k.match(/^([A-Z0-9_]+)_MAX_WINDOW$/) ||
+          k.match(/^([A-Z0-9_]+)_MAX_PARALLEL_JOBS$/);
+        return m ? m[1].replace(/_/g, "").toLowerCase() : null;
+      })
+      .filter((c) => c && c !== "default")
+  ),
+];
+
+// Generous upper bound used only by the "any spare capacity?" poll check.
+const MAX_PARALLEL_JOBS =
+  CONFIGURED_COMPANIES.reduce((sum, c) => sum + maxParallelFor(c), 0) ||
+  DEFAULT_MAX_PARALLEL_JOBS;
+
+console.log(
+  `[Queue] Parallel window limits -> ${CONFIGURED_COMPANIES.length
+    ? CONFIGURED_COMPANIES.map((c) => `${companyLabel(c)}: ${maxParallelFor(c)}`).join(", ")
+    : "(none configured)"
+  } | default for any other company: ${DEFAULT_MAX_PARALLEL_JOBS}`
+);
 const JOB_TIMEOUT = 300000; // 5 minutes max per job run
+
+// How often to sweep for pending jobs. Override with QUEUE_POLL_INTERVAL_MS in
+// .env (value in milliseconds).
+const QUEUE_POLL_INTERVAL_MS = parsePositiveInt(
+  process.env.QUEUE_POLL_INTERVAL_MS,
+  5 * 60 * 1000 // 5 minutes
+);
+
+// ---------------------------------------------------------------------------
+// Orphaned browser-profile sweeper
+//
+// Every job clones a Chrome profile into cloned_profiles/ (Reliance) or
+// cloned_profiles_national/ (National) and deletes it on cleanup. If a job
+// crashes hard — or the process is killed mid-run — that clone is left behind,
+// several MB each, and they accumulate until the next server restart.
+//
+// The sweep is age-based rather than name-based: profile directory names differ
+// per company/version, but NO job can outlive JOB_TIMEOUT, so anything older
+// than the cutoff is provably not in use. That keeps it safe with any number of
+// companies running in parallel.
+// ---------------------------------------------------------------------------
+const PROFILE_DIRS = ["cloned_profiles", "cloned_profiles_national"];
+// 1 hour. Deliberately far beyond JOB_TIMEOUT (5 min): when a job times out,
+// the Promise.race only rejects the outer promise — the automation keeps
+// running detached with its browser open. A tighter cutoff could delete a
+// profile directory out from under a live Chrome.
+const ORPHAN_PROFILE_MAX_AGE_MS = 60 * 60 * 1000;
+
+const sweepOrphanedProfiles = () => {
+  let removed = 0;
+  let freedBytes = 0;
+
+  for (const dirName of PROFILE_DIRS) {
+    const baseDir = path.join(__dirname, dirName);
+    let entries = [];
+    try {
+      if (!fs.existsSync(baseDir)) continue;
+      entries = fs.readdirSync(baseDir, { withFileTypes: true });
+    } catch (err) {
+      console.warn(`[Profile Sweep] Could not read ${dirName}: ${err.message}`);
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const profilePath = path.join(baseDir, entry.name);
+      try {
+        const stats = fs.statSync(profilePath);
+        const ageMs = Date.now() - stats.mtimeMs;
+        if (ageMs < ORPHAN_PROFILE_MAX_AGE_MS) continue; // may still be in use
+
+        let size = 0;
+        try {
+          size = parseInt(
+            require("child_process")
+              .execFileSync("du", ["-sb", profilePath], { encoding: "utf8" })
+              .split("\t")[0],
+            10
+          ) || 0;
+        } catch (e) { /* size is informational only */ }
+
+        fs.rmSync(profilePath, { recursive: true, force: true });
+        removed++;
+        freedBytes += size;
+        console.log(
+          `[Profile Sweep] 🗑️  Removed orphaned profile ${dirName}/${entry.name} (idle ${Math.round(ageMs / 60000)}m)`
+        );
+      } catch (err) {
+        console.warn(
+          `[Profile Sweep] Could not remove ${dirName}/${entry.name}: ${err.message}`
+        );
+      }
+    }
+  }
+
+  if (removed > 0) {
+    console.log(
+      `[Profile Sweep] ✅ Removed ${removed} orphaned profile(s), freed ~${(freedBytes / 1048576).toFixed(1)} MB`
+    );
+  }
+  return removed;
+};
 const ZOMBIE_GRACE_MS = 90000; // Extra grace before a stuck "processing" job is reclaimed
 let jobQueueCollection = null; // Will be initialized after DB connection
 let auditLogCollection = null; // For audit logging
@@ -159,10 +347,174 @@ const JOB_STATUS = {
   FAILED_DUPLICATE: "failed_duplicate", // Duplicate submission detected
 };
 
+// ---------------------------------------------------------------------------
+// Graceful shutdown: on Ctrl-C / SIGTERM, put this process's PROCESSING jobs
+// back to PENDING so the next start picks them up immediately instead of
+// waiting for the zombie-reclaim window. Browser processes die with us; their
+// profiles are reclaimed by startup cleanup + the orphan sweep.
+// ---------------------------------------------------------------------------
+let shuttingDown = false;
+const gracefulShutdown = async (signal) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n[Shutdown] ${signal} received — releasing in-flight jobs...`);
+  try {
+    if (jobQueueCollection) {
+      const res = await jobQueueCollection.updateMany(
+        { status: JOB_STATUS.PROCESSING },
+        {
+          $set: {
+            status: JOB_STATUS.PENDING,
+            lastError: `Server stopped (${signal}) while job was running — re-queued`,
+            lastErrorTimestamp: new Date(),
+          },
+        }
+      );
+      console.log(`[Shutdown] Re-queued ${res.modifiedCount} processing job(s).`);
+    }
+  } catch (err) {
+    console.error("[Shutdown] Failed to re-queue jobs:", err.message);
+  }
+  process.exit(0);
+};
+process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+
 /**
  * 🛡️ Enhanced Job Enqueue with Validation & Duplicate Detection
  * CRITICAL: Since money is involved, we validate and check for duplicates
  */
+/**
+ * Build the automation formData payload from an onlinePolicy document.
+ *
+ * Extracted from the old change-stream handler so the queue consumer can
+ * hydrate a job at CLAIM time. Doing it then (instead of at enqueue time)
+ * also means the S3 presigned URLs are generated when the job actually runs,
+ * so they can no longer expire while the job waits in the queue.
+ */
+const buildFormDataFromPolicy = async (data) => {
+    // Generate presigned URLs for document downloads
+    let aadharPresignedUrl = null;
+    let panPresignedUrl = null;
+
+    if (data?.aadharCard?.key) {
+      aadharPresignedUrl = await getPresignedUrl(data.aadharCard.key);
+      console.log(`📄 Aadhar presigned URL generated: ${aadharPresignedUrl ? 'YES' : 'NO'}`);
+    }
+
+    if (data?.panCard?.key) {
+      panPresignedUrl = await getPresignedUrl(data.panCard.key);
+      console.log(`📄 PAN presigned URL generated: ${panPresignedUrl ? 'YES' : 'NO'}`);
+    }
+
+    let formData = {
+      // MongoDB document identifiers (CRITICAL for updates)
+      _id: data?._id,
+      policyId: data?.policyId,
+      userId: data?.userId,
+      clientId: data?.clientId,
+
+      username: "rfcpolicy",
+      password: "Pass@123",
+      // Proposer details
+      proposerTitle: data?.proposerTitle || "Mr.",
+      firstName: data?.fullName || data?.firstName,
+      middleName: data?.middleName || "",
+      lastName: data?.surname || data?.lastName,
+      dob: data?.dateOfBirth?.$date
+        ? moment(data.dateOfBirth.$date).format("DD-MM-YYYY")
+        : data?.dateOfBirth
+          ? moment(data.dateOfBirth).format("DD-MM-YYYY")
+          : "",
+      gender: data?.gender,
+      // Father details
+      fatherTitle: data?.fatherTitle || "Mr.",
+      fatherName: data?.fatherName,
+      // Address details
+      flatNo: data?.flatDoorNo,
+      flatDoorNo: data?.flatDoorNo, // Added to match onlinePolicy schema
+      floorNo: data?.floorNo,
+      premisesName: data?.buildingName,
+      buildingName: data?.buildingName, // Added to match onlinePolicy schema
+      blockNo: data?.blockName || data?.blockNo,
+      blockName: data?.blockName, // Added to match onlinePolicy schema
+      road: data?.roadStreetLane || data?.road,
+      roadStreetLane: data?.roadStreetLane, // Added to match onlinePolicy schema
+      areaAndLocality: data?.areaAndLocality || data?.area || data?.locality || "",
+      state: data?.state == "TAMILNADU" ? "30" : data?.state == "KARNATAKA" ? "26" : "30",
+      pinCode: data?.pincode,
+      // Contact details
+      mobile: data?.mobileNumber,
+      email: data?.email,
+      aadhar: data?.aadhar,
+      // Document uploads (from S3) - with presigned URLs for download
+      aadharCard: data?.aadharCard ? {
+        ...data.aadharCard,
+        presignedUrl: aadharPresignedUrl
+      } : null,
+      panCard: data?.panCard ? {
+        ...data.panCard,
+        presignedUrl: panPresignedUrl
+      } : null,
+      // Vehicle details
+      vehicleMake: data?.vehicleMake,
+      vehicleModel: data?.vehicleModel,
+      vehicleCC: data?.vehicleCC,
+      rtoCityLocation: data?.rtoCityLocation,
+      vehicleVariant: data?.vehicleVariant,
+      RTORegion: data?.RTORegion,
+      RTOCity: data?.RTOCity,
+      idv: data?.idv,
+      manufacturingYear: data?.manufacturingYear,
+      manufacturingMonth: data?.manufacturingMonth,
+      engineNumber: data?.engineNumber,
+      chassisNumber: data?.chassisNumber,
+      purchaseDate: data?.purchaseDate?.$date
+        ? moment(data.purchaseDate.$date).format("DD-MM-YYYY")
+        : data?.purchaseDate
+          ? moment(data.purchaseDate).format("DD-MM-YYYY")
+          : "",
+      registrationDate: data?.registrationDate?.$date
+        ? moment(data.registrationDate.$date).format("DD-MM-YYYY")
+        : data?.registrationDate
+          ? moment(data.registrationDate).format("DD-MM-YYYY")
+          : "",
+      // Coverage options
+      zeroDepreciation: data?.zeroDepreciation,
+      zeroDepreciationPercentage: data?.zeroDepreciationPercentage,
+      tppdRestrict: data?.tppdRestrict,
+      paCover: data?.paCover,
+      paCoverCompany: data?.paCoverCompany,
+      paCoverAmount: data?.paCoverAmount,
+      nomineeName: data?.nomineeName,
+      nomineeRelation: data?.nomineeRelation,
+      nomineeAge: data?.nomineeAge,
+      paCoverYears: data?.paCoverYears,
+      otherRelationName: data?.otherRelationName,
+      appointeeName: data?.appointeeName,
+      nomineeDob: data?.nomineeDob?.$date
+        ? moment(data.nomineeDob.$date).format("DD-MM-YYYY")
+        : data?.nomineeDob
+          ? moment(data.nomineeDob).format("DD-MM-YYYY")
+          : "",
+      // Financier details
+      hasFinancier: data?.hasFinancier,
+      financierType: data?.financierType,
+      financierName: data?.financierName,
+      financierAddress: data?.financierAddress,
+      // Registration address
+      isRegistrationAddressSame: data?.isRegistrationAddressSame,
+      // Discount mapping (normalize multiple possible fields from Mongo)
+      discount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
+      ODDiscount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
+      // Payment Method
+      Paymentmethod: data?.Paymentmethod,
+      // Company name mapping - check both 'company' and 'Companyname' fields, normalize to lowercase
+      Companyname: data?.Companyname || (data?.company ? data.company.toLowerCase() : "reliance")
+    };
+  return formData;
+};
+
 const enqueueRelianceJob = async (formData, captchaId = null, operationType = null) => {
   const startTime = Date.now();
 
@@ -374,21 +726,103 @@ async function logAuditEntry(action, details) {
   }
 }
 
+// Only ONE scheduling pass may run at a time.
+//
+// This function is re-entrant — called from the 15s poll, from the queue change
+// stream, and from each job's .finally. Two overlapping passes would each read
+// the same "0 active" snapshot and each reserve a full company budget, opening
+// twice the configured windows (e.g. 4 Chrome instances for MAXWINDOW=2, which
+// can OOM the box mid-submission). If a pass is requested while one is running
+// we simply re-run once afterwards, so no trigger is lost.
+// ---------------------------------------------------------------------------
+// Job heartbeat
+//
+// A job that is genuinely running must NEVER be disturbed. Reclaiming stuck
+// jobs purely on elapsed time cannot tell "still working" from "handler died":
+// a National run legitimately takes 200s+, and with slow-portal waits it can
+// pass the reclaim threshold — at which point the job was flipped back to
+// pending and started a SECOND time while the first browser was still filling
+// the form (a duplicate submission).
+//
+// So a running job stamps lastHeartbeatAt every HEARTBEAT_INTERVAL_MS, and the
+// reclaimer only takes jobs that have gone quiet. However long a job runs, it
+// is left alone as long as it is alive.
+// ---------------------------------------------------------------------------
+const HEARTBEAT_INTERVAL_MS = 20000;
+const HEARTBEAT_STALE_MS = 120000; // no beat for 2 min => the handler is gone
+
+const startJobHeartbeat = (jobId) => {
+  const beat = () => {
+    jobQueueCollection
+      .updateOne(
+        { _id: jobId, status: JOB_STATUS.PROCESSING },
+        { $set: { lastHeartbeatAt: new Date() } }
+      )
+      .catch((e) => console.warn(`[Queue] heartbeat failed for ${jobId}:`, e.message));
+  };
+  beat(); // stamp immediately so a job is never briefly "stale"
+  const timer = setInterval(beat, HEARTBEAT_INTERVAL_MS);
+  if (typeof timer.unref === "function") timer.unref();
+  return timer;
+};
+
+// Wake the queue at an exact moment (a job's nextRetryAt) rather than waiting
+// for the next poll tick. Only ever one timer outstanding, always for the
+// earliest pending job.
+let queueWakeupTimer = null;
+let queueWakeupAt = null;
+const scheduleQueueWakeup = (dueAt) => {
+  const delay = Math.max(0, dueAt - Date.now()) + 50; // tiny cushion for clock skew
+  // A timer for an earlier (or the same) moment already exists — keep it.
+  if (queueWakeupTimer && queueWakeupAt !== null && queueWakeupAt <= dueAt) return;
+  if (queueWakeupTimer) clearTimeout(queueWakeupTimer);
+  queueWakeupAt = dueAt;
+  queueWakeupTimer = setTimeout(() => {
+    queueWakeupTimer = null;
+    queueWakeupAt = null;
+    void processRelianceQueue();
+  }, delay);
+  if (typeof queueWakeupTimer.unref === "function") queueWakeupTimer.unref();
+};
+
+let queuePassRunning = false;
+let queuePassRequested = false;
+// Last reported states, so unchanged output stays silent between passes.
+let lastLoggedQueueState = null;
+let lastLoggedCapacityState = null;
+let lastLoggedBackoffAt = null;
+
 const processRelianceQueue = async () => {
   if (!jobQueueCollection) {
     console.log("[Reliance Queue] ⚠️ jobQueueCollection not initialized yet. Skipping.");
     return;
   }
 
+  if (queuePassRunning) {
+    queuePassRequested = true;
+    return;
+  }
+  queuePassRunning = true;
+
   try {
     // Watchdog: reclaim zombie jobs stuck in "processing" past timeout + grace.
     // The Promise.race timeout normally handles this; this covers handler crashes.
-    const zombieCutoff = new Date(Date.now() - (JOB_TIMEOUT + ZOMBIE_GRACE_MS));
+    // Reclaim ONLY jobs that have stopped beating. A long-but-alive job keeps
+    // its slot no matter how long it takes — see startJobHeartbeat above.
+    // `startedAt` is the fallback for jobs claimed before heartbeats existed.
+    const silentSince = new Date(Date.now() - HEARTBEAT_STALE_MS);
+    const legacyCutoff = new Date(Date.now() - (JOB_TIMEOUT + ZOMBIE_GRACE_MS));
     const zombies = await jobQueueCollection.updateMany(
-      { status: JOB_STATUS.PROCESSING, startedAt: { $lt: zombieCutoff } },
+      {
+        status: JOB_STATUS.PROCESSING,
+        $or: [
+          { lastHeartbeatAt: { $lt: silentSince } },
+          { lastHeartbeatAt: { $exists: false }, startedAt: { $lt: legacyCutoff } },
+        ],
+      },
       {
         $set: { status: JOB_STATUS.PENDING, recoveredAt: new Date() },
-        $unset: { nextRetryAt: "" },
+        $unset: { nextRetryAt: "", lastHeartbeatAt: "" },
       }
     );
     if (zombies.modifiedCount > 0) {
@@ -397,24 +831,40 @@ const processRelianceQueue = async () => {
       );
     }
 
-    // Count how many jobs are currently processing
-    const processingCount = await jobQueueCollection.countDocuments({
-      status: JOB_STATUS.PROCESSING,
-    });
+    // Count jobs currently processing, PER COMPANY, so Reliance and National
+    // consume their own budgets instead of competing for one global slot.
+    const processingJobs = await jobQueueCollection
+      .find({ status: JOB_STATUS.PROCESSING })
+      .toArray();
 
-    activeRelianceJobs = processingCount;
-    // DEBUG LOG
-    console.log(`[Reliance Queue] 📊 Status: activeRelianceJobs=${activeRelianceJobs}, MAX_PARALLEL_JOBS=${MAX_PARALLEL_JOBS}`);
-
-    // Check if we can start more jobs
-    if (activeRelianceJobs >= MAX_PARALLEL_JOBS) {
-      console.log("[Reliance Queue] ⏸️  At max capacity. Returning.");
-      return; // Already at max capacity
+    // Companies are discovered from the jobs themselves, so adding a new one
+    // never requires changing this code.
+    const activeByCompany = {};
+    for (const processingJob of processingJobs) {
+      const company = companyOfJob(processingJob);
+      activeByCompany[company] = (activeByCompany[company] || 0) + 1;
     }
 
-    // Get pending jobs from database (oldest first)
-    const availableSlots = MAX_PARALLEL_JOBS - activeRelianceJobs;
-    const pendingJobs = await jobQueueCollection
+    activeRelianceJobs = processingJobs.length;
+    const activeSummary = Object.keys(activeByCompany).length
+      ? Object.entries(activeByCompany)
+        .map(([c, n]) => `${companyLabel(c)}: ${n}/${maxParallelFor(c)}`)
+        .join(", ")
+      : "none";
+
+    // Quiet by default. This runs on every poll tick, every queue event and
+    // after every finished job, so logging unconditionally filled the console
+    // with identical "Active -> none" lines. Only speak up when the picture
+    // actually CHANGES, and never when the system is simply idle.
+    if (activeSummary !== lastLoggedQueueState && processingJobs.length > 0) {
+      console.log(`[Queue] 📊 Active -> ${activeSummary}`);
+    }
+    lastLoggedQueueState = activeSummary;
+
+    // Pull a batch of ready jobs (oldest first) and pick from it per company.
+    // Fetching a batch rather than exactly N lets a job for one company start
+    // even when the oldest pending jobs all belong to a company that is full.
+    const candidateJobs = await jobQueueCollection
       .find({
         status: JOB_STATUS.PENDING,
         $or: [
@@ -423,8 +873,35 @@ const processRelianceQueue = async () => {
         ],
       })
       .sort({ createdAt: 1 })
-      .limit(availableSlots)
+      .limit(100)
       .toArray();
+
+    const pendingJobs = [];
+    const skippedByCompany = {};
+    for (const candidate of candidateJobs) {
+      const company = companyOfJob(candidate);
+      const active = activeByCompany[company] || 0;
+      if (active >= maxParallelFor(company)) {
+        skippedByCompany[company] = (skippedByCompany[company] || 0) + 1;
+        continue;
+      }
+      activeByCompany[company] = active + 1; // reserve the slot for this pass
+      pendingJobs.push(candidate);
+    }
+
+    if (Object.keys(skippedByCompany).length) {
+      // Also change-gated: while a company is saturated this would otherwise
+      // repeat the identical line on every pass.
+      const capacityMsg = Object.entries(skippedByCompany)
+        .map(([c, n]) => `${companyLabel(c)}: ${n} queued`)
+        .join(", ");
+      if (capacityMsg !== lastLoggedCapacityState) {
+        console.log(`[Queue] ⏸️  At capacity, waiting -> ${capacityMsg}`);
+        lastLoggedCapacityState = capacityMsg;
+      }
+    } else {
+      lastLoggedCapacityState = null;
+    }
 
     if (pendingJobs.length === 0) {
       // Not silent: if jobs exist but are waiting on retry backoff, say when the next is due
@@ -435,8 +912,21 @@ const processRelianceQueue = async () => {
         .toArray();
 
       if (nextDue.length > 0) {
-        const waitSec = Math.ceil((nextDue[0].nextRetryAt.getTime() - Date.now()) / 1000);
-        console.log(`[Reliance Queue] ⏳ Pending job(s) waiting on retry backoff — next due in ${waitSec}s`);
+        const dueAt = nextDue[0].nextRetryAt.getTime();
+
+        // Report a given wait ONCE rather than counting down out loud on
+        // every poll tick.
+        if (dueAt !== lastLoggedBackoffAt) {
+          const waitSec = Math.ceil((dueAt - Date.now()) / 1000);
+          console.log(`[Queue] ⏳ Job waiting — due in ${waitSec}s`);
+          lastLoggedBackoffAt = dueAt;
+        }
+
+        // Wake up exactly when that job becomes due, instead of leaving it to
+        // the 15s poll. Without this a job that finished its stabilization
+        // window one second after a queue pass sat idle for the rest of the
+        // poll interval, even though a browser slot was free.
+        scheduleQueueWakeup(dueAt);
       }
       return; // No pending jobs ready
     }
@@ -447,21 +937,36 @@ const processRelianceQueue = async () => {
 
     // Start processing each job
     for (const job of pendingJobs) {
-      // Mark job as processing
-      await jobQueueCollection.updateOne(
-        { _id: job._id },
+      // Claim the job ATOMICALLY: only transition it if it is still PENDING.
+      // With parallel workers (and the re-entrant call in .finally below) two
+      // passes can otherwise select and start the same job twice — which would
+      // submit the same policy twice.
+      const claim = await jobQueueCollection.findOneAndUpdate(
+        { _id: job._id, status: JOB_STATUS.PENDING },
         {
           $set: {
             status: JOB_STATUS.PROCESSING,
             startedAt: new Date(),
+            lastHeartbeatAt: new Date(),
           },
         }
       );
 
+      const claimed = claim && (claim.value !== undefined ? claim.value : claim);
+      if (!claimed) {
+        console.log(
+          `[Queue] Job ${job._id} was already claimed by another pass, skipping.`
+        );
+        continue;
+      }
+
       activeRelianceJobs++;
       console.log(
-        `[Reliance Queue] Starting job for ${job.formData.firstName} (ID: ${job._id}); active=${activeRelianceJobs}`
+        `[${companyOfJob(job) === "national" ? "National" : "Reliance"} Queue] Starting job for ${job.formData.firstName} (ID: ${job._id}); active=${activeRelianceJobs}`
       );
+
+      // Keep proving this job is alive for as long as it runs.
+      const heartbeat = startJobHeartbeat(job._id);
 
       // Run job in parallel (don't await)
       runPolicyJob(job)
@@ -474,7 +979,10 @@ const processRelianceQueue = async () => {
           console.error("Stack trace:", unexpectedError.stack);
 
           // Ensure job is not left in "processing" state
-          const beautifiedMsg = beautifyError(unexpectedError, companyName || 'system');
+          // companyName is a runPolicyJob local — referencing it here threw
+          // ReferenceError inside the error handler itself, so the job was
+          // never reset and sat in "processing" until the zombie reclaim.
+          const beautifiedMsg = beautifyError(unexpectedError, companyOfJob(job));
           jobQueueCollection
             .updateOne(
               { _id: job._id },
@@ -492,6 +1000,7 @@ const processRelianceQueue = async () => {
             );
         })
         .finally(() => {
+          clearInterval(heartbeat);
           activeRelianceJobs--;
           // Try to process more jobs
           void processRelianceQueue();
@@ -500,10 +1009,122 @@ const processRelianceQueue = async () => {
   } catch (error) {
     const beautifiedMsg = beautifyError(error, 'queue');
     console.error("[Reliance Queue] Error processing queue:", beautifiedMsg);
+  } finally {
+    queuePassRunning = false;
+    // A trigger arrived while we were scheduling — honour it now.
+    if (queuePassRequested) {
+      queuePassRequested = false;
+      setImmediate(() => void processRelianceQueue());
+    }
   }
 };
 
-const runPolicyJob = async (job) => {
+/**
+ * Fill in a backend-enqueued job's full formData from its source policy.
+ *
+ * The backend enqueues a THIN job ({needsHydration:true}) so it doesn't have to
+ * duplicate this ~100-field mapping. We build the real payload here, at claim
+ * time, and persist it back onto the job.
+ *
+ * Returns the job (hydrated in place), or null if the source policy is gone.
+ */
+const hydrateJobFormData = async (job) => {
+  const needsHydration = job.needsHydration === true || !job.formData?.mobile;
+  if (!needsHydration) return job;
+
+  if (!job.captchaId) {
+    console.warn(`[Queue] Job ${job._id} needs hydration but has no captchaId — using existing formData`);
+    return job;
+  }
+
+  console.log(`[Queue] 💧 Hydrating job ${job._id} from policy ${job.captchaId}...`);
+  const policy = await db.collection("onlinePolicy").findOne({ _id: job.captchaId });
+
+  // Only a genuinely MISSING policy is terminal. Anything that throws (a
+  // transient Mongo blip) propagates to the caller and is retried, rather than
+  // permanently failing a valid job.
+  if (!policy) {
+    console.error(`[Queue] ❌ Source policy ${job.captchaId} not found for job ${job._id}`);
+    return { missingPolicy: true };
+  }
+
+  const rawFormData = await buildFormDataFromPolicy(policy);
+
+  // Re-apply the validation/normalisation that used to run in
+  // enqueueRelianceJob. That path is unreachable now that the backend enqueues
+  // directly, and without this an invalid pincode/mobile would drive a real
+  // portal submission instead of being rejected up front.
+  const formData = sanitizeFormData(rawFormData);
+  const validation = validateFormData(formData, companyOfJob({ formData }));
+  if (!validation.isValid) {
+    console.error(
+      `[Queue] ❌ Job ${job._id} failed validation: ${validation.errors.join(", ")}`
+    );
+    return { invalid: true, errors: validation.errors };
+  }
+
+  await jobQueueCollection.updateOne(
+    { _id: job._id },
+    {
+      $set: {
+        formData,
+        needsHydration: false,
+        hydratedAt: new Date(),
+        // Restores the cross-document duplicate guard (checkDuplicateSubmission)
+        idempotencyKey: generateIdempotencyKey(formData),
+      },
+    }
+  );
+
+  console.log(`[Queue] ✅ Hydrated job ${job._id} (${formData.firstName}, company: ${formData.Companyname})`);
+  return { ...job, formData, needsHydration: false };
+};
+
+const runPolicyJob = async (rawJob) => {
+  // Backend-created jobs carry only a thin payload — fill it in before any
+  // of the code below reads job.formData.
+  let job;
+  try {
+    job = await hydrateJobFormData(rawJob);
+  } catch (hydrationError) {
+    // TRANSIENT failure (Mongo hiccup, S3 presign error) — put the job back so
+    // it retries. Marking it failed here would kill a perfectly valid job.
+    console.error(`[Queue] ⚠️ Hydration error for job ${rawJob._id} (will retry):`, hydrationError.message);
+    await jobQueueCollection.updateOne(
+      { _id: rawJob._id },
+      {
+        $set: {
+          status: JOB_STATUS.PENDING,
+          lastError: `Could not prepare job data: ${hydrationError.message}`,
+          lastErrorTimestamp: new Date(),
+          nextRetryAt: new Date(Date.now() + 30000),
+        },
+        $inc: { attempts: 1 },
+      }
+    );
+    return;
+  }
+
+  // TERMINAL problems — retrying cannot help.
+  if (job.missingPolicy || job.invalid) {
+    const reason = job.missingPolicy
+      ? "Source online policy not found — cannot build job data"
+      : `Invalid policy data: ${(job.errors || []).join(", ")}`;
+    await jobQueueCollection.updateOne(
+      { _id: rawJob._id },
+      {
+        $set: {
+          status: JOB_STATUS.FAILED_VALIDATION,
+          lastError: reason,
+          lastErrorTimestamp: new Date(),
+          failedAt: new Date(),
+        },
+      }
+    );
+    console.error(`[Queue] ❌ Job ${rawJob._id} terminal: ${reason}`);
+    return;
+  }
+
   const jobIdentifier = `${job.formData.firstName}_${job._id}`;
   const processingStartTime = Date.now();
   const companyName = (job.formData.Companyname || job.formData.company || "reliance").toLowerCase();
@@ -579,11 +1200,15 @@ const runPolicyJob = async (job) => {
     } else {
       // Reliance form (default)
       fillFormPromise = fillRelianceForm({
-        // username: "rfcpolicy",
-        // password: "Pass@123",
+        // NOTE: credentials come AFTER the spread on purpose. formData carries
+        // hardcoded defaults ("rfcpolicy"/"Pass@123"), so spreading it last
+        // silently overwrote this client's real credentials — every job then
+        // logged into the portal as the default user and policies were issued
+        // under the wrong IMD code. (The National branch above already had the
+        // correct order.)
+        ...job.formData,
         username: creds.username,
         password: creds.password,
-        ...job.formData,
         _jobId: job._id, // Pass job ID for error logging
         _jobIdentifier: jobIdentifier,
         _attemptNumber: job.attempts + 1, // Current attempt number
@@ -964,8 +1589,11 @@ db.once("open", async () => {
 
   console.log("[Job Queue] Initialized persistent job queue with indexes");
 
-  // CRASH RECOVERY: Reset any jobs stuck in "processing" state back to "pending"
-  // This happens when server crashes while processing jobs
+  // STARTUP RECOVERY: every "processing" job becomes "pending" again.
+  // On a fresh start no browser from a previous run can still be alive, so
+  // anything left in processing is by definition abandoned — reset it
+  // unconditionally rather than waiting for the heartbeat window. (While the
+  // server is RUNNING the opposite rule applies: a live job is never touched.)
   const stuckJobs = await jobQueueCollection.updateMany(
     { status: JOB_STATUS.PROCESSING },
     {
@@ -973,6 +1601,8 @@ db.once("open", async () => {
         status: JOB_STATUS.PENDING,
         recoveredAt: new Date(),
       },
+      // Drop the previous run's heartbeat so it can't look "alive"
+      $unset: { lastHeartbeatAt: "" },
     }
   );
 
@@ -1009,228 +1639,57 @@ db.once("open", async () => {
     console.log("[Job Queue] No pending jobs found on startup.");
   }
 
-  // PERIODIC POLLING (CRITICAL: picking up retries when they become due)
+  // PERIODIC SWEEP: every QUEUE_POLL_INTERVAL_MS, look for pending jobs and
+  // start them.
+  //
+  // This is a safety net, not the main trigger — pending work normally starts
+  // instantly via the queue change stream (on insert), the re-check after each
+  // finished job, and the exact-time wakeup for a job still inside its settle
+  // window. The sweep covers the cases those miss: a dropped change stream, a
+  // job reclaimed from a dead handler, or a row written straight into Mongo.
+  console.log(
+    `[Queue] Periodic pending-job sweep every ${QUEUE_POLL_INTERVAL_MS / 1000}s`
+  );
   setInterval(() => {
     // Only poll if we have space for more jobs
     if (activeRelianceJobs < MAX_PARALLEL_JOBS) {
       void processRelianceQueue();
     }
-  }, 30000); // Check every 30 seconds
+  }, QUEUE_POLL_INTERVAL_MS);
 
-  const collection = db.collection("onlinePolicy");
-
-  const changeStream = collection.watch([
-    {
-      $match: {
-        $or: [
-          { operationType: "insert" },
-          {
-            operationType: "update",
-            "updateDescription.updatedFields.aadharCard": { $exists: true }
-          },
-          {
-            operationType: "update",
-            "updateDescription.updatedFields.panCard": { $exists: true }
-          }
-        ],
-      },
-    },
-  ]);
-
-  // ⏳ Debounce per document: insert + follow-up Aadhaar/PAN updates fire separate
-  // change events for the SAME document. Each new event restarts the 4s timer, so
-  // only ONE processing run happens per document after the data stops changing.
-  const pendingDocTimers = new Map();
-  const STABILIZATION_MS = 4000;
-
-  changeStream.on("change", (change) => {
-    const documentId = change.documentKey?._id;
-    if (!documentId) return;
-    const idStr = documentId.toString();
-
-    console.log(`📡 Change detected: ${change.operationType} (ID: ${idStr})`);
-
-    const existing = pendingDocTimers.get(idStr);
-    // "insert" wins for the window: a re-created document must be treated as new work
-    const opType = existing?.opType === "insert" ? "insert" : change.operationType;
-    if (existing) {
-      clearTimeout(existing.timer);
-      console.log(`[MongoDB Watch] 🔁 Another change for ${idStr} during stabilization window, restarting 4s wait...`);
-    } else {
-      console.log(`[MongoDB Watch] ⏳ Waiting 4 seconds for data stabilization (ID: ${idStr})...`);
-    }
-
-    const timer = setTimeout(() => {
-      pendingDocTimers.delete(idStr);
-      processPolicyDocument(documentId, opType).catch((error) => {
-        console.error(`[MongoDB Watch] ❌ Failed processing document ${idStr}:`, error.message);
-      });
-    }, STABILIZATION_MS);
-    pendingDocTimers.set(idStr, { timer, opType });
-  });
-
-  const processPolicyDocument = async (documentId, operationType) => {
-    // 📥 Fetch FRESH full document to ensure all fields are captured
-    console.log(`[MongoDB Watch] 📥 Fetching fresh document state...`);
-    const data = await collection.findOne({ _id: documentId });
-
-    if (!data) {
-      console.warn(`[MongoDB Watch] ⚠️ Document ${documentId} not found after wait. Skipping.`);
-      return;
-    }
-
-    // 🛡️ CRITICAL DATA CHECK: Only proceed if Aadhaar card is present
-    // This prevents creating "empty" jobs during initial insert while files are uploading
-    const hasAadhar = data?.aadharCard?.key;
-    const hasPan = data?.panCard?.key; // Also checking PAN as it's typically required
-
-    if (!hasAadhar) {
-      console.log(`[MongoDB Watch] ⚠️ Aadhaar card missing for ${documentId} after 4s. Proceeding and waiting for possible update...`);
-    } else {
-      console.log(`[MongoDB Watch] ✅ Aadhaar card verified for ${documentId}.`);
-    }
-
-    console.log(`[MongoDB Watch] ✅ Data verified for ${operationType} (ID: ${documentId}), processing policy...`);
-
-    console.log("data: ******* ******* ******* ******* ******* ******* ", data);
-
-    // Get the Captcha document _id for reference
-    const captchaId = data?._id;
-
-    // Generate presigned URLs for document downloads
-    let aadharPresignedUrl = null;
-    let panPresignedUrl = null;
-
-    if (data?.aadharCard?.key) {
-      aadharPresignedUrl = await getPresignedUrl(data.aadharCard.key);
-      console.log(`📄 Aadhar presigned URL generated: ${aadharPresignedUrl ? 'YES' : 'NO'}`);
-    }
-
-    if (data?.panCard?.key) {
-      panPresignedUrl = await getPresignedUrl(data.panCard.key);
-      console.log(`📄 PAN presigned URL generated: ${panPresignedUrl ? 'YES' : 'NO'}`);
-    }
-
-    let formData = {
-      // MongoDB document identifiers (CRITICAL for updates)
-      _id: data?._id,
-      policyId: data?.policyId,
-      userId: data?.userId,
-      clientId: data?.clientId,
-
-      username: "rfcpolicy",
-      password: "Pass@123",
-      // Proposer details
-      proposerTitle: data?.proposerTitle || "Mr.",
-      firstName: data?.fullName || data?.firstName,
-      middleName: data?.middleName || "",
-      lastName: data?.surname || data?.lastName,
-      dob: data?.dateOfBirth?.$date
-        ? moment(data.dateOfBirth.$date).format("DD-MM-YYYY")
-        : data?.dateOfBirth
-          ? moment(data.dateOfBirth).format("DD-MM-YYYY")
-          : "",
-      gender: data?.gender,
-      // Father details
-      fatherTitle: data?.fatherTitle || "Mr.",
-      fatherName: data?.fatherName,
-      // Address details
-      flatNo: data?.flatDoorNo,
-      flatDoorNo: data?.flatDoorNo, // Added to match onlinePolicy schema
-      floorNo: data?.floorNo,
-      premisesName: data?.buildingName,
-      buildingName: data?.buildingName, // Added to match onlinePolicy schema
-      blockNo: data?.blockName || data?.blockNo,
-      blockName: data?.blockName, // Added to match onlinePolicy schema
-      road: data?.roadStreetLane || data?.road,
-      roadStreetLane: data?.roadStreetLane, // Added to match onlinePolicy schema
-      areaAndLocality: data?.areaAndLocality || data?.area || data?.locality || "",
-      state: data?.state == "TAMILNADU" ? "30" : data?.state == "KARNATAKA" ? "26" : "30",
-      pinCode: data?.pincode,
-      // Contact details
-      mobile: data?.mobileNumber,
-      email: data?.email,
-      aadhar: data?.aadhar,
-      // Document uploads (from S3) - with presigned URLs for download
-      aadharCard: data?.aadharCard ? {
-        ...data.aadharCard,
-        presignedUrl: aadharPresignedUrl
-      } : null,
-      panCard: data?.panCard ? {
-        ...data.panCard,
-        presignedUrl: panPresignedUrl
-      } : null,
-      // Vehicle details
-      vehicleMake: data?.vehicleMake,
-      vehicleModel: data?.vehicleModel,
-      vehicleCC: data?.vehicleCC,
-      rtoCityLocation: data?.rtoCityLocation,
-      vehicleVariant: data?.vehicleVariant,
-      RTORegion: data?.RTORegion,
-      RTOCity: data?.RTOCity,
-      idv: data?.idv,
-      manufacturingYear: data?.manufacturingYear,
-      manufacturingMonth: data?.manufacturingMonth,
-      engineNumber: data?.engineNumber,
-      chassisNumber: data?.chassisNumber,
-      purchaseDate: data?.purchaseDate?.$date
-        ? moment(data.purchaseDate.$date).format("DD-MM-YYYY")
-        : data?.purchaseDate
-          ? moment(data.purchaseDate).format("DD-MM-YYYY")
-          : "",
-      registrationDate: data?.registrationDate?.$date
-        ? moment(data.registrationDate.$date).format("DD-MM-YYYY")
-        : data?.registrationDate
-          ? moment(data.registrationDate).format("DD-MM-YYYY")
-          : "",
-      // Coverage options
-      zeroDepreciation: data?.zeroDepreciation,
-      zeroDepreciationPercentage: data?.zeroDepreciationPercentage,
-      tppdRestrict: data?.tppdRestrict,
-      paCover: data?.paCover,
-      paCoverCompany: data?.paCoverCompany,
-      paCoverAmount: data?.paCoverAmount,
-      nomineeName: data?.nomineeName,
-      nomineeRelation: data?.nomineeRelation,
-      nomineeAge: data?.nomineeAge,
-      paCoverYears: data?.paCoverYears,
-      otherRelationName: data?.otherRelationName,
-      appointeeName: data?.appointeeName,
-      nomineeDob: data?.nomineeDob?.$date
-        ? moment(data.nomineeDob.$date).format("DD-MM-YYYY")
-        : data?.nomineeDob
-          ? moment(data.nomineeDob).format("DD-MM-YYYY")
-          : "",
-      // Financier details
-      hasFinancier: data?.hasFinancier,
-      financierType: data?.financierType,
-      financierName: data?.financierName,
-      financierAddress: data?.financierAddress,
-      // Registration address
-      isRegistrationAddressSame: data?.isRegistrationAddressSame,
-      // Discount mapping (normalize multiple possible fields from Mongo)
-      discount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
-      ODDiscount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
-      // Payment Method
-      Paymentmethod: data?.Paymentmethod,
-      // Company name mapping - check both 'company' and 'Companyname' fields, normalize to lowercase
-      Companyname: data?.Companyname || (data?.company ? data.company.toLowerCase() : "reliance")
-    };
-
-    console.log(
-      "formData: ******* ******* ******* ******* ******* ******* ",
-      formData
-    );
-    console.log(
-      `[MongoDB Watch] New customer data received: ${formData.firstName} (Captcha ID: ${captchaId})`
-    );
-    console.log(
-      `[MongoDB Watch] Company mapping: data.company="${data?.company}", data.Companyname="${data?.Companyname}", formData.Companyname="${formData.Companyname}"`
+  // ─────────────────────────────────────────────────────────────────────────
+  // Queue-first: the RelianceJobQueue is now the single source of truth.
+  //
+  // We no longer watch the onlinePolicy collection. A change stream only
+  // fires while THIS process is running, so any policy created while the
+  // automation server was down never produced a job and silently never ran.
+  // The backend now writes the queue entry itself (see
+  // RayalBrokers-backend/dao/onlinePolicyDao.js -> enqueuePolicyJob), on both
+  // policy create and policy update.
+  //
+  // Here we just react to new queue entries as fast as possible; the periodic
+  // poll above is the safety net if this stream drops.
+  // ─────────────────────────────────────────────────────────────────────────
+  try {
+    const jobChangeStream = jobQueueCollection.watch(
+      [{ $match: { operationType: { $in: ["insert", "replace"] } } }],
+      { fullDocument: "updateLookup" }
     );
 
-    // Add to queue with captchaId reference
-    await enqueueRelianceJob(formData, captchaId, operationType);
-  };
+    jobChangeStream.on("change", (change) => {
+      const newJobId = change.documentKey?._id;
+      console.log(`[Job Queue] 📥 New job detected (${newJobId}) — processing...`);
+      void processRelianceQueue();
+    });
+
+    jobChangeStream.on("error", (err) => {
+      console.error("[Job Queue] Change stream error (poll will keep things moving):", err.message);
+    });
+
+    console.log("[Job Queue] 👀 Watching RelianceJobQueue for new jobs");
+  } catch (watchError) {
+    console.error("[Job Queue] Could not start queue watcher — relying on the periodic poll:", watchError.message);
+  }
 });
 
 // Setup Express app for API routes
