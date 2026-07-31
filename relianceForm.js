@@ -1057,6 +1057,56 @@ async function createBriskCertificate(data) {
 }
 
 /**
+ * Record the two KYC page URLs on the policy.
+ *
+ * The OVD flow spans two pages that an operator sometimes has to revisit by
+ * hand — the "Choose KYC Method" page and the document-upload page it leads
+ * to. Both are captured while the automation walks through them and stored on
+ * the policy so they can be reopened from the Online Policy view.
+ *
+ * Never throws: these links are a convenience, and a failure to record them
+ * must not fail a job whose form was already submitted.
+ */
+async function saveKycUrls(urls, data, jobId = "") {
+  const { ovdUrl, uploadUrl } = urls || {};
+  if (!ovdUrl && !uploadUrl) return null;
+
+  const kycUrls = {
+    ovdUrl: ovdUrl || null,
+    uploadUrl: uploadUrl || null,
+    capturedAt: new Date(),
+  };
+
+  const policyIdForUpdate = data?._id || data?.policyId;
+  if (!policyIdForUpdate) {
+    console.warn(`[${jobId}] ⚠️ No policy id on the job — KYC URLs captured but not linked.`);
+    return kycUrls;
+  }
+
+  const { MongoClient } = require("mongodb");
+  const client = new MongoClient(process.env.MONGODB_URI);
+  try {
+    await client.connect();
+    const result = await client
+      .db()
+      .collection("onlinePolicy")
+      .updateOne(
+        { _id: policyIdForUpdate },
+        { $set: { kycUrls, updatedAt: new Date() } }
+      );
+    console.log(
+      `[${jobId}] 📝 onlinePolicy.kycUrls updated (matched ${result.matchedCount})`
+    );
+  } catch (error) {
+    console.warn(`[${jobId}] ⚠️ Could not save KYC URLs: ${error.message}`);
+  } finally {
+    await client.close().catch(() => { });
+  }
+
+  return kycUrls;
+}
+
+/**
  * Upload the Brisk certificate PDF to S3 and record it on the policy.
  *
  * Previously the certificate was only downloaded to a local folder and then
@@ -1561,6 +1611,10 @@ async function fillRelianceForm(
   // Was only ever ASSIGNED (an implicit global), never declared. Declaring it
   // here also lets the finally below decide whether to retain the browser.
   let hadError = false;
+  // The two OVD/KYC page URLs, captured as the flow walks through them and
+  // saved onto the policy so they can be reopened from the Online Policy view.
+  let kycOvdUrl = null;
+  let kycUploadUrl = null;
   let driver = null;
   let postSubmissionFailed = false;
   let postSubmissionError = null;
@@ -3851,6 +3905,16 @@ async function fillRelianceForm(
             }
             console.log("✅ Selected 'OVD UPLOAD' KYC method");
 
+            // URL #1 — the "Choose KYC Method" (OVD) page, captured while we
+            // are still on it. Saved to the policy further down so an operator
+            // can reopen this step by hand.
+            try {
+              kycOvdUrl = await driver.getCurrentUrl();
+              console.log(`🔗 OVD page URL: ${kycOvdUrl}`);
+            } catch (urlErr) {
+              console.log(`⚠️ Could not read the OVD page URL: ${urlErr.message}`);
+            }
+
             // Click the Continue button ("Continue with OVD UPLOAD ➜")
             const kycContinueBtn = await driver.wait(
               until.elementLocated(By.id("continueBtn")),
@@ -3879,6 +3943,25 @@ async function fillRelianceForm(
             } catch (e) {
               // best effort — the search below has its own waits
             }
+
+            // URL #2 — the document-upload page Continue navigated to. Read
+            // AFTER the readyState wait above, or it would still be the old
+            // page's URL.
+            try {
+              kycUploadUrl = await driver.getCurrentUrl();
+              console.log(`🔗 KYC upload page URL: ${kycUploadUrl}`);
+            } catch (urlErr) {
+              console.log(`⚠️ Could not read the upload page URL: ${urlErr.message}`);
+            }
+
+            // Store both now rather than at the end of the job: the steps that
+            // follow can throw, and these links are most useful precisely when
+            // something went wrong.
+            await saveKycUrls(
+              { ovdUrl: kycOvdUrl, uploadUrl: kycUploadUrl },
+              data,
+              jobId
+            );
           } catch (methodPageErr) {
             console.log(
               `⚠️ 'Choose KYC Method' page not detected (${methodPageErr.message}) — continuing with existing flow...`
