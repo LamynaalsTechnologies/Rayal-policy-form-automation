@@ -9,6 +9,15 @@ const path = require("path");
 const { extractCaptchaText } = require("./Captcha");
 const { uploadScreenshotToS3, generateScreenshotKey } = require("./s3Uploader");
 const { beautifyError } = require("./lib/errorHandler");
+// Shared with Reliance — National previously had NO Brisk handling at all, so
+// a National policy with PA Cover through Brisk never got its CPA/RSA
+// certificate.
+const {
+  createBriskCertificate,
+  downloadBriskPDF,
+  uploadBriskCertificate,
+  shouldCreateBriskCertificate,
+} = require("./briskCertificate");
 
 // Default form data for standalone execution
 const defaultFormData = {
@@ -836,7 +845,14 @@ async function enableSlideToggle(
 async function openFinancierSection(driver) {
   try {
     console.log("Opening Financier Interest Applicable section if not visible...");
-    const financierTab = By.xpath("//span[contains(normalize-space(.), 'Financier Interest Applicable')]");
+    // The heading is <mat-label class="mat-label-inline">, NOT a <span>, and it
+    // is a plain sibling of the toggle inside a div.col-sm-12 — there is no
+    // mat-expansion-panel around it. The old span-only xpath matched nothing
+    // and burned its full 5s timeout on every job.
+    const financierTab = By.xpath(
+      "//mat-label[contains(normalize-space(.), 'Financier Interest Applicable')]" +
+      " | //span[contains(normalize-space(.), 'Financier Interest Applicable')]"
+    );
     const tabElement = await driver.wait(until.elementLocated(financierTab), 5000);
     const tabParent = await driver.executeScript("return arguments[0].closest('mat-expansion-panel') || arguments[0];", tabElement);
 
@@ -3720,56 +3736,53 @@ async function fillNationalForm(
             }
           }
 
-          // E. Select Relationship with Nominee mat-select
+          // E. Select Relationship with Nominee.
+          //
+          // This is an AUTOCOMPLETE, not a mat-select: the control is
+          // <input name="mcy_dropdown_nomineeRelation_01" role="combobox"
+          // class="mat-mdc-autocomplete-trigger">. The old code looked for
+          // mat-select[name=...], found nothing, and silently left the field
+          // empty — which then failed the PA validation below with
+          // "Relationship with Nominee" every single run.
+          //
+          // selectAutocompleteOption is the same helper the RTO / make / model
+          // fields use, so this now behaves like every other autocomplete on
+          // the page (types, waits for the panel, picks the matching option).
           if (data.nomineeRelation) {
             try {
-              const relSelect = await driver.findElement(By.css("mat-select[name='mcy_dropdown_nomineeRelation_01']"));
-              await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", relSelect);
-              await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
-              await driver.executeScript("arguments[0].click();", relSelect);
-              await driver.sleep(1200); // wait for CDK overlay to fully render
+              const relInput = await driver.wait(
+                until.elementLocated(
+                  By.css("input[name='mcy_dropdown_nomineeRelation_01']")
+                ),
+                15000
+              );
+              await driver.wait(until.elementIsVisible(relInput), 10000);
+              await driver.executeScript(
+                "arguments[0].scrollIntoView({block: 'center'});",
+                relInput
+              );
 
-              const relationTarget = data.nomineeRelation.trim();
+              const relationTarget = String(data.nomineeRelation).trim();
+              await selectAutocompleteOption(
+                driver,
+                relInput,
+                relationTarget,
+                "Nominee Relation"
+              );
 
-              // Try exact match first (case-insensitive via XPath translate)
-              let relOption = null;
-              try {
-                relOption = await driver.wait(
-                  until.elementLocated(By.xpath(
-                    `//mat-option[normalize-space(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'))='${relationTarget.toUpperCase()}']`
-                  )),
-                  4000
-                );
-              } catch (e) {
-                // Fallback: partial match
-                try {
-                  relOption = await driver.wait(
-                    until.elementLocated(By.xpath(
-                      `//mat-option[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '${relationTarget.toUpperCase()}')]`
-                    )),
-                    4000
-                  );
-                } catch (e2) {
-                  // Final fallback: index-based map
-                  const relationMap = {
-                    "self": 1, "husband": 2, "son": 3, "father": 4,
-                    "father in law": 5, "father-in-law": 5,
-                    "wife": 6, "daughter": 7, "sister": 8,
-                    "brother": 9, "mother": 10,
-                    "mother in law": 11, "mother-in-law": 11
-                  };
-                  const index = relationMap[relationTarget.toLowerCase()] || 1;
-                  relOption = await driver.findElement(By.xpath(`//mat-option[${index}]`));
-                  console.log(`[${jobId}] Using index-based fallback for relation: index ${index}`);
-                }
-              }
-
-              if (relOption) {
-                await driver.executeScript("arguments[0].click();", relOption);
-                await driver.sleep(500);
-                console.log(`[${jobId}] ✅ Selected Nominee Relation: ${relationTarget}`);
+              // Confirm the portal accepted it — an autocomplete keeps whatever
+              // was typed even when nothing was picked, so a filled-looking box
+              // can still be ng-invalid.
+              const relOk = await driver.executeScript(
+                "const el = document.querySelector(\"input[name='mcy_dropdown_nomineeRelation_01']\");" +
+                "return el ? { value: el.value, invalid: el.classList.contains('ng-invalid') } : null;"
+              );
+              if (relOk && !relOk.invalid) {
+                console.log(`[${jobId}] ✅ Selected Nominee Relation: ${relOk.value}`);
               } else {
-                console.log(`[${jobId}] ⚠️ Could not find Nominee Relation option for: ${relationTarget}`);
+                console.log(
+                  `[${jobId}] ⚠️ Nominee Relation still rejected after selecting "${relationTarget}" (value: "${relOk?.value || ""}")`
+                );
               }
             } catch (e) {
               console.log(`[${jobId}] Failed to select Nominee Relation: ${e.message}`);
@@ -3825,11 +3838,12 @@ async function fillNationalForm(
           results.age.valid = !ageInput.classList.contains('ng-invalid');
         }
 
-        const relSelect = document.querySelector('mat-select[name="mcy_dropdown_nomineeRelation_01"]');
-        if (relSelect) {
-          const valueText = relSelect.querySelector('.mat-mdc-select-value-text')?.innerText || '';
-          results.relation.filled = !!valueText.trim();
-          results.relation.valid = !relSelect.classList.contains('ng-invalid');
+        // Autocomplete INPUT, not a mat-select — querying mat-select returned
+        // null, so relation was reported missing even when it was filled.
+        const relInput = document.querySelector('input[name="mcy_dropdown_nomineeRelation_01"]');
+        if (relInput) {
+          results.relation.filled = !!String(relInput.value || '').trim();
+          results.relation.valid = !relInput.classList.contains('ng-invalid');
         }
 
         const yearSelect = document.querySelector('mat-select[name="mcy_dropdown_noy_01"]');
@@ -3951,17 +3965,54 @@ async function fillNationalForm(
       // Ensure Financier Interest section is visible
       await openFinancierSection(driver);
 
-      // Enable Financier Interest switch
-      const financierToggleLocators = [
-        By.xpath("//*[@id='mat-mdc-slide-toggle-8-button']"),
-        By.xpath("//*[@id='mat-mdc-slide-toggle-8-button']/div[2]/div/div[3]/svg[2]"),
-        By.css("mat-mdc-slide-toggle[name='mcy_toggle_FinancierInterestApplicable_01']"),
-        By.xpath("//mat-mdc-slide-toggle[contains(., 'Financier Interest Applicable')]"),
-        By.xpath("//mat-expansion-panel[contains(., 'Financier Interest Applicable')]//mat-mdc-slide-toggle"),
-      ];
+      // Enable the Financier Interest switch.
+      //
+      // Every previous locator was wrong: `mat-mdc-slide-toggle` is a CSS CLASS
+      // (the tag is <mat-slide-toggle>), the name attribute lives on the INNER
+      // <button role="switch"> and is mcy_toggle_FinancierDetails_01 — not
+      // ...FinancierInterestApplicable_01 — and there is no mat-expansion-panel
+      // to descend from. The mat-mdc-slide-toggle-8-button id is generated per
+      // render (it was -17 on this run), so it can never be hardcoded.
       try {
-        await enableSlideToggle(driver, financierToggleLocators, "Financier Interest switch");
-        await driver.sleep(1000);
+        const toggle = await firstPresentLocator(
+          driver,
+          [
+            By.css("button[name='mcy_toggle_FinancierDetails_01']"),
+            By.css("mat-slide-toggle button[role='switch']"),
+            By.xpath(
+              "//mat-label[contains(., 'Financier Interest Applicable')]/following::button[@role='switch'][1]"
+            ),
+          ],
+          15000
+        );
+
+        if (!toggle) {
+          throw new Error("Financier Interest toggle not found");
+        }
+
+        // aria-checked is the truth for an MDC switch. Only click when it is
+        // OFF — clicking an already-on switch turns the section back off.
+        const alreadyOn = await driver.executeScript(
+          "return arguments[0].getAttribute('aria-checked') === 'true';",
+          toggle.element
+        );
+
+        if (alreadyOn) {
+          console.log("Financier Interest switch already on.");
+        } else {
+          await driver.executeScript(
+            "arguments[0].scrollIntoView({block:'center'});",
+            toggle.element
+          );
+          await driver.executeScript("arguments[0].click();", toggle.element);
+          await driver.sleep(800);
+          const nowOn = await driver.executeScript(
+            "return arguments[0].getAttribute('aria-checked') === 'true';",
+            toggle.element
+          );
+          console.log(`Financier Interest switch turned on: ${nowOn}`);
+        }
+        await waitForPortalIdle(driver, 20000, 600);
       } catch (e) {
         console.log("Financier switch handling failed:", e.message);
       }
@@ -3969,12 +4020,17 @@ async function fillNationalForm(
       // Select Financier Interest Type
       try {
         console.log("Selecting Financier Interest Type...");
+        // The portal calls this "Agreement Type": the control is
+        // <mat-select name="mcy_dropdown_AgreementType_01">. The old locators
+        // looked for name*='Financier' (no match) and a hardcoded mat-select-41
+        // id that changes every render (-38 on this run).
+        //
+        // These fields carry mdc-notched-outline--no-label, i.e. they render
+        // with NO <mat-label> at all — so every label-based xpath below is a
+        // dead end and only the name attribute can find them.
         const interestLocators = [
-          By.xpath("//div[@id='mat-select-value-41']/ancestor::mat-select"),
-          By.id("mat-select-41"),
-          By.xpath("//mat-form-field[.//mat-label[contains(., 'Financier Interest Type')]]//mat-select"),
-          By.xpath("//mat-label[contains(., 'Financier Interest Type')]/ancestor::mat-form-field//mat-select"),
-          By.css("mat-select[formcontrolname*='Financier']"),
+          By.css("mat-select[name='mcy_dropdown_AgreementType_01']"),
+          By.css("mat-select[name*='AgreementType']"),
           By.css("mat-select[name*='Financier']"),
         ];
 
@@ -4088,37 +4144,133 @@ async function fillNationalForm(
         console.log("Financier Interest Type handling failed:", e.message);
       }
 
-      // Fill Financier Name
-      try {
-        console.log("Filling Financier Name...");
-        const finName = data.financierName || "Financier Name";
-        await safeType(driver, By.name("mcy_text_FinancierName_01"), finName, 10000);
-      } catch (e) {
-        console.log("Could not fill Financier Name by name attribute, trying label-based locator...");
-        try {
-          const financierNameInput = By.xpath("//mat-label[contains(., 'Financier Name')]/ancestor::mat-form-field//input");
-          const finName = data.financierName || "Financier Name";
-          await safeType(driver, financierNameInput, finName, 10000);
-        } catch (fallbackError) {
-          console.log("All strategies failed for Financier Name:", fallbackError.message);
+      /**
+       * Fill one of the financier text inputs.
+       *
+       * The old label fallback — //mat-label[...]/ancestor::mat-form-field//input
+       * — could never match: the caption sits OUTSIDE the mat-form-field, so
+       * it is not an ancestor of the input, and the field itself renders with
+       * mdc-notched-outline--no-label (no mat-label inside it at all).
+       *
+       * The working fallback walks forward from whatever element holds the
+       * caption text to the next input, which is independent of the tag used.
+       * Whichever locator wins is logged with the element's real name
+       * attribute, so the portal's own naming can be pinned down from a run.
+       */
+      const fillFinancierText = async (caption, exactName, value, label) => {
+        console.log(`Filling ${label}...`);
+        const found = await firstPresentLocator(
+          driver,
+          [
+            By.css(`input[name='${exactName}']`),
+            By.css(`input[name*='${caption.replace(/\s+/g, "")}']`),
+            By.xpath(
+              `//*[normalize-space(text())='${caption}']/following::input[not(@type='hidden')][1]`
+            ),
+            By.xpath(
+              `//*[contains(normalize-space(text()), '${caption}')]/following::input[not(@type='hidden')][1]`
+            ),
+          ],
+          15000
+        );
+
+        if (!found) {
+          console.log(`All strategies failed for ${label} — field not on the page.`);
+          return false;
         }
+
+        const realName = await driver
+          .executeScript(
+            "return arguments[0].getAttribute('name') || arguments[0].id || '(unnamed)';",
+            found.element
+          )
+          .catch(() => "(unknown)");
+        console.log(`${label} resolved; name/id = ${realName}`);
+
+        await driver.executeScript(
+          "arguments[0].scrollIntoView({block:'center'});",
+          found.element
+        );
+
+        // Respect the field's OWN constraints rather than hardcoding them:
+        // Financier Name carries maxlength="40" and a pattern whose character
+        // class permits letters and punctuation but NO DIGITS. Sending a value
+        // that breaks either leaves the input ng-invalid, and the failure only
+        // surfaces much later as an unexplained quote validation error.
+        const limits = await driver.executeScript(
+          "const el = arguments[0];" +
+          "return { maxLength: el.getAttribute('maxlength'), pattern: el.getAttribute('pattern') };",
+          found.element
+        );
+
+        let toSend = String(value);
+        if (limits?.pattern) {
+          // Derive the allowed characters from the pattern's own character
+          // class instead of guessing, so a portal-side change follows through.
+          // Consume escaped pairs OR non-] characters — this class contains
+          // escaped brackets (\[ \]), which a naive [^\]]* extractor cuts short.
+          const cls = /\[((?:\\.|[^\]\\])*)\]/.exec(limits.pattern);
+          if (cls) {
+            try {
+              const allowed = new RegExp(`[${cls[1]}]`);
+              const stripped = toSend.split("").filter((c) => allowed.test(c)).join("");
+              if (stripped !== toSend) {
+                console.log(
+                  `${label}: removed characters the portal rejects — "${toSend}" -> "${stripped}"`
+                );
+                toSend = stripped;
+              }
+            } catch (patternError) {
+              // Unparseable class — send the value unchanged rather than
+              // mangling it on a bad guess.
+            }
+          }
+        }
+        const maxLength = Number(limits?.maxLength);
+        if (Number.isFinite(maxLength) && maxLength > 0 && toSend.length > maxLength) {
+          console.log(`${label}: trimmed to the field's ${maxLength}-character limit.`);
+          toSend = toSend.slice(0, maxLength);
+        }
+
+        await found.element.clear().catch(() => { });
+        await found.element.sendKeys(toSend);
+        // Angular commits this model on blur.
+        await driver.executeScript(
+          "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));" +
+          "arguments[0].dispatchEvent(new Event('blur', {bubbles:true}));",
+          found.element
+        );
+
+        // The portal marks a rejected value ng-invalid. Say so now — otherwise
+        // the run continues and fails later with no obvious cause.
+        const invalid = await driver.executeScript(
+          "return arguments[0].classList.contains('ng-invalid');",
+          found.element
+        );
+        if (invalid) {
+          console.log(`⚠️ ${label}: the portal still rejects "${toSend}".`);
+        }
+        return true;
+      };
+
+      // Financier Name is REQUIRED on the portal — a miss here fails the quote
+      // later with an unhelpful validation error, so say so plainly now.
+      const nameFilled = await fillFinancierText(
+        "Financier Name",
+        "mcy_text_FinancierName_01",
+        data.financierName || "Financier Name",
+        "Financier Name"
+      );
+      if (!nameFilled) {
+        console.log("⚠️ Financier Name is required by the portal but could not be filled.");
       }
 
-      // Fill Financier Address
-      try {
-        console.log("Filling Financier Address...");
-        const finAddress = data.financierAddress || "Financier Address";
-        await safeType(driver, By.name("mcy_text_FinancierAddress_01"), finAddress, 10000);
-      } catch (e) {
-        console.log("Could not fill Financier Address by name attribute, trying label-based locator...");
-        try {
-          const financierAddressInput = By.xpath("//mat-label[contains(., 'Financier Address')]/ancestor::mat-form-field//input");
-          const finAddress = data.financierAddress || "Financier Address";
-          await safeType(driver, financierAddressInput, finAddress, 10000);
-        } catch (fallbackError) {
-          console.log("All strategies failed for Financier Address:", fallbackError.message);
-        }
-      }
+      await fillFinancierText(
+        "Financier Address",
+        "mcy_text_FinancierAddress_01",
+        data.financierAddress || "Financier Address",
+        "Financier Address"
+      );
       // Check declaration checkbox
       try {
         console.log("Checking financier declaration checkbox...");
@@ -4560,7 +4712,49 @@ async function fillNationalForm(
       };
     }
 
-    return { success: true };
+    // ── Brisk CPA/RSA certificate ────────────────────────────────────────
+    // Only when PA Cover is on AND provided by Brisk; "Company" means the
+    // insurer handles it in its own portal.
+    //
+    // Non-fatal by design: the policy has already been submitted, so a Brisk
+    // failure must not fail the job. It is reported as a warning instead —
+    // server.js turns briskCertificateError into completed_with_errors.
+    const briskDecision = shouldCreateBriskCertificate(data);
+    let briskCertificateError = null;
+
+    if (!briskDecision.create) {
+      console.log(
+        `[${jobId}] ⏭️  Skipping Brisk Certificate creation — ${briskDecision.reason}.`
+      );
+    } else {
+      try {
+        console.log(`[${jobId}] 📝 Creating Brisk Certificate (PA Cover through Brisk)...`);
+        const briskResult = await createBriskCertificate(data);
+        console.log(`[${jobId}] ✅ Brisk Certificate created:`, briskResult?.certificateNo || "");
+
+        if (briskResult?.downloadUrl) {
+          const briskPdfPath = await downloadBriskPDF(
+            briskResult.downloadUrl,
+            briskResult.policyId
+          );
+          await uploadBriskCertificate(
+            briskPdfPath,
+            briskResult.certificateNo,
+            data,
+            jobId
+          );
+        } else {
+          console.log(`[${jobId}] ⚠️ Brisk returned no downloadUrl — nothing to store.`);
+        }
+      } catch (briskError) {
+        briskCertificateError = briskError.message;
+        console.error(
+          `[${jobId}] ❌ Brisk Certificate creation failed: ${briskError.message}`
+        );
+      }
+    }
+
+    return { success: true, briskCertificateError };
   } catch (error) {
     hadError = true;
     console.error(`[${jobId}] [nationalForm] Error:`, error.message || error);
