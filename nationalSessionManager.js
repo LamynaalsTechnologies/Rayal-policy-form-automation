@@ -15,6 +15,10 @@ const {
 } = require("./nationalBrowserConfig");
 const fs = require("fs");
 const path = require("path");
+const {
+  shouldKeepBrowserOpen,
+  logRetainedBrowser,
+} = require("./debugRetention");
 
 // ============================================
 // STATE MANAGEMENT
@@ -158,13 +162,26 @@ async function createNationalJobBrowser(jobId, policyId = null) {
 /**
  * Cleanup National job browser and profile
  */
-async function cleanupNationalJobBrowser(jobBrowserInfo) {
+async function cleanupNationalJobBrowser(jobBrowserInfo, { hadError = false } = {}) {
   try {
     if (!jobBrowserInfo) {
       return;
     }
 
     const { driver, profileInfo } = jobBrowserInfo;
+
+    // Testing aid: leave a FAILED job's browser open so the page can be looked
+    // at. The profile is kept too — deleting it out from under a live Chrome
+    // would break the very window we are trying to preserve.
+    if (shouldKeepBrowserOpen(hadError)) {
+      logRetainedBrowser(
+        `National Job ${jobBrowserInfo.jobId}`,
+        profileInfo && profileInfo.fullPath
+          ? path.dirname(profileInfo.fullPath)
+          : null
+      );
+      return;
+    }
 
     // Close browser
     if (driver) {

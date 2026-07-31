@@ -28,6 +28,10 @@ const { ProviderCredential } = require("./models");
 const mongoose = require("mongoose");
 const fs = require("fs");
 const path = require("path");
+const {
+  shouldKeepBrowserOpen,
+  logRetainedBrowser,
+} = require("./debugRetention");
 
 // ============================================
 // OPTIMIZATIONS
@@ -996,9 +1000,21 @@ async function createJobBrowser(jobId, clientId = null) {
 /**
  * Cleanup job browser and profile
  */
-async function cleanupJobBrowser(jobBrowserInfo) {
+async function cleanupJobBrowser(jobBrowserInfo, { hadError = false } = {}) {
   try {
     const jobId = jobBrowserInfo.jobId;
+
+    // Testing aid: leave a FAILED job's browser open so the page can be looked
+    // at. The profile is kept too — deleting it out from under a live Chrome
+    // would break the very window we are trying to preserve.
+    if (shouldKeepBrowserOpen(hadError)) {
+      logRetainedBrowser(
+        `Job ${jobId}`,
+        jobBrowserInfo.profileInfo && jobBrowserInfo.profileInfo.userDataDir
+      );
+      return;
+    }
+
     console.log(`\n🧹 [Job ${jobId}] Cleaning up...`);
 
     // Close browser. Isolated try/catch on purpose: if quit() throws (browser

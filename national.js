@@ -176,6 +176,74 @@ async function isBlockingDialogOpen(driver) {
 }
 
 /**
+ * Dismiss the portal's generic alert/confirmation popup, if one is open.
+ *
+ * The portal throws these up after various actions (ticking the non-GIC
+ * checkbox, choosing "No" for PA, ...). Its close button carries no useful
+ * marker of its own — the `mat-mdc-button-touch-target` span sits inside EVERY
+ * Angular Material button — so the button is located by the portal's own name
+ * attribute first, then by its "Close"/"OK" text, and only as a last resort by
+ * taking whatever button lives inside the visible dialog container.
+ *
+ * Returns true when a dialog was found and closed. A missing dialog is not an
+ * error: these popups are conditional, so `false` just means there was nothing
+ * to dismiss.
+ */
+async function dismissPortalDialog(driver, jobId = "National", label = "popup", waitMs = 6000) {
+  const deadline = Date.now() + waitMs;
+  let seen = false;
+
+  while (Date.now() < deadline) {
+    if (await isBlockingDialogOpen(driver)) {
+      seen = true;
+      break;
+    }
+    await driver.sleep(150);
+  }
+
+  if (!seen) {
+    console.log(`[${jobId}] No ${label} appeared — continuing.`);
+    return false;
+  }
+
+  console.log(`[${jobId}] ${label} detected, closing it...`);
+
+  const closeLocators = [
+    By.xpath("//button[@name='alert_btn_data_01' and .//span[contains(text(), 'Close')]]"),
+    By.xpath("//button[@name='alert_btn_data_01']"),
+    By.name("confirm_btn_yes_01"),
+    By.xpath("//button[.//span[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'CLOSE')]]"),
+    By.xpath("//button[.//span[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'OK')]]"),
+    // Last resort: any button inside the dialog itself.
+    By.css("mat-dialog-container button, .mat-mdc-dialog-container button, [role='dialog'] button"),
+  ];
+
+  for (const locator of closeLocators) {
+    try {
+      const found = await firstPresentLocator(driver, [locator], 1200);
+      if (!found) continue;
+      await driver.executeScript("arguments[0].click();", found.element);
+
+      // Confirm it actually went away before claiming success — clicking the
+      // wrong button in a dialog can leave it open.
+      const gone = Date.now() + 4000;
+      while (Date.now() < gone) {
+        if (!(await isBlockingDialogOpen(driver))) {
+          console.log(`[${jobId}] ✅ Closed the ${label}.`);
+          return true;
+        }
+        await driver.sleep(120);
+      }
+    } catch (clickError) {
+      // try the next locator
+    }
+  }
+
+  console.log(`[${jobId}] ⚠️ Could not close the ${label} — it may block the next step.`);
+  return false;
+}
+
+/**
  * True when a loader/spinner is actually visible on screen. One round-trip.
  */
 async function isPortalBusy(driver) {
@@ -1233,6 +1301,9 @@ async function fillNationalForm(
   const formData = data;
   const jobId = data._jobIdentifier || `national_${Date.now()}`;
   let jobBrowser = null;
+  // Set in the catch below so the finally knows whether this job failed —
+  // KEEP_BROWSER_OPEN_ON_ERROR only retains browsers for failed jobs.
+  let hadError = false;
   let driver = null;
   let postSubmissionFailed = false;
   let postSubmissionError = null;
@@ -1775,6 +1846,132 @@ async function fillNationalForm(
 
     await waitForPortalIdle(driver, 40000, 900);
 
+    // ── "Not able to Find the required Model & Variant" ──────────────────────
+    // Set on the Make & Model master and carried through the job payload. When
+    // on, the portal's own non-GIC flow is used: tick the checkbox here, BEFORE
+    // the RTO/make/model/variant fields, because ticking it disables the IDV
+    // input and swaps in a Manufacturer's Selling Price field that the portal
+    // derives the IDV from. RTO/make/model/variant are then filled exactly as
+    // usual; only the IDV step below changes.
+    const isModelNotFound =
+      data.modelNotFound === true || data.modelNotFound === "true";
+
+    console.log(
+      `[${data._jobId || "National"}] Model not found flag: ${isModelNotFound} (raw: ${JSON.stringify(data?.modelNotFound)})`
+    );
+
+    if (isModelNotFound) {
+      console.log(
+        `[${data._jobId || "National"}] Model not found on the portal — enabling the non-GIC flow...`
+      );
+      try {
+        // MUST target the native <input>, never By.name("isNonGICSelected"):
+        // the <mat-checkbox> HOST carries the same name attribute and comes
+        // first in document order, so By.name returns the wrapper. Reading
+        // `.checked` on that returns undefined, which made every verify fail.
+        // An `input` tag selector is unambiguous — mat-checkbox is not an input.
+        const found = await firstPresentLocator(
+          driver,
+          [
+            By.css("input.mdc-checkbox__native-control[name='isNonGICSelected']"),
+            By.css("input[type='checkbox'][name='isNonGICSelected']"),
+            By.css("input[name='isNonGICSelected']"),
+          ],
+          15000,
+          // The native input inside a mat-checkbox is visually hidden, so
+          // isDisplayed() is false even when the control is on screen.
+          { requireVisible: false }
+        );
+
+        if (!found) {
+          throw new Error(
+            "Could not locate the 'Not able to Find the required Model & Variant' checkbox"
+          );
+        }
+
+        const alreadyChecked = await driver.executeScript(
+          "return !!arguments[0].checked;",
+          found.element
+        );
+
+        if (alreadyChecked) {
+          // Nothing was clicked, so no popup is raised — skip the dismissal
+          // wait entirely rather than burning its timeout for nothing.
+          console.log(
+            `[${data._jobId || "National"}] Non-GIC checkbox already ticked.`
+          );
+        } else {
+          // Click via JS: the native input is hidden behind the mat-checkbox
+          // ripple, so a real click lands on the overlay instead.
+          await driver.executeScript("arguments[0].click();", found.element);
+          await driver.sleep(600);
+
+          // The tick raises a confirmation popup. Dismiss it BEFORE re-reading
+          // the checkbox: while it is open every click lands on its backdrop,
+          // so the retry below could not work either.
+          await dismissPortalDialog(
+            driver,
+            data._jobId || "National",
+            "non-GIC confirmation popup"
+          );
+
+          let nowChecked = await driver.executeScript(
+            "return !!arguments[0].checked;",
+            found.element
+          );
+
+          if (!nowChecked) {
+            // Fall back to the <label for="..."> that MDC renders — clicking it
+            // is what a real user does. Deliberately NOT the <mat-checkbox>
+            // host: if the first click did land, clicking the host would toggle
+            // the box straight back off.
+            const label = await driver
+              .executeScript(
+                "const el = arguments[0];" +
+                "return el.id ? document.querySelector(`label[for='${el.id}']`) : null;",
+                found.element
+              )
+              .catch(() => null);
+
+            if (label) {
+              await driver.executeScript("arguments[0].click();", label);
+              await driver.sleep(600);
+              await dismissPortalDialog(
+                driver,
+                data._jobId || "National",
+                "non-GIC confirmation popup"
+              );
+              nowChecked = await driver.executeScript(
+                "return !!arguments[0].checked;",
+                found.element
+              );
+            }
+          }
+
+          if (!nowChecked) {
+            throw new Error(
+              "The non-GIC checkbox did not stay ticked after clicking it"
+            );
+          }
+          console.log(
+            `[${data._jobId || "National"}] ✅ Ticked the non-GIC checkbox.`
+          );
+        }
+
+        // Ticking it re-renders the vehicle block (IDV out, selling price in).
+        await waitForPortalIdle(driver, 40000, 900);
+      } catch (nonGicError) {
+        // Do not continue silently: without the checkbox the IDV field stays
+        // enabled and required, and the run would fail later with a confusing
+        // validation error instead of this one.
+        console.log(
+          `[${data._jobId || "National"}] ❌ Non-GIC checkbox step failed: ${nonGicError.message}`
+        );
+        await captureErrorScreenshot(driver, nonGicError, data, "non_gic_checkbox");
+        throw nonGicError;
+      }
+    }
+
     // Fill RTO location (autocomplete field)
     console.log("Filling RTO location...");
     const rtoLocationField = By.name("mcy_dropdown_newRtoLocation_01");
@@ -1851,24 +2048,96 @@ async function fillNationalForm(
 
     await driver.sleep(1000);
 
-    // Fill IDV value from data (if provided)
-    console.log("Filling IDV value from data...");
-    try {
-      const idvField = By.name("pc_text_idv_01");
-      const idvValue = data.idv || data.idvValue || data.insuredDeclaredValue;
+    if (isModelNotFound) {
+      // The non-GIC checkbox disabled the IDV input — the portal computes the
+      // IDV itself from the Manufacturer's Selling Price. Fill that instead and
+      // skip IDV entirely.
+      console.log(
+        `[${data._jobId || "National"}] Filling Manufacturer's Selling Price (IDV is portal-derived)...`
+      );
+      try {
+        const sellingPrice =
+          data.manufacturerSellingPrice || data.manufacturerSellingprice;
 
-      if (idvValue) {
-        await safeType(driver, idvField, String(idvValue), 10000);
-        console.log(`✅ Filled IDV value: ${idvValue}`);
+        if (!sellingPrice) {
+          throw new Error(
+            "modelNotFound is set but no manufacturerSellingPrice was supplied"
+          );
+        }
+
+        // `pc_text_msp_01` is the portal's own name for this input. It only
+        // exists once the non-GIC checkbox is ticked, hence the generous
+        // timeout — the block re-renders after the tick. The label-based
+        // fallback is there in case the portal renames the field.
+        const found = await firstPresentLocator(
+          driver,
+          [
+            By.name("pc_text_msp_01"),
+            By.css("input[name='pc_text_msp_01']"),
+            By.xpath(
+              "//*[contains(normalize-space(.), \"Manufacturer's Selling Price\")]/following::input[not(@type='hidden')][1]"
+            ),
+          ],
+          20000
+        );
+
+        if (!found) {
+          throw new Error(
+            "Could not locate the Manufacturer's Selling Price input (pc_text_msp_01)"
+          );
+        }
+
+        await driver.wait(until.elementIsEnabled(found.element), 10000);
+        await driver.executeScript(
+          "arguments[0].scrollIntoView({block: 'center'});",
+          found.element
+        );
+        await found.element.clear().catch(() => { });
+        await found.element.sendKeys(String(sellingPrice));
+        // Angular only commits the model on blur for this field; without it the
+        // premium is calculated against an empty MSP.
+        await driver.executeScript(
+          "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));" +
+          "arguments[0].dispatchEvent(new Event('blur', {bubbles:true}));",
+          found.element
+        );
+
+        console.log(
+          `[${data._jobId || "National"}] ✅ Filled Manufacturer's Selling Price: ${sellingPrice}`
+        );
         await driver.sleep(1000); // Wait for potential error validation
-        await checkForValidationErrors(driver, data, "idv_filling");
+        await checkForValidationErrors(driver, data, "selling_price_filling");
         await driver.sleep(500);
-      } else {
-        console.log("No IDV value provided in data, skipping...");
+      } catch (e) {
+        if (e.message.includes("Validation Error")) throw e;
+        console.log(
+          `[${data._jobId || "National"}] ❌ Could not fill Manufacturer's Selling Price: ${e.message}`
+        );
+        await captureErrorScreenshot(driver, e, data, "selling_price_filling");
+        // This is the ONLY source of the IDV in this mode — carrying on would
+        // submit a quote with no vehicle value at all.
+        throw e;
       }
-    } catch (e) {
-      if (e.message.includes("Validation Error")) throw e;
-      console.log("Could not fill IDV field:", e.message);
+    } else {
+      // Fill IDV value from data (if provided)
+      console.log("Filling IDV value from data...");
+      try {
+        const idvField = By.name("pc_text_idv_01");
+        const idvValue = data.idv || data.idvValue || data.insuredDeclaredValue;
+
+        if (idvValue) {
+          await safeType(driver, idvField, String(idvValue), 10000);
+          console.log(`✅ Filled IDV value: ${idvValue}`);
+          await driver.sleep(1000); // Wait for potential error validation
+          await checkForValidationErrors(driver, data, "idv_filling");
+          await driver.sleep(500);
+        } else {
+          console.log("No IDV value provided in data, skipping...");
+        }
+      } catch (e) {
+        if (e.message.includes("Validation Error")) throw e;
+        console.log("Could not fill IDV field:", e.message);
+      }
     }
 
     // Compulsory PA for Owner Driver (Initial Setup - Quick Quote Stage)
@@ -2016,9 +2285,14 @@ async function fillNationalForm(
         return value && value.trim() !== '';
       }, 15000);
 
-      // Get the IDV value
+      // Get the IDV value. In non-GIC (model-not-found) mode this is the ONLY
+      // place we learn the IDV — the field was disabled and the portal computed
+      // it from the Manufacturer's Selling Price. Disabled inputs still expose
+      // `value`, so this read works in both modes.
       idvValue = await idvInput.getAttribute('value');
-      console.log(`✅ [${jobId}] IDV value extracted: ${idvValue}`);
+      console.log(
+        `✅ [${jobId}] IDV value extracted: ${idvValue}${isModelNotFound ? " (derived by the portal from the selling price)" : ""}`
+      );
 
       // Store IDV in data object for later use
       data.idv = idvValue;
@@ -4264,6 +4538,9 @@ async function fillNationalForm(
 
     // Return success if post-calculation failed
     if (postCalculationFailed) {
+      // Returns rather than throwing, so the catch never runs — mark the
+      // failure here or KEEP_BROWSER_OPEN_ON_ERROR would miss it.
+      hadError = true;
       return {
         success: false,
         error: postCalculationError || "Post-calculation stage failed",
@@ -4274,6 +4551,7 @@ async function fillNationalForm(
 
     // Return failure if post-submission failed (even if modal submission succeeded)
     if (postSubmissionFailed) {
+      hadError = true;
       return {
         success: false,
         error: postSubmissionError || "Post-submission stage failed",
@@ -4284,6 +4562,7 @@ async function fillNationalForm(
 
     return { success: true };
   } catch (error) {
+    hadError = true;
     console.error(`[${jobId}] [nationalForm] Error:`, error.message || error);
 
     const isValidationError =
@@ -4330,7 +4609,7 @@ async function fillNationalForm(
     // Cleanup: Always close browser and delete cloned profile
     if (jobBrowser) {
       console.log(`[${jobId}] Cleaning up browser and session data...`);
-      await cleanupNationalJobBrowser(jobBrowser);
+      await cleanupNationalJobBrowser(jobBrowser, { hadError });
     }
   }
 }

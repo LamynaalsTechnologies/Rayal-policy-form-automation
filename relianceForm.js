@@ -1558,6 +1558,9 @@ async function fillRelianceForm(
 ) {
   const jobId = `${data.firstName || "Job"}_${Date.now()}`;
   let jobBrowser = null;
+  // Was only ever ASSIGNED (an implicit global), never declared. Declaring it
+  // here also lets the finally below decide whether to retain the browser.
+  let hadError = false;
   let driver = null;
   let postSubmissionFailed = false;
   let postSubmissionError = null;
@@ -5290,6 +5293,10 @@ async function fillRelianceForm(
 
     // If any post-submission/calculation failure occurred, return it
     if (postCalculationFailed || postSubmissionFailed) {
+      // This path RETURNS rather than throwing, so the catch below never runs —
+      // without this the browser would be closed on exactly the failures that
+      // are most worth inspecting.
+      hadError = true;
       const finalResult = {
         success: false,
         error: postCalculationError || postSubmissionError || "Process failed",
@@ -5502,7 +5509,7 @@ async function fillRelianceForm(
   } finally {
     // Cleanup: Always close browser and delete cloned profile
     if (jobBrowser) {
-      await cleanupJobBrowser(jobBrowser);
+      await cleanupJobBrowser(jobBrowser, { hadError });
     }
   }
 }

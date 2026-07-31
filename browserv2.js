@@ -300,6 +300,59 @@ async function saveCookies(driver) {
 // ============================================
 
 /**
+ * Point Chrome at a real binary. On a server the browser is often installed
+ * somewhere Selenium's default lookup does not find (or only chromium is
+ * present), which also surfaces as "Chrome instance exited". Mirrors the
+ * detection nationalBrowserConfig.js already does.
+ */
+function applyChromeBinaryPath(options) {
+  const candidates = [
+    process.env.CHROME_PATH,
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", // macOS
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+  ].filter(Boolean);
+
+  for (const bin of candidates) {
+    try {
+      if (fs.existsSync(bin)) {
+        options.setChromeBinaryPath(bin);
+        return bin;
+      }
+    } catch (e) { /* try the next candidate */ }
+  }
+  return null;
+}
+
+/**
+ * Should Chrome run headless?
+ *
+ * A server has no X display, so a non-headless Chrome exits immediately with
+ * "session not created: Chrome instance exited". HEADLESS=false is useful
+ * locally (to watch the run) but must not be honoured where there is no
+ * display to draw on — otherwise every job fails on the server while working
+ * on the developer's machine.
+ */
+function shouldRunHeadless() {
+  if (process.env.HEADLESS === "true") return true;
+
+  const hasDisplay =
+    process.platform !== "linux" || !!process.env.DISPLAY || !!process.env.WAYLAND_DISPLAY;
+
+  if (!hasDisplay) {
+    if (process.env.HEADLESS === "false") {
+      console.log(
+        "[Browser] HEADLESS=false but no display detected — forcing headless so Chrome can start."
+      );
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
  * Creates Chrome options for the master profile
  * @returns {chrome.Options} Configured Chrome options
  */
@@ -307,7 +360,7 @@ function createMasterProfileOptions() {
   const options = new chrome.Options();
   // Always run master in headless mode to avoid confusing the user with multiple windows
   // unless explicitly requested otherwise via environment variable
-  if (process.env.MASTER_HEADLESS !== "false") {
+  if (process.env.MASTER_HEADLESS !== "false" || shouldRunHeadless()) {
     options.addArguments("--headless=new");
   }
 
@@ -319,9 +372,24 @@ function createMasterProfileOptions() {
   options.addArguments("--disable-backgrounding-occluded-windows");
   options.addArguments("--disable-renderer-backgrounding");
 
+  // Server-safety flags. Without these Chrome exits immediately on a Linux
+  // server ("session not created: Chrome instance exited"):
+  //   --no-sandbox            : the sandbox cannot start as root (pm2/docker)
+  //   --disable-dev-shm-usage : /dev/shm is typically only 64MB on a server,
+  //                             which Chrome exhausts on startup
+  // The National config (nationalBrowserConfig.js) already sets both, which is
+  // why National worked on this server while Reliance did not.
+  options.addArguments("--no-sandbox");
+  options.addArguments("--disable-dev-shm-usage");
+  options.addArguments("--disable-gpu");
+  options.addArguments("--disable-extensions");
+  options.addArguments("--window-size=1366,768");
+
   // Hide automation indicators
   options.excludeSwitches(["enable-automation"]);
   options.addArguments("--disable-blink-features=AutomationControlled");
+
+  applyChromeBinaryPath(options);
 
   return options;
 }
@@ -333,7 +401,7 @@ function createMasterProfileOptions() {
  */
 function createClonedProfileOptions(clonedProfileInfo) {
   const options = new chrome.Options();
-  if (process.env.HEADLESS === "true") {
+  if (shouldRunHeadless()) {
     options.addArguments("--headless=new");
   }
   options.addArguments(`user-data-dir=${clonedProfileInfo.userDataDir}`);
@@ -359,9 +427,24 @@ function createClonedProfileOptions(clonedProfileInfo) {
     });
   }
 
+  // Server-safety flags. Without these Chrome exits immediately on a Linux
+  // server ("session not created: Chrome instance exited"):
+  //   --no-sandbox            : the sandbox cannot start as root (pm2/docker)
+  //   --disable-dev-shm-usage : /dev/shm is typically only 64MB on a server,
+  //                             which Chrome exhausts on startup
+  // The National config (nationalBrowserConfig.js) already sets both, which is
+  // why National worked on this server while Reliance did not.
+  options.addArguments("--no-sandbox");
+  options.addArguments("--disable-dev-shm-usage");
+  options.addArguments("--disable-gpu");
+  options.addArguments("--disable-extensions");
+  options.addArguments("--window-size=1366,768");
+
   // Hide automation indicators
   options.excludeSwitches(["enable-automation"]);
   options.addArguments("--disable-blink-features=AutomationControlled");
+
+  applyChromeBinaryPath(options);
 
   return options;
 }

@@ -465,6 +465,11 @@ const buildFormDataFromPolicy = async (data) => {
       RTORegion: data?.RTORegion,
       RTOCity: data?.RTOCity,
       idv: data?.idv,
+      // Model-not-found support (mirrors the backend's buildFullJobFormData).
+      modelNotFound: !!data?.modelNotFound,
+      manufacturerSellingPrice: data?.manufacturerSellingPrice,
+      idvRangeFrom: data?.idvRangeFrom,
+      idvRangeTo: data?.idvRangeTo,
       manufacturingYear: data?.manufacturingYear,
       manufacturingMonth: data?.manufacturingMonth,
       engineNumber: data?.engineNumber,
