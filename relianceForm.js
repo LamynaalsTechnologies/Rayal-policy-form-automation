@@ -5412,6 +5412,15 @@ async function fillRelianceForm(
       paCoverRaw === true ||
       ["true", "1", "yes"].includes(String(paCoverRaw).trim().toLowerCase());
 
+    // PA cover can be provided by Brisk or by the insurer itself. Only Brisk
+    // means a CPA/RSA certificate: with "Company" the insurer handles it in the
+    // portal, so calling the Brisk API would create — and charge for — a
+    // certificate nobody asked for. Other providers added later land here too
+    // and are skipped until their own flow exists.
+    const paProvider = String(data?.paCoverCompany || "").trim().toLowerCase();
+    const isBriskProvider = paProvider === "brisk";
+    const shouldCreateBrisk = isPaCoverSelected && isBriskProvider;
+
     /** Locate this job's downloaded Reliance policy PDF (own folder only). */
     const findReliancePdf = () => {
       const dir =
@@ -5436,9 +5445,12 @@ async function fillRelianceForm(
       return pdfs[0].path;
     };
 
-    if (!isPaCoverSelected) {
+    if (!shouldCreateBrisk) {
       console.log(
-        `[${jobId}] ⏭️  PA Cover not selected — skipping Brisk Certificate creation (nothing to certify).`
+        `[${jobId}] ⏭️  Skipping Brisk Certificate creation — ${!isPaCoverSelected
+          ? "PA Cover not selected (nothing to certify)"
+          : `PA Cover is through "${data?.paCoverCompany}", not Brisk`
+        }.`
       );
 
       // Still upload the customer's Reliance policy PDF; only the Brisk
@@ -5465,7 +5477,7 @@ async function fillRelianceForm(
     }
 
     try {
-      console.log(`📝 Creating Brisk Certificate (PA Cover selected)...`);
+      console.log(`📝 Creating Brisk Certificate (PA Cover through Brisk)...`);
       const briskResult = await createBriskCertificate(data);
       console.log("✅ Brisk Certificate created successfully:", briskResult);
 
