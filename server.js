@@ -50,6 +50,7 @@ const cleanupOldData = async () => {
     'reliance_captcha',
     'temp_uploads',
     'cloned_profiles_national',
+    'cloned_profiles_kshema',
     // Litter left by the (now removed) profile pool's failed init — 25+ empty
     // dirs were found here. Absolute path, cleaned like the rest.
     '/dev/shm/chrome-profiles'
@@ -125,8 +126,12 @@ const {
   reLoginIfNeeded,
 } = require("./sessionManager");
 const { captureAndLogError } = require("./errorLogger");
-const { fillRelianceForm } = require("./relianceForm");
-const { fillNationalForm } = require("./national");
+// Company automation steps live in fullPolicycompany/. Their session and
+// browser managers stay at the root alongside the shared infrastructure.
+const { fillRelianceForm } = require("./fullPolicycompany/relianceForm");
+const { fillNationalForm } = require("./fullPolicycompany/national");
+const { fillKshemaForm } = require("./fullPolicycompany/kshemaForm");
+const { isAutomationStop, stoppedResult } = require("./automationStopper");
 const { extractCaptchaText } = require("./Captcha");
 // National uses fresh login for each job, no master session needed
 const express = require("express");
@@ -216,9 +221,12 @@ const companyOfJob = (job) => {
   return String(raw).trim().toLowerCase() || "reliance";
 };
 
-/** Pretty label for logs: "national" -> "National" */
-const companyLabel = (company) =>
-  String(company).charAt(0).toUpperCase() + String(company).slice(1);
+/** Pretty label for logs and operator-facing messages: "national" -> "National" */
+const COMPANY_LABELS = { kshema: "KSHEMA" }; // brands that are not just Capitalised
+const companyLabel = (company) => {
+  const key = String(company).trim().toLowerCase();
+  return COMPANY_LABELS[key] || key.charAt(0).toUpperCase() + key.slice(1);
+};
 
 // Companies explicitly configured in .env — for the startup banner only. The
 // queue itself discovers companies from the jobs it sees, so a new company
@@ -270,7 +278,14 @@ const QUEUE_POLL_INTERVAL_MS = parsePositiveInt(
 // than the cutoff is provably not in use. That keeps it safe with any number of
 // companies running in parallel.
 // ---------------------------------------------------------------------------
-const PROFILE_DIRS = ["cloned_profiles", "cloned_profiles_national"];
+const PROFILE_DIRS = [
+  "cloned_profiles",
+  "cloned_profiles_national",
+  // Swept like the others now that the KSHEMA flow closes its own browser.
+  // It was held back while that flow deliberately left windows open — the
+  // age-based sweep would have deleted the profile out from under one.
+  "cloned_profiles_kshema",
+];
 // 1 hour. Deliberately far beyond JOB_TIMEOUT (5 min): when a job times out,
 // the Promise.race only rejects the outer promise — the automation keeps
 // running detached with its browser open. A tighter cutoff could delete a
@@ -987,7 +1002,7 @@ const processRelianceQueue = async () => {
           // companyName is a runPolicyJob local — referencing it here threw
           // ReferenceError inside the error handler itself, so the job was
           // never reset and sat in "processing" until the zombie reclaim.
-          const beautifiedMsg = beautifyError(unexpectedError, companyOfJob(job));
+          const beautifiedMsg = beautifyError(unexpectedError, companyLabel(companyOfJob(job)));
           jobQueueCollection
             .updateOne(
               { _id: job._id },
@@ -1133,7 +1148,7 @@ const runPolicyJob = async (rawJob) => {
   const jobIdentifier = `${job.formData.firstName}_${job._id}`;
   const processingStartTime = Date.now();
   const companyName = (job.formData.Companyname || job.formData.company || "reliance").toLowerCase();
-  const queueName = companyName === "national" ? "National Queue" : "Reliance Queue";
+  const queueName = `${companyLabel(companyName)} Queue`;
 
   // Log processing start
   await logAuditEntry('JOB_PROCESSING_STARTED', {
@@ -1157,35 +1172,63 @@ const runPolicyJob = async (rawJob) => {
     // Fetch credentials from DB
     console.log(`→ [${queueName}] Fetching ${companyName} credentials from database...`);
 
+    // Resolve the portal login: THE POLICY'S OWN USER FIRST, then the client
+    // they belong to. Applies to every insurer.
+    //
+    // Both levels live in the same ProviderCredential collection — the backend's
+    // syncProviderCredentials writes each record's own _id into `clientId`,
+    // whether that record is a user or a client (RayalBrokers-backend/dao/
+    // clientDao.js). So the two lookups differ only in which id they carry.
+    //
+    // There is deliberately NO "any active credential" fallback any more. It
+    // used to silently pick the first active row for the insurer, which meant a
+    // policy could be filed through a DIFFERENT client's portal login — issued
+    // under the wrong IMD code, with nothing in the logs to say so. Failing
+    // loudly is the correct outcome: the message below tells the operator
+    // exactly what to add and where, and the job retries on its own once they
+    // have added it.
+    const credentialSources = [
+      { id: job.formData.userId, label: "user" },
+      { id: job.formData.clientId, label: "client" },
+    ];
+
     let creds = null;
-    // Check if job has clientId and try to fetch specific credentials
-    if (job.formData.clientId) {
-      console.log(`→ [${queueName}] Looking for credentials with clientId: ${job.formData.clientId}`);
+    let credsSource = null;
+    for (const { id, label } of credentialSources) {
+      if (!id) continue;
+      console.log(`→ [${queueName}] Looking for ${companyName} credentials on ${label} ${id}`);
       creds = await ProviderCredential.findOne({
         provider: companyName,
-        clientId: job.formData.clientId,
+        clientId: id,
         isActive: true,
       });
-
       if (creds) {
-        console.log(`✓ [${queueName}] Found specific credentials for user: ${creds.username}`);
-      } else {
-        console.log(`⚠️ [${queueName}] No specific credentials found for clientId: ${job.formData.clientId}. Falling back to default.`);
+        credsSource = label;
+        console.log(`✓ [${queueName}] Using the ${label}'s ${companyName} login: ${creds.username}`);
+        break;
       }
-    }
-
-    // Fallback to default credentials if not found
-    if (!creds) {
-      creds = await ProviderCredential.findOne({
-        provider: companyName,
-        isActive: true,
-      });
+      console.log(`   ✗ [${queueName}] none on this ${label}`);
     }
 
     if (!creds) {
-      console.error(`❌ [${queueName}] No active ${companyName} credentials found in DB`);
-      throw new Error(`[E303] No active credentials found for ${companyName}`);
+      const label = companyLabel(companyName);
+      console.error(`❌ [${queueName}] No active ${companyName} credentials on the user or the client`);
+      // Phrased for the operator who sees it in the policy's error log, not for
+      // a developer — it has to say what to do next.
+      throw new Error(
+        `[E303] No active ${label} portal credentials found for this policy's ` +
+        `user or client. Add the ${label} login on the User page (edit the ` +
+        `user → Credentials) or in Profile → Account & Policy Settings, and ` +
+        `this policy will retry automatically.`
+      );
     }
+
+    // Recorded on the job so a support question ("which login did this policy
+    // actually go through?") is answerable from the job document alone.
+    await jobQueueCollection.updateOne(
+      { _id: job._id },
+      { $set: { credentialSource: credsSource, credentialUsername: creds.username } }
+    );
 
     // Route to appropriate form filling function based on Companyname
     let fillFormPromise;
@@ -1201,6 +1244,21 @@ const runPolicyJob = async (rawJob) => {
         _jobIdentifier: jobIdentifier,
         _attemptNumber: job.attempts + 1, // Current attempt number
         _jobQueueCollection: jobQueueCollection, // Pass collection for logging
+      });
+    } else if (companyName === "kshema") {
+      // KSHEMA. Phase 1: opens the portal login page, fills the credentials in
+      // and stops there without submitting — so it reports failure on purpose
+      // (see fullPolicycompany/kshemaForm.js). loginUrl is passed through
+      // because KSHEMA credentials store their own portal URL.
+      fillFormPromise = fillKshemaForm({
+        ...job.formData,
+        username: creds.username,
+        password: creds.password,
+        loginUrl: creds.loginUrl,
+        _jobId: job._id,
+        _jobIdentifier: jobIdentifier,
+        _attemptNumber: job.attempts + 1,
+        _jobQueueCollection: jobQueueCollection,
       });
     } else {
       // Reliance form (default)
@@ -1284,12 +1342,12 @@ const runPolicyJob = async (rawJob) => {
 
       console.log(`\n${'═'.repeat(70)}`);
       if (completionWarnings.length) {
-        console.log(`[Reliance Queue] ⚠️ COMPLETED WITH ERRORS for ${job.formData.firstName} (ID: ${job._id})`);
-        completionWarnings.forEach((w) => console.log(`[Reliance Queue]    ⚠️ ${w}`));
+        console.log(`${queueName} ⚠️ COMPLETED WITH ERRORS for ${job.formData.firstName} (ID: ${job._id})`);
+        completionWarnings.forEach((w) => console.log(`${queueName}    ⚠️ ${w}`));
       } else {
-        console.log(`[Reliance Queue] ✅ SUCCESS for ${job.formData.firstName} (ID: ${job._id})`);
+        console.log(`${queueName} ✅ SUCCESS for ${job.formData.firstName} (ID: ${job._id})`);
       }
-      console.log(`[Reliance Queue] ⏱️  Processing time: ${(processingTimeMs / 1000).toFixed(2)}s`);
+      console.log(`${queueName} ⏱️  Processing time: ${(processingTimeMs / 1000).toFixed(2)}s`);
       console.log(`${'═'.repeat(70)}\n`);
 
       // Log audit entry for success
@@ -1312,16 +1370,34 @@ const runPolicyJob = async (rawJob) => {
         result?.stage === "post-submission" ||
         result?.stage === "post-calculation";
 
+      // A failure the form module says retrying cannot fix — a portal that
+      // REJECTED the login being the case that matters. Repeating the same
+      // wrong password four more times cannot succeed, and every attempt
+      // counts against the portal's lockout limit, so a retry actively makes
+      // things worse: the operator fixes the credential and finds the account
+      // locked as well. Any company can set `retryable: false` on its result.
+      const isTerminalFailure = result?.retryable === false;
+
+      // The automation reached the end of what has been built for this insurer
+      // rather than hitting a problem. Still not a completed policy — nothing
+      // was submitted — but the red failure banner and the CRITICAL audit
+      // entry are both wrong for it.
+      const isInProgress = result?.inProgress === true;
+
       // Use structured error codes
-      const errorCode = isPostSubmissionFailure ? 'E401' : 'E300';
+      const errorCode = isPostSubmissionFailure
+        ? 'E401'
+        : isInProgress ? 'E100' : 'E300';
       const failureType = isPostSubmissionFailure
         ? "PostSubmissionError"
-        : "LoginFormError";
-      const severity = isPostSubmissionFailure ? 'critical' : 'warning';
+        : isInProgress ? "AutomationIncomplete" : "LoginFormError";
+      const severity = isPostSubmissionFailure
+        ? 'critical'
+        : isInProgress ? 'info' : 'warning';
 
       // Use proper extracted message if available, otherwise fallback to Selenium error
       const rawError = result?.onPageError || result?.error || "Unknown error";
-      const finalErrorMessage = beautifyError(rawError, companyName);
+      const finalErrorMessage = beautifyError(rawError, companyLabel(companyName));
 
       // Create enhanced error log with structured codes
       const errorLog = {
@@ -1335,7 +1411,7 @@ const runPolicyJob = async (rawJob) => {
         screenshotUrl: result?.screenshotUrl || null,
         screenshotKey: result?.screenshotKey || null,
         processingTimeMs: processingTimeMs,
-        retryable: !isPostSubmissionFailure
+        retryable: !isPostSubmissionFailure && !isTerminalFailure
       };
 
       // Add error to errorLogs array
@@ -1366,8 +1442,51 @@ const runPolicyJob = async (rawJob) => {
 
       const updatedJob = await jobQueueCollection.findOne({ _id: job._id });
 
+      // 🔴 Terminal login failures (e.g. the portal rejected the credentials):
+      // mark failed straight away. No backoff, no further attempts.
+      if (isTerminalFailure && !isPostSubmissionFailure) {
+        await jobQueueCollection.updateOne(
+          { _id: job._id },
+          {
+            $set: {
+              status: JOB_STATUS.FAILED_LOGIN_FORM,
+              failedAt: new Date(),
+              lastError: errorLog.errorMessage,
+              lastScreenshotUrl: errorLog.screenshotUrl,
+              finalError: errorLog,
+            },
+          }
+        );
+
+        if (isInProgress) {
+          console.log(`\n${'⏸️ '.repeat(23)}`);
+          console.log(`${queueName} ⏸️  STOPPED — automation not finished yet for ${job.formData.firstName}`);
+          console.log(`${queueName} 📋 ${errorLog.errorMessage}`);
+          console.log(`${'⏸️ '.repeat(23)}\n`);
+        } else {
+          console.error(`\n${'🔴'.repeat(35)}`);
+          console.error(`${queueName} ❌ FAILED — NOT RETRYING for ${job.formData.firstName}`);
+          console.error(`${queueName} 📋 ${errorLog.errorMessage}`);
+          console.error(`${queueName} 📋 Retrying cannot fix this — the policy must be re-run once it is sorted.`);
+          if (errorLog.screenshotUrl) {
+            console.error(`${queueName} 📸 Screenshot: ${errorLog.screenshotUrl}`);
+          }
+          console.error(`${'🔴'.repeat(35)}\n`);
+        }
+
+        await logAuditEntry(isInProgress ? 'JOB_STOPPED_INCOMPLETE' : 'JOB_FAILED_TERMINAL', {
+          jobId: job._id,
+          customerName: `${job.formData.firstName} ${job.formData.lastName}`,
+          company: companyName,
+          errorCode: errorCode,
+          errorMessage: errorLog.errorMessage,
+          severity: isInProgress ? 'info' : 'CRITICAL',
+          requiresManualReview: !isInProgress,
+          processingTimeMs: processingTimeMs,
+        });
+      }
       // 🔴 Post-submission failures: Mark as failed immediately (CRITICAL - NO RETRY - money involved)
-      if (isPostSubmissionFailure) {
+      else if (isPostSubmissionFailure) {
         await jobQueueCollection.updateOne(
           { _id: job._id },
           {
@@ -1382,12 +1501,12 @@ const runPolicyJob = async (rawJob) => {
         );
 
         console.error(`\n${'🔴'.repeat(35)}`);
-        console.error(`[Reliance Queue] ❌ CRITICAL FAILURE (POST-SUBMISSION) for ${job.formData.firstName}`);
-        console.error(`[Reliance Queue] ⚠️  NO RETRY - Form already submitted, may have charges`);
-        console.error(`[Reliance Queue] 📋 Error Code: ${errorCode}`);
-        console.error(`[Reliance Queue] 📝 Error: ${errorLog.errorMessage}`);
+        console.error(`${queueName} ❌ CRITICAL FAILURE (POST-SUBMISSION) for ${job.formData.firstName}`);
+        console.error(`${queueName} ⚠️  NO RETRY - Form already submitted, may have charges`);
+        console.error(`${queueName} 📋 Error Code: ${errorCode}`);
+        console.error(`${queueName} 📝 Error: ${errorLog.errorMessage}`);
         if (errorLog.screenshotUrl) {
-          console.error(`[Reliance Queue] 📸 Screenshot: ${errorLog.screenshotUrl}`);
+          console.error(`${queueName} 📸 Screenshot: ${errorLog.screenshotUrl}`);
         }
         console.error(`${'🔴'.repeat(35)}\n`);
 
@@ -1417,12 +1536,12 @@ const runPolicyJob = async (rawJob) => {
         );
 
         console.error(`\n${'🟠'.repeat(35)}`);
-        console.error(`[Reliance Queue] ❌ FAILED PERMANENTLY (LOGIN FORM) for ${job.formData.firstName}`);
-        console.error(`[Reliance Queue] 📋 Attempts exhausted: ${updatedJob.attempts}/${updatedJob.maxAttempts}`);
-        console.error(`[Reliance Queue] 📋 Error Code: ${errorCode}`);
-        console.error(`[Reliance Queue] 📝 Last error: ${errorLog.errorMessage}`);
+        console.error(`${queueName} ❌ FAILED PERMANENTLY (LOGIN FORM) for ${job.formData.firstName}`);
+        console.error(`${queueName} 📋 Attempts exhausted: ${updatedJob.attempts}/${updatedJob.maxAttempts}`);
+        console.error(`${queueName} 📋 Error Code: ${errorCode}`);
+        console.error(`${queueName} 📝 Last error: ${errorLog.errorMessage}`);
         if (errorLog.screenshotUrl) {
-          console.error(`[Reliance Queue] 📸 Screenshot: ${errorLog.screenshotUrl}`);
+          console.error(`${queueName} 📸 Screenshot: ${errorLog.screenshotUrl}`);
         }
         console.error(`${'🟠'.repeat(35)}\n`);
 
@@ -1456,11 +1575,11 @@ const runPolicyJob = async (rawJob) => {
         setTimeout(() => void processRelianceQueue(), retryDelay + 1000);
 
         console.warn(`\n${'🟡'.repeat(35)}`);
-        console.warn(`[Reliance Queue] ⚠️ FAILED (LOGIN FORM) for ${job.formData.firstName}`);
-        console.warn(`[Reliance Queue] 🔄 Will retry in ${retryDelay / 1000}s (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`);
-        console.warn(`[Reliance Queue] 📋 Error Code: ${errorCode}`);
+        console.warn(`${queueName} ⚠️ FAILED (LOGIN FORM) for ${job.formData.firstName}`);
+        console.warn(`${queueName} 🔄 Will retry in ${retryDelay / 1000}s (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`);
+        console.warn(`${queueName} 📋 Error Code: ${errorCode}`);
         if (errorLog.screenshotUrl) {
-          console.warn(`[Reliance Queue] 📸 Screenshot: ${errorLog.screenshotUrl}`);
+          console.warn(`${queueName} 📸 Screenshot: ${errorLog.screenshotUrl}`);
         }
         console.warn(`${'🟡'.repeat(35)}\n`);
 
@@ -1478,8 +1597,55 @@ const runPolicyJob = async (rawJob) => {
   } catch (e) {
     const processingTimeMs = Date.now() - processingStartTime;
 
+    // stopper() was called somewhere in the flow. Not a failure — the run
+    // reached a deliberate stopping point — so it is recorded the same calm way
+    // a module returning { inProgress: true } is, and no red banner is printed.
+    if (isAutomationStop(e)) {
+      const stopped = stoppedResult(e);
+      console.log(`\n${'⏸️ '.repeat(23)}`);
+      console.log(`${queueName} ⏸️  STOPPED at a deliberate stopping point for ${job.formData.firstName}`);
+      console.log(`${queueName} 📋 ${stopped.error}`);
+      console.log(`${'⏸️ '.repeat(23)}\n`);
+
+      await jobQueueCollection.updateOne(
+        { _id: job._id },
+        {
+          $inc: { attempts: 1 },
+          $set: {
+            status: JOB_STATUS.FAILED_LOGIN_FORM,
+            failedAt: new Date(),
+            lastError: stopped.error,
+            lastErrorCode: "E100",
+            lastErrorTimestamp: new Date(),
+            failureType: "AutomationIncomplete",
+            processingTimeMs,
+          },
+          $push: {
+            statusHistory: {
+              from: JOB_STATUS.PROCESSING,
+              to: JOB_STATUS.FAILED_LOGIN_FORM,
+              timestamp: new Date(),
+              reason: stopped.error,
+            },
+          },
+        }
+      );
+
+      await logAuditEntry('JOB_STOPPED_INCOMPLETE', {
+        jobId: job._id,
+        customerName: `${job.formData.firstName} ${job.formData.lastName}`,
+        company: companyName,
+        errorCode: "E100",
+        errorMessage: stopped.error,
+        severity: 'info',
+        requiresManualReview: false,
+        processingTimeMs,
+      });
+      return;
+    }
+
     console.error(
-      `[Reliance Queue] ❌ EXCEPTION for ${job.formData.firstName}:`,
+      `${queueName} ❌ EXCEPTION for ${job.formData.firstName}:`,
       e.message
     );
 
@@ -1510,7 +1676,7 @@ const runPolicyJob = async (rawJob) => {
         $inc: { attempts: 1 },
         $push: { errorLogs: errorLog },
         $set: {
-          lastError: beautifyError(e, companyName),
+          lastError: beautifyError(e, companyLabel(companyName)),
           lastErrorCode: classified.code,
           lastErrorTimestamp: errorLog.timestamp,
           lastAttemptAt: new Date(),
@@ -1534,7 +1700,7 @@ const runPolicyJob = async (rawJob) => {
         }
       );
 
-      console.error(`[Reliance Queue] ❌ Failed permanently [${classified.code}] after ${updatedJob.attempts} attempts`);
+      console.error(`${queueName} ❌ Failed permanently [${classified.code}] after ${updatedJob.attempts} attempts`);
 
       // Log audit entry
       await logAuditEntry('JOB_FAILED_EXCEPTION', {
@@ -1564,7 +1730,7 @@ const runPolicyJob = async (rawJob) => {
       setTimeout(() => void processRelianceQueue(), retryDelay + 1000);
 
       console.warn(
-        `[Reliance Queue] ⚠️ Will retry [${classified.code}] in ${retryDelay / 1000}s (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
+        `${queueName} ⚠️ Will retry [${classified.code}] in ${retryDelay / 1000}s (attempt ${updatedJob.attempts}/${updatedJob.maxAttempts})`
       );
 
       // Log audit entry

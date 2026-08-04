@@ -18,7 +18,21 @@ const isTruthy = (value) =>
 const KEEP_BROWSER_OPEN_ON_ERROR = isTruthy(
   process.env.KEEP_BROWSER_OPEN_ON_ERROR
 );
-const IS_HEADLESS = isTruthy(process.env.HEADLESS);
+/**
+ * Headless includes the case nobody set the flag for.
+ *
+ * On Linux with no display — a deployed server, a container, an SSH session —
+ * Chrome runs headless whether or not HEADLESS says so; every company's browser
+ * config forces it, because otherwise Chrome cannot start at all. Reading only
+ * the env var missed that, so on a real server KEEP_BROWSER_OPEN_ON_ERROR held
+ * on to browsers that had no window to show anyone: a leaked Chrome process and
+ * a leaked profile directory per failed job.
+ */
+const HAS_DISPLAY =
+  process.platform !== "linux" ||
+  !!process.env.DISPLAY ||
+  !!process.env.WAYLAND_DISPLAY;
+const IS_HEADLESS = isTruthy(process.env.HEADLESS) || !HAS_DISPLAY;
 
 let warnedAboutHeadless = false;
 
@@ -37,9 +51,9 @@ function shouldKeepBrowserOpen(hadError) {
     if (!warnedAboutHeadless) {
       warnedAboutHeadless = true;
       console.warn(
-        "⚠️  KEEP_BROWSER_OPEN_ON_ERROR is set but HEADLESS is also on — there " +
-        "is no window to inspect, so browsers will still be closed. Set " +
-        "HEADLESS=false to use this."
+        "⚠️  KEEP_BROWSER_OPEN_ON_ERROR is set but this is running headless " +
+        "(no display), so there is no window to inspect and browsers will " +
+        "still be closed."
       );
     }
     return false;

@@ -12,7 +12,10 @@ const ProviderCredentialSchema = new mongoose.Schema({
   provider: {
     type: String,
     required: true,
-    enum: ["reliance", "national"],
+    // Must match the insurer names the app stores (lowercased by
+    // syncProviderCredentials). Keep in step with PROVIDER_COMPANIES in the
+    // frontend's Shared/CommonConstant.js.
+    enum: ["reliance", "national", "kshema"],
   },
   username: {
     type: String,

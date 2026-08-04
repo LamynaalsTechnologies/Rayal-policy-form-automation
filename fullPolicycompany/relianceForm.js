@@ -1,20 +1,28 @@
 const { By, until, Key } = require("selenium-webdriver");
-const { createFreshDriverFromBaseProfile } = require("./browser");
+const { createFreshDriverFromBaseProfile } = require("../browser");
 const {
   createJobBrowser,
   cleanupJobBrowser,
   reLoginIfNeeded,
   recoveryManager,
-} = require("./sessionManager");
+} = require("../sessionManager");
 const fs = require("fs");
 const path = require("path");
+
+// This module lives in fullPolicycompany/, but every artifact directory it
+// touches (error_screenshots, temp_uploads, temp_merged, reliance_pdf, the
+// captcha png) is created and read at the PROJECT ROOT — sessionManager.js
+// stays in the root and points Chrome's download dir at <root>/reliance_pdf,
+// so a bare __dirname here would look one folder too deep and the downloaded
+// policy PDF would never be found.
+const ROOT_DIR = path.join(__dirname, "..");
 const os = require("os");
 const https = require("https");
 const http = require("http");
 const AWS = require("aws-sdk");
-const { extractCaptchaText } = require("./Captcha");
-const { uploadScreenshotToS3, generateScreenshotKey } = require("./s3Uploader");
-const { beautifyError: beautifyErrorShared } = require("./lib/errorHandler");
+const { extractCaptchaText } = require("../Captcha");
+const { uploadScreenshotToS3, generateScreenshotKey } = require("../s3Uploader");
+const { beautifyError: beautifyErrorShared } = require("../lib/errorHandler");
 
 // Configure AWS S3 for presigned URL generation (fallback)
 const s3 = new AWS.S3({
@@ -279,7 +287,7 @@ async function captureErrorScreenshot(
     );
 
     // === OPTIMIZATION: Always save local copy first for reliability ===
-    const localScreenshotDir = path.join(__dirname, "error_screenshots");
+    const localScreenshotDir = path.join(ROOT_DIR, "error_screenshots");
     if (!fs.existsSync(localScreenshotDir)) {
       fs.mkdirSync(localScreenshotDir, { recursive: true });
     }
@@ -304,12 +312,12 @@ async function captureErrorScreenshot(
       const pageSource = await driver.getPageSource();
       pageSourceKey = screenshotKey.replace(".png", ".html");
       const tempHtmlPath = path.join(
-        __dirname,
+        ROOT_DIR,
         `temp-page-source-${Date.now()}.html`
       );
       fs.writeFileSync(tempHtmlPath, pageSource);
 
-      const { uploadToS3 } = require("./s3Uploader");
+      const { uploadToS3 } = require("../s3Uploader");
       pageSourceUrl = await uploadToS3(tempHtmlPath, pageSourceKey);
 
       fs.unlinkSync(tempHtmlPath); // Delete temp file
@@ -350,7 +358,7 @@ async function loginOnClonedBrowser(driver, jobId, credentials) {
     // Capture captcha
     console.log(`📸 [${jobId}] Capturing captcha...`);
     await getCaptchaScreenShot(driver, `reliance_captcha_${jobId}`);
-    const filePath = path.join(__dirname, `reliance_captcha_${jobId}.png`);
+    const filePath = path.join(ROOT_DIR, `reliance_captcha_${jobId}.png`);
 
     if (!fs.existsSync(filePath)) {
       console.error(`❌ [${jobId}] Captcha screenshot not found`);
@@ -612,7 +620,7 @@ async function checkAndRecoverClonedSession(driver, jobId, credentials) {
 }
 
 const moment = require("moment");
-const { captureAndLogError } = require("./errorLogger");
+const { captureAndLogError } = require("../errorLogger");
 
 /**
  * Calculates age from a date string in DD-MM-YYYY format
@@ -640,7 +648,7 @@ const {
   downloadBriskPDF,
   uploadBriskCertificate,
   shouldCreateBriskCertificate,
-} = require("./briskCertificate");
+} = require("../briskCertificate");
 
 /**
  * Record the two KYC page URLs on the policy.
@@ -758,7 +766,7 @@ async function mergePDFsAndUpload(reliancePdfPath, briskPdfPath, data) {
     console.log('✅ PDFs merged successfully');
 
     // Save merged PDF temporarily
-    const mergedPdfPath = path.join(__dirname, 'temp_merged', `merged_${Date.now()}.pdf`);
+    const mergedPdfPath = path.join(ROOT_DIR, 'temp_merged', `merged_${Date.now()}.pdf`);
     const mergedDir = path.dirname(mergedPdfPath);
     if (!fs.existsSync(mergedDir)) {
       fs.mkdirSync(mergedDir, { recursive: true });
@@ -1039,7 +1047,7 @@ async function fillRelianceForm(
     // === OPTIMIZATION: Explicit Login Check for New Window ===
     // As per user request: "not even try to login on the single page so create the new window and use that properly"
     // We check if we are logged in. If not, we perform login right here.
-    const { isUserLoggedIn, performLogin } = require("./sessionManager");
+    const { isUserLoggedIn, performLogin } = require("../sessionManager");
     const isLoggedIn = await isUserLoggedIn(driver);
 
     if (!isLoggedIn) {
@@ -3493,7 +3501,7 @@ async function fillRelianceForm(
                   const downloadFileFromS3 = (url, originalFileName) => {
                     return new Promise((resolve, reject) => {
                       // Create temp directory in project folder for reliability
-                      const tempDir = path.join(__dirname, 'temp_uploads');
+                      const tempDir = path.join(ROOT_DIR, 'temp_uploads');
                       if (!fs.existsSync(tempDir)) {
                         fs.mkdirSync(tempDir, { recursive: true });
                       }
@@ -3884,7 +3892,7 @@ async function fillRelianceForm(
 
                   // Keep temp file for debugging - don't delete
                   console.log(`📁 Temp file kept at: ${tempFilePath}`);
-                  console.log(`📁 Temp folder: ${path.join(__dirname, 'temp_uploads')}`);
+                  console.log(`📁 Temp folder: ${path.join(ROOT_DIR, 'temp_uploads')}`);
 
                   // === STEP 3: Click SUBMIT button and wait for response ===
                   console.log("Looking for SUBMIT button...");
@@ -4807,7 +4815,7 @@ async function fillRelianceForm(
     const findReliancePdf = () => {
       const dir =
         jobBrowser?.profileInfo?.downloadDir ||
-        path.join(__dirname, "reliance_pdf", `job_${jobId}`);
+        path.join(ROOT_DIR, "reliance_pdf", `job_${jobId}`);
       if (!fs.existsSync(dir)) {
         console.warn(`⚠️  Reliance PDF directory not found: ${dir}`);
         return null;
@@ -4899,7 +4907,7 @@ async function fillRelianceForm(
           // sessionManager/browserv2), so only this job's files are visible.
           const reliancePdfDir =
             jobBrowser?.profileInfo?.downloadDir ||
-            path.join(__dirname, "reliance_pdf", `job_${jobId}`);
+            path.join(ROOT_DIR, "reliance_pdf", `job_${jobId}`);
 
           if (fs.existsSync(reliancePdfDir)) {
             const pdfFiles = fs.readdirSync(reliancePdfDir)

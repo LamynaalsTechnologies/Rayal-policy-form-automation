@@ -2,13 +2,13 @@ const { By, until, Key } = require("selenium-webdriver");
 const {
   createNationalJobBrowser,
   cleanupNationalJobBrowser,
-} = require("./nationalSessionManager");
-const { CONFIG } = require("./nationalBrowserConfig");
+} = require("../nationalSessionManager");
+const { CONFIG } = require("../nationalBrowserConfig");
 const fs = require("fs");
 const path = require("path");
-const { extractCaptchaText } = require("./Captcha");
-const { uploadScreenshotToS3, generateScreenshotKey } = require("./s3Uploader");
-const { beautifyError } = require("./lib/errorHandler");
+const { extractCaptchaText } = require("../Captcha");
+const { uploadScreenshotToS3, generateScreenshotKey } = require("../s3Uploader");
+const { beautifyError } = require("../lib/errorHandler");
 // Shared with Reliance — National previously had NO Brisk handling at all, so
 // a National policy with PA Cover through Brisk never got its CPA/RSA
 // certificate.
@@ -17,7 +17,7 @@ const {
   downloadBriskPDF,
   uploadBriskCertificate,
   shouldCreateBriskCertificate,
-} = require("./briskCertificate");
+} = require("../briskCertificate");
 
 // Default form data for standalone execution
 const defaultFormData = {
