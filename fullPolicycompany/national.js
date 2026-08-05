@@ -1330,7 +1330,7 @@ async function fillNationalForm(
     console.log(`\n🚀 [${jobId}] Starting National Insurance job...`);
 
     // === STEP 0: Create fresh browser ===
-    jobBrowser = await createNationalJobBrowser(jobId, data?._policyId);
+    jobBrowser = await createNationalJobBrowser(jobId);
     driver = jobBrowser.driver;
 
     console.log(`✅ [${jobId}] National browser ready!`);
@@ -1339,10 +1339,12 @@ async function fillNationalForm(
     // National uses simple approach: every job logs in fresh
     console.log(`🌐 [${jobId}] Navigating to National login page...`);
 
-    // PER-JOB login URL. CONFIG.LOGIN_URL is one shared object mutated by
-    // every job — with parallel windows, job B's write between our browser
-    // creation and this navigation sent job A to job B's portal URL.
-    const loginUrl = jobBrowser.loginUrl || CONFIG.LOGIN_URL;
+    // PER-JOB login URL, from THIS job's resolved credential. CONFIG.LOGIN_URL
+    // is one shared object mutated by every job — with parallel windows, job
+    // B's write between our browser creation and this navigation sent job A to
+    // job B's portal URL. It survives only as the fallback for a credential
+    // saved without a loginUrl.
+    const loginUrl = data.loginUrl || CONFIG.LOGIN_URL;
 
     try {
       console.log(`⏳ [${jobId}] Loading URL: ${loginUrl}`);
@@ -1502,16 +1504,17 @@ async function fillNationalForm(
         console.log("Second dropdown selection failed:", error.message);
       }
 
-      // Fill username
+      // Fill username. `data` carries THIS job's resolved credential; the
+      // shared CONFIG is only a fallback for a standalone CLI run.
       console.log(`[${jobId}] Looking for username field...`);
       const usernameField = By.name("log_txtfield_iUsername_01");
-      await safeType(driver, usernameField, data.username || jobBrowser.username || CONFIG.USERNAME, 10000);
+      await safeType(driver, usernameField, data.username || CONFIG.USERNAME, 10000);
       console.log(`[${jobId}] Filled username`);
 
       // Fill password
       console.log(`[${jobId}] Looking for password field...`);
       const passwordField = By.name("log_pwd_iPassword_01");
-      await safeType(driver, passwordField, data.password || jobBrowser.password || CONFIG.PASSWORD, 10000);
+      await safeType(driver, passwordField, data.password || CONFIG.PASSWORD, 10000);
       console.log(`[${jobId}] Filled password`);
 
       // Click login button

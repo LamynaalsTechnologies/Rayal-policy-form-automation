@@ -165,19 +165,37 @@ async function isUserLoggedIn(driver) {
  *                         CONFIG is one shared mutable object, and job B
  *                         overwriting it mid-flight logged job A in under the
  *                         wrong client.
+ *   loginUrl            : per-JOB portal URL, for the same reason. Credentials
+ *                         carry their own loginUrl, and CONFIG.LOGIN_URL is
+ *                         rewritten by whichever job last touched it.
  *   captchaTag          : unique tag (jobId) for the captcha screenshot file so
  *                         parallel logins don't solve each other's captcha.
  */
 async function performLogin(driver, options = {}) {
   const MAX_RETRIES = 5;
 
+  // Resolved ONCE, before the retry loop: a parallel job rewriting CONFIG
+  // between two attempts must not move this login to a different portal.
+  const loginUrl = options.loginUrl || CONFIG.LOGIN_URL;
+  const username = options.username || CONFIG.USERNAME;
+  const password = options.password || CONFIG.PASSWORD;
+
+  // No "rfcpolicy"/"Pass@123" default any more. Falling back to a hardcoded
+  // account meant a job whose credentials failed to arrive silently filed the
+  // policy under somebody else's IMD code instead of failing.
+  if (!username || !password) {
+    throw new Error(
+      "[E205] performLogin called without Reliance credentials — the caller must supply username and password."
+    );
+  }
+
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     console.log(`🔄 Login attempt ${attempt}/${MAX_RETRIES}...`);
 
     try {
-      console.log("→ Navigating to login page...");
-      await driver.get(CONFIG.LOGIN_URL);
-      
+      console.log(`→ Navigating to login page: ${loginUrl}`);
+      await driver.get(loginUrl);
+
       // Wait for login form to load (much better than fixed sleep)
       try {
         await driver.wait(until.elementLocated(By.id("txtUserName")), 10000);
@@ -191,11 +209,7 @@ async function performLogin(driver, options = {}) {
         return true;
       }
 
-      console.log("→ Filling login credentials...");
-      // Per-job credentials win; the shared CONFIG is only the master-session
-      // fallback.
-      const username = options.username || CONFIG.USERNAME || "rfcpolicy";
-      const password = options.password || CONFIG.PASSWORD || "Pass@123";
+      console.log(`→ Filling login credentials for ${username}...`);
 
       // Get captcha text — unique file per job so parallel logins can't
       // overwrite each other's screenshot.
@@ -518,8 +532,11 @@ async function initializeMasterSession(policyId = null) {
         console.log(
           `→ Policy found with clientId: ${policy.clientId}. Fetching credentials...`
         );
+        // Matched on `userId` (the record's own id), like the queue's resolver.
+        // The clientId FIELD is the owning client and is shared by every user
+        // under it, so it cannot identify a single login.
         creds = await ProviderCredential.findOne({
-          clientId: policy.clientId,
+          userId: policy.clientId,
           provider: "reliance",
           isActive: true,
         });
@@ -528,29 +545,16 @@ async function initializeMasterSession(policyId = null) {
           console.log(
             `✓ Found credentials for clientId: ${policy.clientId} (username: ${creds.username})`
           );
-        } else {
-          console.log(
-            `⚠ No credentials found for clientId: ${policy.clientId}. Falling back to default credentials.`
-          );
         }
-      } else {
-        console.log(
-          "⚠ Policy not found or has no clientId. Falling back to default credentials."
-        );
       }
     }
 
-    if (!creds) {
-      console.log("→ Fetching default Reliance credentials from database...");
-      creds = await ProviderCredential.findOne({
-        provider: "reliance",
-        isActive: true,
-      });
-    }
-
+    // NO "first active Reliance row in the database" fallback — it used to pick
+    // an arbitrary client's portal login. See lib/credentialResolver.js, which
+    // is what actually resolves each job's credentials.
     if (!creds) {
       throw new Error(
-        "No active Reliance credentials found in the database. Please check the ProviderCredential collection."
+        "[E205] No active Reliance credentials found for this client. Please check the ProviderCredential collection."
       );
     }
 
@@ -572,7 +576,9 @@ async function initializeMasterSession(policyId = null) {
     // If not logged in, perform login
     if (!isLoggedIn) {
       console.log("\n→ Login required. Starting login process...");
-      const loginSuccess = await performLogin(driver);
+      // Explicit, rather than leaning on the CONFIG values written above —
+      // CONFIG is shared and another job can rewrite it in between.
+      const loginSuccess = await performLogin(driver, creds);
 
       if (loginSuccess) {
         // Save cookies after successful login

@@ -25,6 +25,7 @@ const {
   PATHS,
 } = require("./browserv2");
 const { ProviderCredential } = require("./models");
+const { resolvePortalCredentials } = require("./lib/credentialResolver");
 const mongoose = require("mongoose");
 const fs = require("fs");
 const path = require("path");
@@ -103,7 +104,7 @@ class MasterSessionRecovery {
    * Main recovery orchestrator - tries all levels progressively
    * Includes lock to prevent multiple simultaneous recoveries
    */
-  async recover() {
+  async recover(credentials = null) {
     // If recovery is already in progress, wait for it to complete
     if (this.isRecovering && this.recoveryPromise) {
       console.log("⏳ Recovery already in progress, waiting for completion...");
@@ -119,7 +120,7 @@ class MasterSessionRecovery {
 
     // Set recovery lock and create promise
     this.isRecovering = true;
-    this.recoveryPromise = this._performRecovery();
+    this.recoveryPromise = this._performRecovery(credentials);
 
     try {
       const result = await this.recoveryPromise;
@@ -134,7 +135,7 @@ class MasterSessionRecovery {
   /**
    * Internal recovery method - performs actual recovery steps
    */
-  async _performRecovery() {
+  async _performRecovery(credentials = null) {
     try {
       console.log("\n" + "=".repeat(60));
       console.log("  🔄 MASTER SESSION RECOVERY INITIATED");
@@ -147,7 +148,7 @@ class MasterSessionRecovery {
           }/${this.recoveryAttempts.soft.max})`
         );
 
-        const softSuccess = await this.softRecover();
+        const softSuccess = await this.softRecover(credentials);
 
         if (softSuccess) {
           console.log("✅ LEVEL 1: Soft recovery SUCCESSFUL!\n");
@@ -166,7 +167,7 @@ class MasterSessionRecovery {
           }/${this.recoveryAttempts.hard.max})`
         );
 
-        const hardSuccess = await this.hardRecover();
+        const hardSuccess = await this.hardRecover(credentials);
 
         if (hardSuccess) {
           console.log("✅ LEVEL 2: Hard recovery SUCCESSFUL!\n");
@@ -187,7 +188,7 @@ class MasterSessionRecovery {
           }/${this.recoveryAttempts.nuclear.max})`
         );
 
-        const nuclearSuccess = await this.nuclearRecover();
+        const nuclearSuccess = await this.nuclearRecover(credentials);
 
         if (nuclearSuccess) {
           console.log("✅ LEVEL 3: Nuclear recovery SUCCESSFUL!\n");
@@ -222,7 +223,7 @@ class MasterSessionRecovery {
   /**
    * Level 1: Soft Recovery - Re-login on same browser
    */
-  async softRecover() {
+  async softRecover(credentials = null) {
     try {
       console.log("   → Checking if master browser is responsive...");
 
@@ -247,7 +248,7 @@ class MasterSessionRecovery {
       await masterDriver.sleep(2000);
 
       console.log("   → Attempting re-login...");
-      const loginSuccess = await performLogin(masterDriver);
+      const loginSuccess = await performLogin(masterDriver, credentials || {});
 
       if (loginSuccess) {
         console.log("   ✓ Re-login successful");
@@ -272,7 +273,7 @@ class MasterSessionRecovery {
   /**
    * Level 2: Hard Recovery - Recreate master browser
    */
-  async hardRecover() {
+  async hardRecover(credentials = null) {
     try {
       console.log("   → Closing broken master browser...");
 
@@ -298,7 +299,7 @@ class MasterSessionRecovery {
       await masterDriver.sleep(3000);
 
       console.log("   → Attempting login on new browser...");
-      const loginSuccess = await performLogin(masterDriver);
+      const loginSuccess = await performLogin(masterDriver, credentials || {});
 
       if (loginSuccess) {
         console.log("   ✓ Login successful on new browser");
@@ -321,7 +322,7 @@ class MasterSessionRecovery {
   /**
    * Level 3: Nuclear Recovery - Delete profile and fresh start
    */
-  async nuclearRecover() {
+  async nuclearRecover(credentials = null) {
     try {
       console.log(
         "   ⚠️  WARNING: This will delete and recreate the master profile!"
@@ -365,7 +366,7 @@ class MasterSessionRecovery {
       await masterDriver.sleep(3000);
 
       console.log("   → Attempting login on fresh profile...");
-      const loginSuccess = await performLogin(masterDriver);
+      const loginSuccess = await performLogin(masterDriver, credentials || {});
 
       if (loginSuccess) {
         console.log("   ✓ Login successful on fresh profile!");
@@ -524,14 +525,14 @@ let initializationPromise = null;
  * Initialize master session - called once on server start
  * This creates the master browser and ensures user is logged in
  */
-async function initializeMasterSession(policyId = null) {
+async function initializeMasterSession(policyId = null, credentials = null) {
   if (isInitializing && initializationPromise) {
     console.log("⏳ Initialization already in progress, waiting for existing promise...");
     return initializationPromise;
   }
 
   isInitializing = true;
-  initializationPromise = _performInitialization(policyId);
+  initializationPromise = _performInitialization(policyId, credentials);
 
   try {
     return await initializationPromise;
@@ -544,7 +545,7 @@ async function initializeMasterSession(policyId = null) {
 /**
  * Internal initialization logic
  */
-async function _performInitialization(policyId = null) {
+async function _performInitialization(policyId = null, credentials = null) {
   try {
     console.log("\n" + "=".repeat(60));
     console.log("  🔐 INITIALIZING MASTER SESSION");
@@ -556,52 +557,50 @@ async function _performInitialization(policyId = null) {
       console.log("✓ Connected to MongoDB");
     }
 
-    // Fetch credentials from DB
-    let creds = null;
+    // Credentials the CALLER already resolved always win.
+    //
+    // The queue resolves each job's login once, through the full user → client
+    // chain (lib/credentialResolver.js), and hands it down. Re-deriving it here
+    // could only ever produce a different answer — and did: this function used
+    // to get `policyId = null` (relianceForm passes no policy id), so it fell
+    // straight through to "first active Reliance row in the database" and the
+    // master session logged in as an arbitrary client.
+    let creds = credentials || null;
 
-    if (policyId) {
+    if (creds) {
+      console.log(`✓ Using the credentials supplied by the job: ${creds.username}`);
+    } else if (policyId) {
       console.log(`→ Fetching policy data for ID: ${policyId}...`);
       const policy = await mongoose.connection.db
         .collection("onlinePolicy")
         .findOne({ _id: new mongoose.Types.ObjectId(policyId) });
 
-      if (policy && policy.clientId) {
-        console.log(
-          `→ Policy found with clientId: ${policy.clientId}. Fetching credentials...`
-        );
-        creds = await ProviderCredential.findOne({
-          clientId: policy.clientId,
+      if (policy) {
+        // Same chain the queue uses, so a master session started from a policy
+        // id resolves exactly as that policy's job would.
+        const resolved = await resolvePortalCredentials({
           provider: "reliance",
-          isActive: true,
+          userId: policy.userId,
+          clientId: policy.clientId,
+          log: (line) => console.log(`→ ${line}`),
         });
-
-        if (creds) {
+        if (resolved) {
+          creds = resolved.creds;
           console.log(
-            `✓ Found credentials for clientId: ${policy.clientId} (username: ${creds.username})`
-          );
-        } else {
-          console.log(
-            `⚠ No credentials found for clientId: ${policy.clientId}. Falling back to default credentials.`
+            `✓ Found the ${resolved.source}'s Reliance login: ${creds.username} (matched by ${resolved.matchedBy})`
           );
         }
       } else {
-        console.log(
-          "⚠ Policy not found or has no clientId. Falling back to default credentials."
-        );
+        console.log(`⚠ Policy ${policyId} not found.`);
       }
     }
 
-    if (!creds) {
-      console.log("→ Fetching default Reliance credentials from database...");
-      creds = await ProviderCredential.findOne({
-        provider: "reliance",
-        isActive: true,
-      });
-    }
-
+    // NO "first active Reliance row in the database" fallback. It used to pick
+    // an arbitrary client's portal login, so a policy could be filed under the
+    // wrong IMD code with nothing in the logs to say so.
     if (!creds) {
       throw new Error(
-        "No active Reliance credentials found in the database. Please check the ProviderCredential collection."
+        "[E205] No Reliance credentials were supplied for this job and none could be resolved. Add the Reliance login on the User page (edit the user → Credentials), or on the client they belong to."
       );
     }
 
@@ -633,7 +632,7 @@ async function _performInitialization(policyId = null) {
     } else {
       // Step 4: Perform login if needed
       console.log("⚠️  Not logged in. Starting login process...\n");
-      const loginSuccess = await performLogin(masterDriver);
+      const loginSuccess = await performLogin(masterDriver, credentials || {});
 
       if (loginSuccess) {
         console.log("✅ Login successful! Session is now active.\n");
@@ -708,12 +707,12 @@ async function checkSession() {
  * Re-login if session expired
  * Uses multi-level recovery manager for robust session restoration
  */
-async function reLoginIfNeeded() {
+async function reLoginIfNeeded(credentials = null) {
   try {
     // Lazy initialization if master session hasn't been started
     if (!masterDriver) {
       console.log("🚀 Initializing master session on-demand...");
-      const initResult = await initializeMasterSession();
+      const initResult = await initializeMasterSession(null, credentials);
       return initResult.success;
     }
 
@@ -723,7 +722,7 @@ async function reLoginIfNeeded() {
       console.log("🔄 Session invalid - initiating multi-level recovery...\n");
 
       // Use multi-level recovery instead of simple re-login
-      const recovered = await recoveryManager.recover();
+      const recovered = await recoveryManager.recover(credentials);
 
       if (recovered) {
         console.log("\n✅ Master session recovered successfully!");
@@ -765,8 +764,10 @@ async function switchMasterSessionCredentials(clientId) {
 
     if (clientId) {
       console.log(`→ Fetching credentials for clientId: ${clientId}...`);
+      // See the note in the master-session lookup above: the record's identity
+      // is `userId`, not `clientId`.
       creds = await ProviderCredential.findOne({
-        clientId: clientId,
+        userId: clientId,
         provider: "reliance",
         isActive: true,
       });
@@ -778,17 +779,14 @@ async function switchMasterSessionCredentials(clientId) {
       }
     }
 
-    if (!creds) {
-      console.log("→ Fetching default Reliance credentials from database...");
-      creds = await ProviderCredential.findOne({
-        provider: "reliance",
-        isActive: true,
-      });
-    }
-
+    // NO "first active Reliance row in the database" fallback. It used to pick
+    // an arbitrary client's portal login, so a policy could be filed under the
+    // wrong IMD code with nothing in the logs to say so. Failing here is the
+    // correct outcome — per-job logins come from the queue's resolver
+    // (lib/credentialResolver.js) and this master session is only a warm-up.
     if (!creds) {
       throw new Error(
-        "No active Reliance credentials found in the database. Please check the ProviderCredential collection."
+        "[E205] No active Reliance credentials found for this client. Please check the ProviderCredential collection."
       );
     }
 
@@ -803,7 +801,9 @@ async function switchMasterSessionCredentials(clientId) {
     // Check if master driver exists
     if (!masterDriver) {
       console.log("⚠️  No master driver exists. Creating new master session...");
-      await initializeMasterSession();
+      // Pass the credentials we just resolved — otherwise the new session would
+      // re-derive them and could log in as somebody else.
+      await initializeMasterSession(null, creds);
       return true;
     }
 
@@ -814,7 +814,7 @@ async function switchMasterSessionCredentials(clientId) {
 
     // Perform re-login with new credentials
     console.log("🔐 Performing re-login with new credentials...");
-    const loginSuccess = await performLogin(masterDriver);
+    const loginSuccess = await performLogin(masterDriver, creds);
 
     if (loginSuccess) {
       console.log("✅ Re-login successful with new credentials!\\n");
@@ -845,14 +845,77 @@ async function switchMasterSessionCredentials(clientId) {
 // ============================================
 
 /**
+ * Create a FRESH browser for a Reliance job — no master session involved.
+ *
+ * This is what Reliance uses now, and it mirrors what National has always done.
+ * The old route (createJobBrowser below) went:
+ *
+ *   headless master browser -> log in on it -> copy its profile -> open the
+ *   real window -> check the session -> log in AGAIN if it did not take
+ *
+ * so every job solved the captcha twice, the first time in a window nobody
+ * could see, and a failure in that invisible step killed the job before the
+ * real window ever opened ("Master session is not active and re-login failed").
+ * The master session bought nothing: relianceForm logs in explicitly in its own
+ * window anyway.
+ *
+ * Each job gets its own empty profile and its own download directory, so
+ * parallel jobs cannot share a session or pick up each other's PDFs.
+ *
+ * @param {string} jobId - Job identifier
+ */
+async function createRelianceJobBrowser(jobId) {
+  console.log(`\n📋 [Job ${jobId}] Opening a fresh browser window...`);
+
+  // Unique per ATTEMPT: a retry must never reuse a directory that a detached,
+  // timed-out first attempt still has open (Chrome locks it).
+  const userDataDir = path.join(
+    PATHS.CLONED_PROFILE_BASE,
+    `reliance_job_${jobId}_${Date.now()}`
+  );
+  const profileInfo = {
+    userDataDir,
+    profileDirectory: "Default",
+    fullPath: path.join(userDataDir, "Default"),
+    // Per-JOB download directory, read back in relianceForm for the policy PDF.
+    downloadDir: path.join(__dirname, "reliance_pdf", `job_${jobId}`),
+  };
+
+  fs.mkdirSync(profileInfo.fullPath, { recursive: true });
+  console.log(`📂 [Job ${jobId}] Fresh profile: ${profileInfo.fullPath}`);
+
+  let driver;
+  try {
+    driver = await createClonedBrowser(profileInfo);
+  } catch (driverError) {
+    // The caller's finally cannot clean up — jobBrowser was never assigned.
+    for (const dir of [profileInfo.userDataDir, profileInfo.downloadDir]) {
+      try {
+        if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+      } catch (rmError) {
+        console.warn(`⚠️  [Job ${jobId}] Could not remove ${dir}: ${rmError.message}`);
+      }
+    }
+    throw driverError;
+  }
+
+  console.log(`✅ [Job ${jobId}] Browser window ready\n`);
+  return { driver, profileInfo, jobId, usingPool: false };
+}
+
+/**
  * Create a cloned browser for a job
  * This clones the master profile so the job has an independent browser with active session
  * Enhanced with stale flag detection and recovery lock coordination
+ *
+ * NOTE: Reliance no longer uses this — see createRelianceJobBrowser above.
+ * Kept for any flow that genuinely wants a warm, pre-logged-in profile.
+ *
  * @param {string} jobId - Job identifier
  * @param {string} userId - User ID for credential lookup (optional)
  * @param {string} clientId - Client ID for credential lookup (optional)
  */
-async function createJobBrowser(jobId, clientId = null) {
+async function createJobBrowser(jobId, clientId = null, credentials = null) {
   try {
     console.log(`\\n📋 [Job ${jobId}] Creating cloned browser...`);
 
@@ -919,7 +982,7 @@ async function createJobBrowser(jobId, clientId = null) {
         }
 
         // This will either start recovery or wait for ongoing recovery
-        const recovered = await reLoginIfNeeded();
+        const recovered = await reLoginIfNeeded(credentials);
 
         if (!recovered) {
           throw new Error("Master session is not active and re-login failed");
@@ -1119,6 +1182,7 @@ module.exports = {
   switchMasterSessionCredentials,
 
   // Job processing
+  createRelianceJobBrowser,
   createJobBrowser,
   cleanupJobBrowser,
 

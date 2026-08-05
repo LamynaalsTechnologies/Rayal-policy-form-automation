@@ -9,10 +9,9 @@
  * cleanupNationalJobBrowser (which the caller runs in a `finally`).
  */
 
-const {
-  createClonedBrowser,
-  CONFIG,
-} = require("./nationalBrowserConfig");
+// CONFIG is no longer imported here — this module stopped resolving
+// credentials, so it has nothing left to read from the shared config object.
+const { createClonedBrowser } = require("./nationalBrowserConfig");
 const fs = require("fs");
 const path = require("path");
 const {
@@ -34,67 +33,26 @@ const {
 // ============================================
 
 /**
- * Create a fresh browser for a National job
- * National uses a simple approach: each job gets a fresh browser and logs in
+ * Create a fresh browser for a National job.
+ * National uses a simple approach: each job gets a fresh browser and logs in.
+ *
+ * This no longer resolves credentials. It used to run its own lookup that ended
+ * in `findOne({provider:"national", isActive:true})` — the first active National
+ * row in the entire database — and, because the caller never passed a policy id,
+ * that fallback was the ONLY branch that ever ran. A client with its own portal
+ * URL could therefore be sent to somebody else's.
+ *
+ * The queue resolves the login once (lib/credentialResolver.js) and passes it to
+ * fillNationalForm, which is the single source for username/password/loginUrl.
+ *
  * @param {string} jobId - Unique identifier for the job
- * @param {string} policyId - Optional policy ID to fetch specific credentials
  */
-async function createNationalJobBrowser(jobId, policyId = null) {
+async function createNationalJobBrowser(jobId) {
   try {
     console.log(`\n📋 [National Job ${jobId}] Creating fresh browser...`);
 
-    // Ensure MongoDB connection if policyId is provided
-    const mongoose = require("mongoose");
-    const { ProviderCredential } = require("./models");
-    
-    if (mongoose.connection.readyState === 0) {
-      if (process.env.MONGODB_URI) {
-        await mongoose.connect(process.env.MONGODB_URI);
-      }
-    }
-
-    // Fetch credentials logic
-    let creds = null;
-    const { CONFIG } = require("./nationalBrowserConfig");
-
-    if (policyId) {
-      console.log(`→ [Job ${jobId}] Fetching policy data for ID: ${policyId}...`);
-      const policy = await mongoose.connection.db
-        .collection("onlinePolicy")
-        .findOne({ _id: new mongoose.Types.ObjectId(policyId) });
-
-      if (policy && policy.clientId) {
-        creds = await ProviderCredential.findOne({
-          clientId: policy.clientId,
-          provider: "national",
-          isActive: true,
-        });
-      }
-    }
-
-    if (!creds) {
-      creds = await ProviderCredential.findOne({
-        provider: "national",
-        isActive: true,
-      });
-    }
-
-    if (creds) {
-      console.log(`✓ [Job ${jobId}] Using credentials for: ${creds.username}`);
-      // Kept for backward compatibility ONLY — CONFIG is one shared object, so
-      // with parallel jobs the values race. Job code must use the per-job
-      // credentials/loginUrl returned below, never CONFIG.
-      CONFIG.USERNAME = creds.username;
-      CONFIG.PASSWORD = creds.password;
-      if (creds.loginUrl) CONFIG.LOGIN_URL = creds.loginUrl;
-    } else {
-      console.warn(`⚠️ [Job ${jobId}] No National credentials found in DB`);
-    }
-
-    // Create a fresh profile for this job (no cloning, no master session)
-    const { createClonedBrowser } = require("./nationalBrowserConfig");
-    const fs = require("fs");
-    const path = require("path");
+    // Create a fresh profile for this job (no cloning, no master session).
+    // createClonedBrowser / fs / path all come from the module-level requires.
 
     // Unique per ATTEMPT, not just per job: a retry of the same jobId must
     // never reuse a directory that a detached, timed-out first attempt still
@@ -144,11 +102,8 @@ async function createNationalJobBrowser(jobId, policyId = null) {
         fullPath: clonedProfileDir,
       },
       jobId: jobId,
-      // Per-job values — job code MUST use these instead of the shared CONFIG
-      // (see the race note above).
-      loginUrl: (creds && creds.loginUrl) || CONFIG.LOGIN_URL,
-      username: creds ? creds.username : CONFIG.USERNAME,
-      password: creds ? creds.password : CONFIG.PASSWORD,
+      // No credentials here any more — they arrive with the job payload. See
+      // the note on this function.
     };
   } catch (error) {
     console.error(

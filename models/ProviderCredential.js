@@ -1,10 +1,14 @@
 const mongoose = require("mongoose");
 
 const ProviderCredentialSchema = new mongoose.Schema({
-   userId: {
+  // The record this login belongs to — a `user` _id or a `client` _id. This is
+  // what the queue matches on (see server.js), because clientId below is
+  // shared by every user under the same client.
+  userId: {
     type: mongoose.Schema.Types.ObjectId,
     required: true,
   },
+  // The owning client: a user's parent client, or a client's own _id.
   clientId: {
     type: mongoose.Schema.Types.ObjectId,
     required: true,
@@ -40,7 +44,10 @@ const ProviderCredentialSchema = new mongoose.Schema({
   },
 },{timestamps:true});
 
-ProviderCredentialSchema.index({ provider: 1, clientId: 1 }, { unique: true });
+// Keep in step with RayalBrokers-backend/Model/ProviderCredential.js, which
+// owns the migration note for dropping the old provider_1_clientId_1 index.
+ProviderCredentialSchema.index({ provider: 1, userId: 1 }, { unique: true });
+ProviderCredentialSchema.index({ provider: 1, clientId: 1 });
 
 ProviderCredentialSchema.pre("save", function (next) {
   this.updatedAt = Date.now();

@@ -156,6 +156,7 @@ const {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const { ProviderCredential } = require("./models");
+const { resolvePortalCredentials } = require("./lib/credentialResolver");
 
 mongoose.connect(process.env.MONGODB_URI);
 
@@ -1173,62 +1174,54 @@ const runPolicyJob = async (rawJob) => {
     console.log(`→ [${queueName}] Fetching ${companyName} credentials from database...`);
 
     // Resolve the portal login: THE POLICY'S OWN USER FIRST, then the client
-    // they belong to. Applies to every insurer.
-    //
-    // Both levels live in the same ProviderCredential collection — the backend's
-    // syncProviderCredentials writes each record's own _id into `clientId`,
-    // whether that record is a user or a client (RayalBrokers-backend/dao/
-    // clientDao.js). So the two lookups differ only in which id they carry.
-    //
-    // There is deliberately NO "any active credential" fallback any more. It
-    // used to silently pick the first active row for the insurer, which meant a
-    // policy could be filed through a DIFFERENT client's portal login — issued
-    // under the wrong IMD code, with nothing in the logs to say so. Failing
-    // loudly is the correct outcome: the message below tells the operator
-    // exactly what to add and where, and the job retries on its own once they
-    // have added it.
-    const credentialSources = [
-      { id: job.formData.userId, label: "user" },
-      { id: job.formData.clientId, label: "client" },
-    ];
+    // they belong to. One resolver for every insurer — see
+    // lib/credentialResolver.js for the tiers and why none of them matches on
+    // `clientId` alone.
+    const resolved = await resolvePortalCredentials({
+      provider: companyName,
+      userId: job.formData.userId,
+      clientId: job.formData.clientId,
+      log: (line) => console.log(`→ [${queueName}] ${line}`),
+    });
 
-    let creds = null;
-    let credsSource = null;
-    for (const { id, label } of credentialSources) {
-      if (!id) continue;
-      console.log(`→ [${queueName}] Looking for ${companyName} credentials on ${label} ${id}`);
-      creds = await ProviderCredential.findOne({
-        provider: companyName,
-        clientId: id,
-        isActive: true,
-      });
-      if (creds) {
-        credsSource = label;
-        console.log(`✓ [${queueName}] Using the ${label}'s ${companyName} login: ${creds.username}`);
-        break;
-      }
-      console.log(`   ✗ [${queueName}] none on this ${label}`);
-    }
-
-    if (!creds) {
+    if (!resolved) {
       const label = companyLabel(companyName);
       console.error(`❌ [${queueName}] No active ${companyName} credentials on the user or the client`);
-      // Phrased for the operator who sees it in the policy's error log, not for
-      // a developer — it has to say what to do next.
+      // [E205] is NOT retryable (lib/errorHandler.js), so the job stops here
+      // instead of burning five attempts on something no retry can fix. The
+      // wording is for the operator who reads it in the policy's error log.
       throw new Error(
-        `[E303] No active ${label} portal credentials found for this policy's ` +
+        `[E205] No active ${label} portal credentials found for this policy's ` +
         `user or client. Add the ${label} login on the User page (edit the ` +
-        `user → Credentials) or in Profile → Account & Policy Settings, and ` +
-        `this policy will retry automatically.`
+        `user → Credentials) or in Profile → Account & Policy Settings, then ` +
+        `re-run this policy.`
       );
     }
+
+    const { creds, source: credsSource, matchedBy } = resolved;
+    console.log(
+      `✓ [${queueName}] Using the ${credsSource}'s ${companyName} login: ${creds.username} (matched by ${matchedBy})`
+    );
 
     // Recorded on the job so a support question ("which login did this policy
     // actually go through?") is answerable from the job document alone.
     await jobQueueCollection.updateOne(
       { _id: job._id },
-      { $set: { credentialSource: credsSource, credentialUsername: creds.username } }
+      {
+        $set: {
+          credentialSource: credsSource,
+          credentialUsername: creds.username,
+          credentialMatchedBy: matchedBy,
+        },
+      }
     );
+
+    // Stamp the row that actually ran. Nothing wrote this field before, so
+    // "when was this login last used?" had no answer.
+    ProviderCredential.updateOne(
+      { _id: creds._id },
+      { $set: { lastUsedAt: new Date() } }
+    ).catch((e) => console.warn(`[${queueName}] could not stamp lastUsedAt:`, e.message));
 
     // Route to appropriate form filling function based on Companyname
     let fillFormPromise;
@@ -1240,6 +1233,11 @@ const runPolicyJob = async (rawJob) => {
         // password: "Rayal$2025",
         username: creds.username,
         password: creds.password,
+        // Passed through like KSHEMA's. Without it National fell back to a
+        // lookup of its own that ended in "first active National row in the
+        // database", so a client with its own portal URL could be sent to
+        // somebody else's.
+        loginUrl: creds.loginUrl,
         _jobId: job._id, // Pass job ID for error logging
         _jobIdentifier: jobIdentifier,
         _attemptNumber: job.attempts + 1, // Current attempt number
@@ -1272,6 +1270,10 @@ const runPolicyJob = async (rawJob) => {
         ...job.formData,
         username: creds.username,
         password: creds.password,
+        // Reliance credentials carry their own portal URL too. Without this the
+        // login fell back to the shared CONFIG.LOGIN_URL, which whichever job
+        // ran last had rewritten.
+        loginUrl: creds.loginUrl,
         _jobId: job._id, // Pass job ID for error logging
         _jobIdentifier: jobIdentifier,
         _attemptNumber: job.attempts + 1, // Current attempt number

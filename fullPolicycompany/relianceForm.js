@@ -1,8 +1,10 @@
 const { By, until, Key } = require("selenium-webdriver");
 const { createFreshDriverFromBaseProfile } = require("../browser");
 const {
-  createJobBrowser,
+  // Fresh window per job, no master session — see createRelianceJobBrowser.
+  createRelianceJobBrowser,
   cleanupJobBrowser,
+  performLogin,
   reLoginIfNeeded,
   recoveryManager,
 } = require("../sessionManager");
@@ -1025,48 +1027,49 @@ async function fillRelianceForm(
   let documentUploadError = null; // Aadhaar upload to portal failed (non-fatal warning)
 
   try {
-    // === STEP 0: Create cloned browser (already logged in!) ===
+    // === STEP 0: Open this job's own browser window ===
     console.log(`\n🚀 [${jobId}] Starting job...`);
 
     // Extract clientId from data (handle both string and MongoDB ObjectId format)
     const clientId = data.clientId?.$oid || data.clientId || null;
     console.log(`📋 [${jobId}] Job clientId: ${clientId || 'not specified'}`);
 
-    // FORCE NULL to skip "Switching Master Session" logic as per user request
-    // This avoids the "invalid session id" error loop when switching users
-    jobBrowser = await createJobBrowser(jobId, null);
+    // Straight to a FRESH window — no master session, no profile cloning, no
+    // "is the session still alive?" probing.
+    //
+    // The old route logged in on a HEADLESS master browser first, copied its
+    // profile, then opened the real window and logged in again — the captcha
+    // was solved twice, the first time where nobody could see it, and any
+    // trouble in that invisible step killed the job before the real window
+    // ever appeared ("Master session is not active and re-login failed").
+    // The login below is the only one that ever mattered.
+    jobBrowser = await createRelianceJobBrowser(jobId);
     driver = jobBrowser.driver;
 
-    console.log(`✅ [${jobId}] Browser ready with active session!`);
-    console.log(`🌐 [${jobId}] Navigating to form...`);
+    // THIS job's portal URL — the hardcoded address is only the fallback for a
+    // credential saved without one.
+    const relianceLoginUrl =
+      data.loginUrl || "https://smartzone.reliancegeneral.co.in/Login/IMDLogin";
 
-    // Navigate to the form page (already logged in from cloned profile!)
-    await driver.get("https://smartzone.reliancegeneral.co.in/Login/IMDLogin");
-    await driver.sleep(3000);
+    console.log(`🌐 [${jobId}] Logging in as ${data.username}...`);
 
-    // === OPTIMIZATION: Explicit Login Check for New Window ===
-    // As per user request: "not even try to login on the single page so create the new window and use that properly"
-    // We check if we are logged in. If not, we perform login right here.
-    const { isUserLoggedIn, performLogin } = require("../sessionManager");
-    const isLoggedIn = await isUserLoggedIn(driver);
-
-    if (!isLoggedIn) {
-      console.log("⚠️ Session not active in new window. Performing explicit login...");
-      // Per-job credentials + per-job captcha file: with parallel windows the
-      // shared CONFIG/captcha path would cross jobs (wrong client login,
-      // solving the other job's captcha).
-      const loginSuccess = await performLogin(driver, {
-        username: data.username,
-        password: data.password,
-        captchaTag: jobId,
-      });
-      if (!loginSuccess) {
-        throw new Error("Explicit login failed in new window.");
-      }
-      console.log("✅ Explicit login successful! Proceeding...");
-    } else {
-      console.log("✅ Session verified active in new window.");
+    // The window is brand new, so it is never already logged in — go straight
+    // to the login. Per-job credentials + per-job captcha file: with parallel
+    // windows a shared captcha path means jobs solve each other's captcha.
+    const loginSuccess = await performLogin(driver, {
+      username: data.username,
+      password: data.password,
+      loginUrl: relianceLoginUrl,
+      captchaTag: jobId,
+    });
+    if (!loginSuccess) {
+      // retryable:false — repeating a rejected login only burns the portal's
+      // lockout budget. The operator fixes the credential and re-runs.
+      throw new Error(
+        `[E203] Reliance rejected the login for "${data.username}". Check that user's Reliance username and password.`
+      );
     }
+    console.log(`✅ [${jobId}] Logged in as ${data.username}`);
 
     // === STEP 1: Check if cloned session is expired (Legacy check disabled) ===
     // DISABLED as per user request ("i dont want the helth chek process")
