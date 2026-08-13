@@ -1161,6 +1161,34 @@ async function readVahanErrorMessage(driver, dialog) {
  */
 async function closeVahanDialog(driver, jobId, attempts = 4) {
   const closeLocators = [
+    // ── Current markup: an Angular Material button labelled "Close" ─────────
+    // The portal replaced <span class="cd-popup-close">X</span> with
+    //   <button ...>
+    //     <span class="mat-mdc-button-touch-target"></span>
+    //     <span class="mdc-button__label">Close</span>
+    //   </button>
+    // so every legacy locator below missed and the popup was only ever
+    // dismissed by the ESC / force-hide fallback at the end of this function.
+    //
+    // Target the BUTTON, never the label span: mat-mdc-button-touch-target is
+    // an invisible overlay stretched across the button that would swallow a
+    // click aimed at the label underneath it.
+    By.xpath(
+      "//mat-dialog-container//button[.//span[contains(@class,'mdc-button__label') and normalize-space(.)='Close']]"
+    ),
+    By.xpath(
+      "//*[contains(@class,'mat-mdc-dialog-container')]//button[.//span[contains(@class,'mdc-button__label') and normalize-space(.)='Close']]"
+    ),
+    // Unscoped, so a renamed dialog container does not break this again. The
+    // exact label still keeps it off unrelated buttons, and firstPresentLocator
+    // only returns a VISIBLE match — the Vahan popup is modal, so nothing
+    // behind it qualifies.
+    By.xpath(
+      "//button[.//span[contains(@class,'mdc-button__label') and normalize-space(.)='Close']]"
+    ),
+    By.xpath("//button[normalize-space(.)='Close']"),
+
+    // ── Legacy markup, kept so an older portal build still closes ───────────
     By.css("span.cd-popup-close"),
     By.css(".cd-popup-close"),
     By.xpath("//span[contains(@class,'cd-popup-close')]"),
@@ -1175,11 +1203,11 @@ async function closeVahanDialog(driver, jobId, attempts = 4) {
 
     const closeMatch = await firstPresentLocator(driver, closeLocators, 3000);
     if (!closeMatch) {
-      console.log(`[${jobId}] Vahan close (X) button not found on attempt ${attempt}.`);
+      console.log(`[${jobId}] Vahan close button not found on attempt ${attempt}.`);
     } else {
       try {
         await scrollAndClickResolved(driver, closeMatch.element);
-        console.log(`[${jobId}] Clicked Vahan close (X) [attempt ${attempt}]`);
+        console.log(`[${jobId}] Clicked Vahan close [attempt ${attempt}]`);
       } catch (clickErr) {
         // Native click blocked by the overlay — go straight through the DOM.
         try {
