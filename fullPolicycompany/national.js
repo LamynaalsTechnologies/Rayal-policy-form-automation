@@ -409,7 +409,7 @@ async function overridePortalDerivedIdv(driver, data, { reassert = false } = {})
         `[${jobId}] No IDV supplied — keeping the portal-derived value.`
       );
     }
-    return;
+    return false;
   }
 
   try {
@@ -432,7 +432,7 @@ async function overridePortalDerivedIdv(driver, data, { reassert = false } = {})
       console.log(
         `[${jobId}] ⚠️ IDV input (pc_text_idv_01) not found — keeping the portal-derived value.`
       );
-      return;
+      return false;
     }
 
     // Let the portal finish deriving first. Writing into the field while its
@@ -451,7 +451,7 @@ async function overridePortalDerivedIdv(driver, data, { reassert = false } = {})
     // On the re-assert pass, say nothing and do nothing when our value is
     // still sitting there — the common case, and it should not add noise.
     if (reassert && digitsOf(derived) === digitsOf(idvValue)) {
-      return;
+      return false;
     }
 
     console.log(
@@ -521,11 +521,148 @@ async function overridePortalDerivedIdv(driver, data, { reassert = false } = {})
 
     await checkForValidationErrors(driver, data, "idv_override");
     await driver.sleep(500);
+
+    // Reported to the caller because writing this field makes the portal
+    // recompute the discount, which then has to be put back.
+    return true;
   } catch (e) {
     if (e.message.includes("Validation Error")) throw e;
     console.log(
       `[${jobId}] ⚠️ Could not override the portal-derived IDV: ${e.message}`
     );
+    return false;
+  }
+}
+
+/**
+ * Fill the discount percentage on the quick-quote form.
+ *
+ * MUST run after the IDV. The portal derives the discount a vehicle qualifies
+ * for from its value, so it rewrites this field every time the IDV changes —
+ * which is why this used to be silently thrown away when it ran first.
+ *
+ * Reads the value back afterwards: the portal is entitled to clamp the figure
+ * to whatever the vehicle actually qualifies for ("Maximum available
+ * discount(%)"), and knowing it was clamped beats assuming the number went in.
+ */
+// Used only when the policy carries no discount of its own — the portal will
+// not accept an empty box, and 75 is the figure this step has always sent.
+const DEFAULT_QUICK_QUOTE_DISCOUNT = "75";
+
+/**
+ * The discount this policy should be priced at.
+ *
+ * Mongo/the automation server hand the same number over under several names
+ * (server.js maps ODDiscount / odDiscount / Detariff_Discount_Rate onto
+ * `discount`), so all of them are checked — the full-policy stage further down
+ * reads `formData.discount`, and the two must not disagree.
+ *
+ * 0 is a LEGITIMATE discount, so the presence test is explicitly against
+ * undefined/null/"" rather than falsiness.
+ */
+const resolvePolicyDiscount = (data) => {
+  const raw = [
+    data?.discount,
+    data?.ODDiscount,
+    data?.odDiscount,
+    data?.Detariff_Discount_Rate,
+  ].find((v) => v !== undefined && v !== null && v !== "");
+
+  const num = Number(raw);
+  if (Number.isFinite(num) && num >= 0 && num <= 100) {
+    return { value: String(num), fromPolicy: true };
+  }
+  return { value: DEFAULT_QUICK_QUOTE_DISCOUNT, fromPolicy: false };
+};
+
+async function fillDiscountPercentage(driver, data, { reason = "" } = {}) {
+  const jobId = data._jobId || "National";
+  const { value: target, fromPolicy } = resolvePolicyDiscount(data);
+  const digitsOf = (value) => String(value ?? "").replace(/[^0-9.]/g, "");
+
+  console.log(
+    `Filling percentage: ${target}%${fromPolicy ? " (from the policy)" : " (default — the policy carries no discount)"}${reason ? ` (${reason})` : ""}`
+  );
+
+  const percentageField = By.name("mcy_text_percentage_01");
+
+  try {
+    const el = await driver.wait(
+      until.elementLocated(percentageField),
+      15000
+    );
+    await driver.wait(until.elementIsVisible(el), 15000);
+    await driver.wait(until.elementIsEnabled(el), 15000);
+    await driver.executeScript(
+      "arguments[0].scrollIntoView({block: 'center'});",
+      el
+    );
+
+    const before = await el.getAttribute("value");
+
+    // clear() + sendKeys (what safeType does) was NOT enough here. The portal
+    // pre-fills this box with the maximum discount the vehicle qualifies for
+    // and only commits a new figure on blur — so the typed value went in, no
+    // blur followed, and Angular painted its own number straight back over it.
+    // That is why the read-back kept showing the portal's 80 instead of ours.
+    await el.click().catch(() => { });
+    await el.sendKeys(Key.CONTROL, "a");
+    await el.sendKeys(Key.DELETE);
+    await el.sendKeys(target);
+    await driver.executeScript(
+      "const el = arguments[0];" +
+      "el.dispatchEvent(new Event('input', {bubbles:true}));" +
+      "el.dispatchEvent(new Event('change', {bubbles:true}));" +
+      "el.dispatchEvent(new Event('blur', {bubbles:true}));",
+      el
+    );
+
+    await driver.sleep(1000);
+
+    let applied = await driver
+      .findElement(percentageField)
+      .getAttribute("value");
+
+    // Typing can be swallowed when Angular re-renders the block mid-keystroke.
+    // The native value setter survives that.
+    if (digitsOf(applied) !== digitsOf(target)) {
+      const retryEl = await driver.findElement(percentageField);
+      await driver.executeScript(
+        "const el = arguments[0];" +
+        "const setter = Object.getOwnPropertyDescriptor(" +
+        "  window.HTMLInputElement.prototype, 'value').set;" +
+        "setter.call(el, arguments[1]);" +
+        "el.dispatchEvent(new Event('input', {bubbles:true}));" +
+        "el.dispatchEvent(new Event('change', {bubbles:true}));" +
+        "el.dispatchEvent(new Event('blur', {bubbles:true}));",
+        retryEl,
+        target
+      );
+      await driver.sleep(1000);
+      applied = await driver
+        .findElement(percentageField)
+        .getAttribute("value");
+    }
+
+    await checkForValidationErrors(driver, data, "discount_selection");
+
+    if (digitsOf(applied) === digitsOf(target)) {
+      console.log(
+        `[${jobId}] ✅ Discount percentage on the quote: ${applied}% (portal had ${before || "empty"})`
+      );
+    } else {
+      // Not an error. The portal caps the discount at what the vehicle
+      // qualifies for, so a figure above that legitimately comes back clamped —
+      // say which number the quote is actually priced on.
+      console.log(
+        `[${jobId}] ⚠️ Portal kept discount ${applied || "(empty)"} instead of ${target} — the quote is priced on ${applied || "its own default"}.`
+      );
+    }
+
+    await driver.sleep(500);
+  } catch (e) {
+    if (e.message.includes("Validation Error")) throw e;
+    console.log("Could not fill percentage field:", e.message);
   }
 }
 
@@ -2229,18 +2366,10 @@ async function fillNationalForm(
       "variant"
     );
 
-    // Fill percentage field
-    console.log("Filling percentage...");
-    try {
-      const percentageField = By.name("mcy_text_percentage_01");
-      await safeType(driver, percentageField, "75", 15000);
-      await driver.sleep(1000); // Wait for potential error to appear
-      await checkForValidationErrors(driver, data, "discount_selection");
-      await driver.sleep(500);
-    } catch (e) {
-      if (e.message.includes("Validation Error")) throw e;
-      console.log("Could not fill percentage field:", e.message);
-    }
+    // The discount percentage USED to be filled here, before the IDV. The
+    // portal recalculates the discount off the vehicle value, so typing an IDV
+    // afterwards wiped whatever had just been entered. It now goes in after the
+    // IDV block below, once the value the discount applies to is settled.
 
     await driver.sleep(1000);
 
@@ -2342,6 +2471,12 @@ async function fillNationalForm(
       }
     }
 
+    // Discount goes in only now, with the IDV settled — see
+    // fillDiscountPercentage for why the order matters.
+    await fillDiscountPercentage(driver, data);
+
+    await driver.sleep(1000);
+
     // Compulsory PA for Owner Driver (Initial Setup - Quick Quote Stage)
     try {
       const isCompanyPA = (data.paCover === true || data.paCover === "true") && (String(data.paCoverCompany).toLowerCase() === "company");
@@ -2397,7 +2532,17 @@ async function fillNationalForm(
     // price when it does. This puts our figure back if that happened, and is
     // silent when it did not.
     if (isModelNotFound) {
-      await overridePortalDerivedIdv(driver, data, { reassert: true });
+      const idvRewritten = await overridePortalDerivedIdv(driver, data, {
+        reassert: true,
+      });
+      // Writing the IDV makes the portal recompute the discount off the new
+      // value, so the figure entered above is gone again. Only re-enter it when
+      // the IDV actually had to be rewritten — the usual case is a no-op.
+      if (idvRewritten) {
+        await fillDiscountPercentage(driver, data, {
+          reason: "re-applying after IDV was restored",
+        });
+      }
     }
 
     // Click Generate Quick Quote button
