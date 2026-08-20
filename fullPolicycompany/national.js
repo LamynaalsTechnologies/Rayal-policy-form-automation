@@ -381,6 +381,155 @@ async function waitForPortalIdle(driver, timeout = 40000, appearGrace = 400) {
 }
 
 /**
+ * Write our own IDV into the portal's IDV field in model-not-found mode.
+ *
+ * Ticking "Not able to Find the required Model & Variant" makes the portal
+ * DISABLE the IDV input and derive a figure of its own from the Manufacturer's
+ * Selling Price. That derived number is not the one the operator agreed with
+ * the customer — the form makes them type an IDV inside the range the selling
+ * price implies (see BasicPolicyDetailsStep: National keeps the IDV field open
+ * precisely for this), and that is the number the quote must carry.
+ *
+ * A disabled input ignores both real typing and synthetic events, so the field
+ * is re-enabled first. The portal keeps ownership of it either way: if it
+ * re-derives and overwrites us, that is logged rather than hidden.
+ *
+ * Never fatal — the portal-derived IDV is still a usable quote, so a failure
+ * here warns and lets the run continue. Real on-page validation ("IDV can't be
+ * less than X") still throws, exactly as it does on the normal IDV path.
+ */
+async function overridePortalDerivedIdv(driver, data, { reassert = false } = {}) {
+  const jobId = data._jobId || "National";
+  const idvValue = data.idv || data.idvValue || data.insuredDeclaredValue;
+  const digitsOf = (value) => String(value ?? "").replace(/[^0-9.]/g, "");
+
+  if (!idvValue || Number(idvValue) <= 0) {
+    if (!reassert) {
+      console.log(
+        `[${jobId}] No IDV supplied — keeping the portal-derived value.`
+      );
+    }
+    return;
+  }
+
+  try {
+    const found = await firstPresentLocator(
+      driver,
+      [
+        By.name("pc_text_idv_01"),
+        By.css("input[name='pc_text_idv_01']"),
+        By.xpath(
+          "//*[contains(normalize-space(.), 'IDV')]/following::input[not(@type='hidden')][1]"
+        ),
+      ],
+      // The first pass may still be waiting on the block to re-render after
+      // the selling price; by the re-assert pass the field is long since there.
+      reassert ? 5000 : 20000,
+      { requireVisible: false }
+    );
+
+    if (!found) {
+      console.log(
+        `[${jobId}] ⚠️ IDV input (pc_text_idv_01) not found — keeping the portal-derived value.`
+      );
+      return;
+    }
+
+    // Let the portal finish deriving first. Writing into the field while its
+    // own calculation is still in flight just gets overwritten a moment later.
+    if (!reassert) {
+      await driver
+        .wait(async () => {
+          const current = await found.element.getAttribute("value");
+          return !!(current && String(current).trim());
+        }, 10000)
+        .catch(() => { });
+    }
+
+    const derived = await found.element.getAttribute("value");
+
+    // On the re-assert pass, say nothing and do nothing when our value is
+    // still sitting there — the common case, and it should not add noise.
+    if (reassert && digitsOf(derived) === digitsOf(idvValue)) {
+      return;
+    }
+
+    console.log(
+      `[${jobId}] ${reassert
+        ? `IDV was reset to ${derived || "(empty)"} — re-applying`
+        : `Portal-derived IDV: ${derived || "(empty)"} — overriding with`
+      } ${idvValue}`
+    );
+
+    // The portal disables this input in model-not-found mode. Selenium refuses
+    // to type into a disabled field and the browser drops events on it, so the
+    // attribute has to go before anything else works.
+    await driver.executeScript(
+      "const el = arguments[0];" +
+      "el.removeAttribute('disabled');" +
+      "el.disabled = false;" +
+      "el.removeAttribute('readonly');" +
+      "el.readOnly = false;" +
+      "el.scrollIntoView({block: 'center'});",
+      found.element
+    );
+
+    await found.element.clear().catch(() => { });
+    await found.element.sendKeys(String(idvValue)).catch(() => { });
+
+    // Angular commits the model on input/change and recalculates on blur —
+    // the same trio the selling price field needs.
+    await driver.executeScript(
+      "const el = arguments[0];" +
+      "el.dispatchEvent(new Event('input', {bubbles:true}));" +
+      "el.dispatchEvent(new Event('change', {bubbles:true}));" +
+      "el.dispatchEvent(new Event('blur', {bubbles:true}));",
+      found.element
+    );
+
+    await driver.sleep(1000);
+
+    let applied = await found.element.getAttribute("value");
+
+    // sendKeys can be swallowed when Angular re-renders the block mid-type.
+    // Fall back to the native value setter, which survives that.
+    if (digitsOf(applied) !== digitsOf(idvValue)) {
+      await driver.executeScript(
+        "const el = arguments[0];" +
+        "const setter = Object.getOwnPropertyDescriptor(" +
+        "  window.HTMLInputElement.prototype, 'value').set;" +
+        "setter.call(el, arguments[1]);" +
+        "el.dispatchEvent(new Event('input', {bubbles:true}));" +
+        "el.dispatchEvent(new Event('change', {bubbles:true}));" +
+        "el.dispatchEvent(new Event('blur', {bubbles:true}));",
+        found.element,
+        String(idvValue)
+      );
+      await driver.sleep(1000);
+      applied = await found.element.getAttribute("value");
+    }
+
+    if (digitsOf(applied) === digitsOf(idvValue)) {
+      console.log(`[${jobId}] ✅ Filled IDV value: ${idvValue}`);
+    } else {
+      // Not an error: the portal is entitled to re-derive. Say so plainly so
+      // the number on the quote is never a surprise.
+      console.log(
+        `[${jobId}] ⚠️ Portal kept its own IDV (${applied}) instead of ${idvValue}.`
+      );
+    }
+
+    await checkForValidationErrors(driver, data, "idv_override");
+    await driver.sleep(500);
+  } catch (e) {
+    if (e.message.includes("Validation Error")) throw e;
+    console.log(
+      `[${jobId}] ⚠️ Could not override the portal-derived IDV: ${e.message}`
+    );
+  }
+}
+
+/**
  * Probe several locators at once and return the first that is actually
  * present, without burning a full timeout per miss.
  *
@@ -2097,8 +2246,9 @@ async function fillNationalForm(
 
     if (isModelNotFound) {
       // The non-GIC checkbox disabled the IDV input — the portal computes the
-      // IDV itself from the Manufacturer's Selling Price. Fill that instead and
-      // skip IDV entirely.
+      // IDV itself from the Manufacturer's Selling Price. Fill the selling
+      // price first, then re-enable the IDV field and write our own figure over
+      // the derived one (see overridePortalDerivedIdv).
       console.log(
         `[${data._jobId || "National"}] Filling Manufacturer's Selling Price (IDV is portal-derived)...`
       );
@@ -2155,6 +2305,11 @@ async function fillNationalForm(
         await driver.sleep(1000); // Wait for potential error validation
         await checkForValidationErrors(driver, data, "selling_price_filling");
         await driver.sleep(500);
+
+        // The selling price only seeds the portal's own IDV. The operator
+        // typed an IDV of their own on our form (National keeps that field
+        // open in model-not-found mode) — put it on the quote.
+        await overridePortalDerivedIdv(driver, data);
       } catch (e) {
         if (e.message.includes("Validation Error")) throw e;
         console.log(
@@ -2235,6 +2390,15 @@ async function fillNationalForm(
     }
 
     await driver.sleep(1000);
+
+    // Last chance to get our IDV onto the quote. Everything between the
+    // selling-price step and here — the PA radio above especially — re-renders
+    // the vehicle block, and the portal re-derives the IDV from the selling
+    // price when it does. This puts our figure back if that happened, and is
+    // silent when it did not.
+    if (isModelNotFound) {
+      await overridePortalDerivedIdv(driver, data, { reassert: true });
+    }
 
     // Click Generate Quick Quote button
     console.log("Clicking Generate Quick Quote button...");
@@ -2332,13 +2496,24 @@ async function fillNationalForm(
         return value && value.trim() !== '';
       }, 15000);
 
-      // Get the IDV value. In non-GIC (model-not-found) mode this is the ONLY
-      // place we learn the IDV — the field was disabled and the portal computed
-      // it from the Manufacturer's Selling Price. Disabled inputs still expose
-      // `value`, so this read works in both modes.
+      // Read whatever the portal ended up holding, in BOTH modes. In
+      // model-not-found mode overridePortalDerivedIdv already wrote our own
+      // figure here, but the portal may still have re-derived it from the
+      // selling price — this read is what settles which number the quote
+      // actually carries. Disabled inputs still expose `value`.
       idvValue = await idvInput.getAttribute('value');
+      const overrodeIdv =
+        isModelNotFound &&
+        data.idv &&
+        String(data.idv).replace(/[^0-9.]/g, "") ===
+          String(idvValue).replace(/[^0-9.]/g, "");
       console.log(
-        `✅ [${jobId}] IDV value extracted: ${idvValue}${isModelNotFound ? " (derived by the portal from the selling price)" : ""}`
+        `✅ [${jobId}] IDV value extracted: ${idvValue}${isModelNotFound
+          ? overrodeIdv
+            ? " (our value, accepted by the portal)"
+            : " (derived by the portal from the selling price)"
+          : ""
+        }`
       );
 
       // Store IDV in data object for later use
