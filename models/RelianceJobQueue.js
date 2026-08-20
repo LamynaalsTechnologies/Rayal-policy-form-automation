@@ -128,6 +128,16 @@ const RelianceJobQueueSchema = new mongoose.Schema(
       type: ErrorLogSchema,
       default: null,
     },
+    // Screen recordings of the automation runs (one per attempt), written by
+    // lib/jobRecorder.js via the raw driver. s3Key is null for recordings
+    // that fell back to local storage.
+    // Entry: { attemptNumber, s3Key, localPath, storage: "s3"|"local",
+    //          startedAt, endedAt, durationMs, sizeBytes, frameCount,
+    //          captureMode }
+    recordings: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: [],
+    },
   },
   {
     timestamps: false, // We manage timestamps manually

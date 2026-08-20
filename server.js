@@ -51,6 +51,9 @@ const cleanupOldData = async () => {
     'temp_uploads',
     'cloned_profiles_national',
     'cloned_profiles_kshema',
+    // Frame dumps from job screen recordings — useless across a restart
+    // (finished videos are already in S3 / local-recordings by then).
+    'recordings_tmp',
     // Litter left by the (now removed) profile pool's failed init — 25+ empty
     // dirs were found here. Absolute path, cleaned like the rest.
     '/dev/shm/chrome-profiles'
@@ -100,6 +103,59 @@ const cleanupOldData = async () => {
 
 // Run cleanup immediately on script load
 cleanupOldData().catch(err => console.error("Cleanup error:", err));
+
+// ---------------------------------------------------------------------------
+// Job screen recording (RECORDING_ENABLED=true in .env)
+//
+// Each job's browser is recorded to an MP4 and uploaded to S3 under
+// recordings/. Retention is fully automatic: the lifecycle rule below makes S3
+// itself delete every recording after RECORDING_RETENTION_DAYS (default 10),
+// and the daily purge gives local-fallback files the same lifespan. With the
+// flag off none of this runs.
+// ---------------------------------------------------------------------------
+const {
+  isRecordingEnabled,
+  finalizeRecording,
+  sweepOrphanedFrameDirs,
+  shutdownRecordings,
+} = require("./lib/jobRecorder");
+if (isRecordingEnabled()) {
+  const {
+    ensureRecordingLifecycleRule,
+    purgeOldLocalRecordings,
+  } = require("./s3Uploader");
+  console.log("🎥 Job screen recording is ENABLED");
+  ensureRecordingLifecycleRule().catch((e) =>
+    console.error("Recording lifecycle setup error:", e.message)
+  );
+  // Disk hygiene. Nothing here may grow unbounded on the server:
+  //  - frame folders from jobs that died before their video was built
+  //    (startup wipes recordings_tmp; this catches them while it RUNS),
+  //  - local fallback videos, kept only while S3 is unreachable.
+  purgeOldLocalRecordings();
+  setInterval(() => {
+    try {
+      sweepOrphanedFrameDirs();
+    } catch (err) {
+      console.error("[Recording Sweep] Error:", err.message);
+    }
+  }, 10 * 60 * 1000);
+  setInterval(purgeOldLocalRecordings, 24 * 60 * 60 * 1000);
+
+  // Stopping the server must leave NOTHING behind on this box. Ctrl-C used to
+  // strand the running job's frames (~16 MB each) until the next startup.
+  // 'exit' is the backstop that catches paths the signals miss; both are
+  // synchronous, so they still run as the process goes down.
+  const stopAndClean = (signal) => {
+    console.log(`\n🛑 ${signal} received — cleaning up recordings...`);
+    shutdownRecordings();
+    process.exit(0);
+  };
+  process.once("SIGINT", () => stopAndClean("SIGINT"));
+  process.once("SIGTERM", () => stopAndClean("SIGTERM"));
+  process.once("SIGHUP", () => stopAndClean("SIGHUP"));
+  process.on("exit", () => shutdownRecordings());
+}
 
 // Periodic orphan-profile sweep. Defined further down (needs JOB_TIMEOUT);
 // scheduled here so it actually RUNS — it was previously defined but never
@@ -1744,6 +1800,19 @@ const runPolicyJob = async (rawJob) => {
         nextRetryAt: nextRetryAt
       });
     }
+  } finally {
+    // Stop this job's screen recording and ship the video. Deliberately NOT
+    // awaited: stitching + upload happen off to the side so the queue slot is
+    // released immediately, and finalizeRecording never throws. Runs on every
+    // exit path — success, failure, and the [E302] timeout where the flow
+    // keeps going detached (the recorder's own max-duration stop covers it).
+    void finalizeRecording(job._id, {
+      companyName,
+      // Keyed by the POLICY, so a re-run overwrites the previous video rather
+      // than adding another one next to it.
+      policyId: job.captchaId,
+      collection: jobQueueCollection,
+    });
   }
 };
 

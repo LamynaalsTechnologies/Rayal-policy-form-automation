@@ -4,6 +4,7 @@ const {
   cleanupNationalJobBrowser,
 } = require("../nationalSessionManager");
 const { CONFIG } = require("../nationalBrowserConfig");
+const { startRecording } = require("../lib/jobRecorder");
 const fs = require("fs");
 const path = require("path");
 const { extractCaptchaText } = require("../Captcha");
@@ -1646,6 +1647,10 @@ async function fillNationalForm(
     // === STEP 0: Create fresh browser ===
     jobBrowser = await createNationalJobBrowser(jobId);
     driver = jobBrowser.driver;
+
+    // Screen-record this job's own window (no-op unless RECORDING_ENABLED).
+    // The server stops it and ships the video in runPolicyJob's finally.
+    startRecording(driver, data._jobId, data._attemptNumber || 1, { label: jobId });
 
     console.log(`✅ [${jobId}] National browser ready!`);
 

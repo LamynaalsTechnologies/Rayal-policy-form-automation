@@ -1,5 +1,6 @@
 const { By, until, Key } = require("selenium-webdriver");
 const { createFreshDriverFromBaseProfile } = require("../browser");
+const { startRecording } = require("../lib/jobRecorder");
 const {
   // Fresh window per job, no master session — see createRelianceJobBrowser.
   createRelianceJobBrowser,
@@ -1045,6 +1046,10 @@ async function fillRelianceForm(
     // The login below is the only one that ever mattered.
     jobBrowser = await createRelianceJobBrowser(jobId);
     driver = jobBrowser.driver;
+
+    // Screen-record this job's own window (no-op unless RECORDING_ENABLED).
+    // The server stops it and ships the video in runPolicyJob's finally.
+    startRecording(driver, data._jobId, data._attemptNumber || 1, { label: jobId });
 
     // THIS job's portal URL — the hardcoded address is only the fallback for a
     // credential saved without one.

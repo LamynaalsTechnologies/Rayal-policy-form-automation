@@ -154,6 +154,220 @@ function generateScreenshotKey(jobId, attempt, type = "error") {
   return `screenshots/${type}/${sanitizedJobId}/attempt_${attempt}/${timestamp}.png`;
 }
 
+// ─── Job screen recordings ───────────────────────────────────────────────────
+// Videos live under this prefix so ONE lifecycle rule can expire them all
+// without touching screenshots or anything else in the bucket.
+const RECORDING_PREFIX = "recordings/";
+const RECORDING_RETENTION_DAYS =
+  parseInt(process.env.RECORDING_RETENTION_DAYS, 10) || 10;
+const RECORDING_LIFECYCLE_RULE_ID = "auto-delete-job-recordings";
+const LOCAL_RECORDINGS_DIR = path.join(__dirname, "local-recordings");
+// Ceiling for the local fallback folder (only used when S3 is unreachable).
+const LOCAL_MAX_MB = parseInt(process.env.RECORDING_LOCAL_MAX_MB, 10) || 2048;
+
+/**
+ * S3 key for a policy's screen recording: recordings/<company>/<policyId>.mp4
+ *
+ * Deliberately ONE key per policy, with no attempt number in it. Re-running a
+ * policy overwrites the same object, so the old video is physically replaced
+ * rather than kept alongside the new one — only the latest run is ever stored.
+ */
+function generateRecordingKey(companyName, policyId) {
+  const company = String(companyName || "unknown")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "_");
+  const sanitizedId = String(policyId).replace(/[^a-zA-Z0-9_-]/g, "_");
+  return `${RECORDING_PREFIX}${company}/${sanitizedId}.mp4`;
+}
+
+/** Remove one recording object. Never throws — a missing key is a no-op. */
+async function deleteRecordingFromS3(s3Key) {
+  if (!hasAwsCredentials || !s3 || !s3Key) return false;
+  try {
+    await s3.deleteObject({ Bucket: BUCKET_NAME, Key: s3Key }).promise();
+    console.log(`🗑️  Deleted old recording: ${s3Key}`);
+    return true;
+  } catch (error) {
+    console.warn(`⚠️ Could not delete recording ${s3Key}: ${error.message}`);
+    return false;
+  }
+}
+
+/**
+ * Upload a recording MP4. Falls back to local-recordings/ when S3 is not
+ * configured or the upload fails — same graceful degradation as screenshots.
+ * @returns {Promise<{storage: "s3"|"local", location: string}>}
+ */
+async function uploadRecordingToS3(filePath, s3Key) {
+  const saveLocally = () => {
+    const localPath = path.join(LOCAL_RECORDINGS_DIR, s3Key);
+    fs.mkdirSync(path.dirname(localPath), { recursive: true });
+    fs.copyFileSync(filePath, localPath);
+    console.log(`📁 Recording saved locally: ${localPath}`);
+    return { storage: "local", location: localPath };
+  };
+
+  if (!hasAwsCredentials || !s3) return saveLocally();
+
+  try {
+    console.log(`📤 Uploading recording to S3: ${s3Key}...`);
+    const result = await s3
+      .upload({
+        Bucket: BUCKET_NAME,
+        Key: s3Key,
+        Body: fs.createReadStream(filePath),
+        ContentType: "video/mp4",
+        ACL: "private",
+      })
+      .promise();
+    console.log(`✅ Recording uploaded: ${result.Location}`);
+    return { storage: "s3", location: result.Location };
+  } catch (error) {
+    console.error(`❌ Recording upload failed:`, error.message);
+    return saveLocally();
+  }
+}
+
+/**
+ * Make sure the bucket expires recordings on its own.
+ *
+ * Runs on every server start (idempotent). Reads the existing lifecycle
+ * configuration and re-writes it with our rule added/updated — other rules on
+ * the bucket are preserved untouched. After this, S3 itself deletes every
+ * object under recordings/ once it is RECORDING_RETENTION_DAYS old; no cron,
+ * no manual cleanup.
+ */
+async function ensureRecordingLifecycleRule() {
+  if (!hasAwsCredentials || !s3) {
+    console.warn("⚠️ Recording lifecycle rule skipped — S3 not configured");
+    return false;
+  }
+
+  try {
+    let rules = [];
+    try {
+      const existing = await s3
+        .getBucketLifecycleConfiguration({ Bucket: BUCKET_NAME })
+        .promise();
+      rules = existing.Rules || [];
+    } catch (err) {
+      if (err.code !== "NoSuchLifecycleConfiguration") throw err;
+    }
+
+    const ours = {
+      ID: RECORDING_LIFECYCLE_RULE_ID,
+      Filter: { Prefix: RECORDING_PREFIX },
+      Status: "Enabled",
+      Expiration: { Days: RECORDING_RETENTION_DAYS },
+    };
+
+    const current = rules.find((r) => r.ID === RECORDING_LIFECYCLE_RULE_ID);
+    if (current && current.Expiration?.Days === RECORDING_RETENTION_DAYS) {
+      console.log(
+        `🗓️  S3 lifecycle: recordings already expire after ${RECORDING_RETENTION_DAYS} days`
+      );
+      return true;
+    }
+
+    const nextRules = rules
+      .filter((r) => r.ID !== RECORDING_LIFECYCLE_RULE_ID)
+      .concat([ours]);
+
+    await s3
+      .putBucketLifecycleConfiguration({
+        Bucket: BUCKET_NAME,
+        LifecycleConfiguration: { Rules: nextRules },
+      })
+      .promise();
+
+    console.log(
+      `🗓️  S3 lifecycle rule set: recordings/ auto-deletes after ${RECORDING_RETENTION_DAYS} days`
+    );
+    return true;
+  } catch (error) {
+    console.error(
+      `⚠️ Could not set the S3 lifecycle rule for recordings (${error.message}).\n` +
+        `   Recordings will still upload, but WON'T auto-delete. Either grant the\n` +
+        `   IAM user s3:GetLifecycleConfiguration + s3:PutLifecycleConfiguration on\n` +
+        `   ${BUCKET_NAME}, or add a rule manually in the S3 console: prefix\n` +
+        `   "${RECORDING_PREFIX}", expire after ${RECORDING_RETENTION_DAYS} days.`
+    );
+    return false;
+  }
+}
+
+/**
+ * Keep the local-fallback folder from growing without bound.
+ *
+ * Videos only land here when S3 is unreachable, and unlike S3 objects they
+ * have no lifecycle rule looking after them. Two limits, both enforced here:
+ *
+ *   1. age  — anything older than RECORDING_RETENTION_DAYS goes, matching what
+ *             S3 does to the uploaded ones.
+ *   2. size — if the folder still exceeds RECORDING_LOCAL_MAX_MB, the oldest
+ *             files go until it fits. Without this, a long S3 outage would
+ *             quietly fill the automation server's disk.
+ */
+function purgeOldLocalRecordings() {
+  if (!fs.existsSync(LOCAL_RECORDINGS_DIR)) return;
+  const cutoff = Date.now() - RECORDING_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const maxBytes = LOCAL_MAX_MB * 1024 * 1024;
+  const survivors = [];
+  let removedByAge = 0;
+
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      try {
+        if (entry.isDirectory()) {
+          walk(full);
+          if (fs.readdirSync(full).length === 0) fs.rmdirSync(full);
+        } else {
+          const stat = fs.statSync(full);
+          if (stat.mtimeMs < cutoff) {
+            fs.unlinkSync(full);
+            removedByAge++;
+          } else {
+            survivors.push({ full, mtimeMs: stat.mtimeMs, size: stat.size });
+          }
+        }
+      } catch (e) {
+        /* a file in use or already gone is fine */
+      }
+    }
+  };
+
+  try {
+    walk(LOCAL_RECORDINGS_DIR);
+
+    // Size cap: drop the oldest survivors until the folder is under the limit.
+    let total = survivors.reduce((sum, f) => sum + f.size, 0);
+    let removedBySize = 0;
+    if (total > maxBytes) {
+      survivors.sort((a, b) => a.mtimeMs - b.mtimeMs);
+      for (const f of survivors) {
+        if (total <= maxBytes) break;
+        try {
+          fs.unlinkSync(f.full);
+          total -= f.size;
+          removedBySize++;
+        } catch (e) {
+          /* skip and carry on */
+        }
+      }
+    }
+
+    if (removedByAge || removedBySize) {
+      const parts = [];
+      if (removedByAge) parts.push(`${removedByAge} older than ${RECORDING_RETENTION_DAYS} days`);
+      if (removedBySize) parts.push(`${removedBySize} to stay under ${LOCAL_MAX_MB} MB`);
+      console.log(`🗑️  Purged local recordings: ${parts.join(", ")}`);
+    }
+  } catch (e) {
+    console.warn(`⚠️ Local recordings purge failed: ${e.message}`);
+  }
+}
+
 /**
  * Get presigned URL for private S3 object (expires in 7 days)
  * @param {string} s3Key - S3 object key
@@ -181,4 +395,9 @@ module.exports = {
   generateScreenshotKey,
   getPresignedUrl,
   BUCKET_NAME,
+  uploadRecordingToS3,
+  generateRecordingKey,
+  deleteRecordingFromS3,
+  ensureRecordingLifecycleRule,
+  purgeOldLocalRecordings,
 };

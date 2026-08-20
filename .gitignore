@@ -42,6 +42,12 @@ Thumbs.db
 temp/
 tmp/
 
+# Job screen recordings — runtime artefacts, never source.
+# recordings_tmp holds the raw frames while a job is being recorded (hundreds
+# of JPEGs per run); local-recordings only fills up when S3 is unreachable.
+recordings_tmp/
+local-recordings/
+
 # Build outputs
 dist/
 build/

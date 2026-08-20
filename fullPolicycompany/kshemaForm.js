@@ -23,6 +23,7 @@ const {
 } = require("./kshema/kshemaSessionManager");
 const { log, debug, warn, err, VERBOSE } = require("./kshema/kshemaLog");
 const { uploadScreenshotToS3, generateScreenshotKey } = require("../s3Uploader");
+const { startRecording } = require("../lib/jobRecorder");
 const {
   readToast,
   friendlyLoginError,
@@ -609,6 +610,10 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
   try {
     jobBrowser = await createKshemaJobBrowser(jobId);
     const { driver } = jobBrowser;
+
+    // Screen-record this job's own window (no-op unless RECORDING_ENABLED).
+    // The server stops it and ships the video in runPolicyJob's finally.
+    startRecording(driver, data._jobId, data._attemptNumber || 1, { label: jobId });
 
     debug(`🌐 Opening ${loginUrl}`);
     await driver.get(loginUrl);
