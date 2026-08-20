@@ -664,6 +664,58 @@ const {
  * Never throws: these links are a convenience, and a failure to record them
  * must not fail a job whose form was already submitted.
  */
+/**
+ * Record the insurer's proposal (referral) number on the policy.
+ *
+ * The portal issues this the moment it says "Proposal Saved Successfully" —
+ * R200826103561 and the like. Up to now it only ever lived in the run's console
+ * output and a local variable, so once the run ended nothing tied the policy in
+ * our database to the proposal sitting in the insurer's portal.
+ *
+ * It matters most in the window BEFORE a policy number exists: the proposal is
+ * saved first and the policy number only lands once the policy is issued, so
+ * this is the single reference anyone chasing a stuck submission has.
+ *
+ * Never throws. The form is already submitted by the time this runs, and
+ * failing the job over a bookkeeping write would throw away real work.
+ */
+async function saveProposalNumber(proposalNumber, data, jobId = "") {
+  if (!proposalNumber) return;
+
+  const policyIdForUpdate = data?._id || data?.policyId;
+  if (!policyIdForUpdate) {
+    console.warn(
+      `[${jobId}] ⚠️ No policy id on the job — proposal ${proposalNumber} not linked.`
+    );
+    return;
+  }
+
+  const { MongoClient } = require("mongodb");
+  const client = new MongoClient(process.env.MONGODB_URI);
+  try {
+    await client.connect();
+    const result = await client
+      .db()
+      .collection("onlinePolicy")
+      .updateOne(
+        { _id: policyIdForUpdate },
+        { $set: { proposalNumber, updatedAt: new Date() } }
+      );
+    console.log(
+      `[${jobId}] 📝 onlinePolicy.proposalNumber = ${proposalNumber} (matched ${result.matchedCount})`
+    );
+    // Keep the in-memory copy in step, so later steps in this same run can
+    // quote the number without re-reading it.
+    data.proposalNumber = proposalNumber;
+  } catch (error) {
+    console.warn(
+      `[${jobId}] ⚠️ Could not save the proposal number: ${error.message}`
+    );
+  } finally {
+    await client.close().catch(() => { });
+  }
+}
+
 async function saveKycUrls(urls, data, jobId = "") {
   const { ovdUrl, uploadUrl } = urls || {};
   if (!ovdUrl && !uploadUrl) return null;
@@ -2831,6 +2883,11 @@ async function fillRelianceForm(
             console.error("❌ Failed to extract proposal number. Cannot continue with new flow.");
             throw new Error("Proposal number extraction failed");
           }
+
+          // Store it BEFORE the rest of the flow runs. Everything after this
+          // point can still fail, and when it does the proposal number is
+          // exactly what is needed to find the submission in the portal.
+          await saveProposalNumber(proposalNumber, data, jobId);
 
           // === NEW FLOW: Navigate to View Policy ===
           console.log("Navigating to View Policy...");
