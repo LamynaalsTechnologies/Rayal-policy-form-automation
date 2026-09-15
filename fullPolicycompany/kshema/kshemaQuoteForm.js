@@ -1513,6 +1513,258 @@ async function waitForKycRefusal(driver, timeoutMs = 30000, pollMs = 1000) {
   return null;
 }
 
+/**
+ * Download the policy's own Aadhaar card image to a local temp file.
+ *
+ * Same presignedUrl -> key -> location fallback chain, same content-type
+ * driven extension, same collision-safe filename as relianceForm.js's own
+ * inline downloader — that one could not be reused directly (it is a closure
+ * private to a much larger function), so this mirrors it rather than
+ * inventing a different approach for the same job.
+ */
+async function downloadAadharCardImage(data, jobId) {
+  const fs = require("fs");
+  const path = require("path");
+  const https = require("https");
+  const http = require("http");
+  const { getPresignedUrl } = require("../../s3Uploader");
+
+  const aadharCard = data.aadharCard || {};
+  let url = aadharCard.presignedUrl;
+  if (!url && aadharCard.key) {
+    try {
+      url = await getPresignedUrl(aadharCard.key);
+    } catch (e) {
+      warn(`   Could not generate a presigned URL for the Aadhaar card: ${e.message}`);
+    }
+  }
+  if (!url) url = aadharCard.location;
+  if (!url) {
+    throw new Error("No Aadhaar card image is on file for this policy.");
+  }
+
+  const originalFileName = aadharCard.fileName || "aadhaar";
+  // Two projects deep from the project root (fullPolicycompany/kshema/...),
+  // so this needs one more ".." than relianceForm.js's ROOT_DIR to land in
+  // the SAME shared temp_uploads directory.
+  const tempDir = path.join(__dirname, "..", "..", "temp_uploads");
+  if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+  return new Promise((resolve, reject) => {
+    const download = (downloadUrl) => {
+      const protocol = downloadUrl.startsWith("https") ? https : http;
+      protocol
+        .get(downloadUrl, (response) => {
+          if (response.statusCode === 301 || response.statusCode === 302) {
+            download(response.headers.location);
+            return;
+          }
+
+          const contentType = response.headers["content-type"] || "";
+          let ext = ".jpg";
+          if (contentType.includes("pdf")) ext = ".pdf";
+          else if (contentType.includes("png")) ext = ".png";
+          else if (contentType.includes("jpeg") || contentType.includes("jpg")) ext = ".jpg";
+          else {
+            const origExt = path.extname(originalFileName).toLowerCase();
+            if ([".pdf", ".jpg", ".jpeg", ".png"].includes(origExt)) ext = origExt;
+          }
+
+          // jobId + random suffix: two parallel jobs downloading in the same
+          // millisecond must not collide and upload one customer's Aadhaar
+          // onto another's KYC.
+          const tempFileName = `kshema_kyc_${jobId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+          const tempFilePath = path.join(tempDir, tempFileName);
+          const file = fs.createWriteStream(tempFilePath);
+          response.pipe(file);
+
+          file.on("finish", () => {
+            file.close();
+            const stats = fs.statSync(tempFilePath);
+            if (stats.size === 0) {
+              reject(new Error("Downloaded Aadhaar image is empty"));
+              return;
+            }
+            resolve(tempFilePath);
+          });
+          file.on("error", (fileErr) => {
+            fs.unlink(tempFilePath, () => {});
+            reject(fileErr);
+          });
+        })
+        .on("error", reject);
+    };
+    download(url);
+  });
+}
+
+/**
+ * The DigiLocker hand-off card ("No record found") offers "Try with
+ * different document". Recovers by uploading the SAME Aadhaar image the
+ * policy already has on file, once, instead of leaving the job for a human.
+ *
+ *   Try with different document -> confirm "Aadhaar card" is the selected
+ *   document type -> upload the image -> Submit for Verification -> the
+ *   portal's own OCR shows a "Review your details" screen -> Details are
+ *   correct - Verify.
+ *
+ * Every step here is speculative to the extent that this portal has only
+ * been seen through screenshots, not driven live — each lookup is
+ * text-based and best-effort, on purpose, so a markup change degrades to
+ * "could not find X" rather than a silent wrong click. The caller
+ * (fillKYCDetails) re-checks for a lingering error banner right after this
+ * returns "ok", so an over-optimistic read here is not the last word.
+ */
+async function recoverKycWithDocumentUpload(driver, data, jobId, capture = null) {
+  const { By } = require("selenium-webdriver");
+  const { clickElement } = require("./kshemaFields");
+  const fs = require("fs");
+
+  const findByText = (text) =>
+    By.xpath(
+      `//button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "${text}")]`
+    );
+
+  try {
+    log("   🔁 Attempting recovery: Try with different document...");
+    const tryDifferentBtn = await driver.wait(
+      async () => {
+        const els = await driver.findElements(findByText("try with different document"));
+        return els.length > 0 ? els[0] : null;
+      },
+      8000,
+      "\"Try with different document\" button not found"
+    );
+    await driver.executeScript("arguments[0].scrollIntoView({block:'center'});", tryDifferentBtn);
+    await clickElement(driver, tryDifferentBtn, "Try with different document");
+    await driver.sleep(1500);
+
+    // Confirm the document-type selector already reads "Aadhaar card" — it
+    // does by default per the portal — and only touch it if it does not.
+    try {
+      const trigger = await driver.findElements(By.css('[role="combobox"][data-slot="select-trigger"]'));
+      if (trigger.length > 0) {
+        const currentText = ((await trigger[0].getText()) || "").trim().toLowerCase();
+        if (!currentText.includes("aadhaar")) {
+          await clickElement(driver, trigger[0], "Document type selector");
+          await driver.sleep(500);
+          const options = await driver.findElements(
+            By.xpath('//*[@role="option"][contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "aadhaar")]')
+          );
+          if (options.length > 0) {
+            await clickElement(driver, options[0], "Aadhaar card option");
+            await driver.sleep(500);
+          } else {
+            warn("   ⚠️ Document type dropdown opened but no Aadhaar option was found — leaving as is.");
+          }
+        }
+      }
+    } catch (e) {
+      warn(`   ⚠️ Could not confirm the document type selector: ${e.message}`);
+    }
+
+    // Download this policy's own Aadhaar image and hand it straight to the
+    // underlying <input type="file"> — the visible "Tap to upload" button is
+    // a styled proxy for it and clicking it would only open a native file
+    // dialog Selenium cannot drive.
+    log("   📥 Downloading the policy's Aadhaar card image...");
+    const localFilePath = await downloadAadharCardImage(data, jobId);
+    const absoluteFilePath = require("path").resolve(localFilePath);
+
+    const fileInput = await driver.wait(
+      async () => {
+        const els = await driver.findElements(By.css("input[type='file']"));
+        return els.length > 0 ? els[0] : null;
+      },
+      8000,
+      "Aadhaar upload <input type=file> not found"
+    );
+    await driver.executeScript(
+      "arguments[0].style.display='block'; arguments[0].style.opacity='1'; arguments[0].style.visibility='visible';",
+      fileInput
+    );
+    await fileInput.sendKeys(absoluteFilePath);
+    log(`   ✓ Uploaded Aadhaar image: ${require("path").basename(absoluteFilePath)}`);
+    await driver.sleep(1500);
+
+    // Best-effort cleanup — the automation does not depend on this file
+    // afterwards, and a full temp_uploads directory is its own kind of bug.
+    fs.unlink(absoluteFilePath, () => {});
+
+    const submitBtn = await driver.wait(
+      async () => {
+        const els = await driver.findElements(findByText("submit for verification"));
+        return els.length > 0 ? els[0] : null;
+      },
+      8000,
+      "Submit for Verification button (upload step) not found"
+    );
+    await driver.executeScript("arguments[0].scrollIntoView({block:'center'});", submitBtn);
+    await clickElement(driver, submitBtn, "Submit for Verification (document upload)");
+    log("   🚀 Clicked Submit for Verification (document upload)");
+
+    // The portal OCRs the upload and shows "Review your details" with a
+    // "Details are correct - Verify" button once it is ready — this can take
+    // a while, so it is polled for rather than slept a fixed amount.
+    log("   ⏳ Waiting for the OCR review screen...");
+    const verifyBtn = await driver.wait(
+      async () => {
+        const els = await driver.findElements(findByText("details are correct"));
+        return els.length > 0 ? els[0] : null;
+      },
+      40000,
+      "\"Details are correct - Verify\" button never appeared"
+    );
+    await driver.executeScript("arguments[0].scrollIntoView({block:'center'});", verifyBtn);
+    await clickElement(driver, verifyBtn, "Details are correct - Verify");
+    log("   ✅ Clicked Details are correct - Verify");
+
+    // Give it up to 20s to move past the review screen. If it is still
+    // sitting there — no fresh error, no progress — cancel rather than leave
+    // the job hanging, and report it as RETRYABLE: nothing here points to a
+    // genuine data problem, just a slow or stuck confirmation.
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      const freshError = await readKycError(driver);
+      if (freshError) {
+        return {
+          ok: false,
+          retryable: false,
+          kycStatus: freshError,
+          error: `The KSHEMA KYC page refused the re-uploaded document: "${freshError}". Check the customer's Aadhaar card image on the policy.`,
+        };
+      }
+
+      const stillOnReview = await driver.findElements(findByText("details are correct"));
+      if (stillOnReview.length === 0) {
+        // Moved on from the review screen with no error in sight.
+        return { ok: true };
+      }
+
+      await driver.sleep(1000);
+    }
+
+    warn("   ⏳ Verification did not resolve within 20s — cancelling and retrying later.");
+    try {
+      const cancelBtn = await driver.findElements(findByText("cancel"));
+      if (cancelBtn.length > 0) {
+        await clickElement(driver, cancelBtn[0], "Cancel (verification stuck)");
+      }
+    } catch (e) {
+      warn(`   Could not click Cancel: ${e.message}`);
+    }
+
+    return {
+      ok: false,
+      retryable: true,
+      error: "The KSHEMA KYC verification did not resolve within 20 seconds after re-uploading the Aadhaar card. The job will be retried.",
+    };
+  } catch (e) {
+    warn(`   ⚠️ Document-upload recovery could not proceed: ${e.message}`);
+    return { ok: false, retryable: false, error: e.message };
+  }
+}
+
 async function fillKYCDetails(driver, data, capture = null) {
   const { clickElement } = require("./kshemaFields");
   const { By } = require("selenium-webdriver");
@@ -1635,28 +1887,47 @@ async function fillKYCDetails(driver, data, capture = null) {
                 if (capture) {
                   await capture("kyc_rejected", "kyc_rejected");
                 }
-                // Deliberately NOT switching back to the proposal tab — see the
-                // note on the switch below.
-                // The tab holding the error is the one the driver is on now —
-                // read its URL so the operator opens the right page.
-                let refusedUrl = kycUrl;
-                try {
-                  refusedUrl = await driver.getCurrentUrl();
-                } catch (e) { }
-                return {
-                  ok: false,
-                  kycUrl: refusedUrl || kycUrl,
-                  proposalUrl,
-                  stayedOnKycPage: true,
-                  kycStatus: kycError,
-                  error:
-                    `The KSHEMA KYC page refused the verification: "${kycError}". ` +
-                    "Check the customer's Aadhaar number and name on the policy " +
-                    "against their card, then run this policy again. The KYC page " +
-                    "has been left open on screen.",
-                };
+
+                // "No record found" hands off to a DigiLocker card offering
+                // "Try with different document" — recover by re-submitting
+                // the SAME Aadhaar as an uploaded image before giving up.
+                const recovery = await recoverKycWithDocumentUpload(
+                  driver,
+                  data,
+                  data._jobId || data._jobIdentifier || `kshema_${Date.now()}`,
+                  capture
+                );
+
+                if (recovery.ok) {
+                  log("   ✅ Recovered via document upload — continuing.");
+                  kycCompleted = true;
+                } else {
+                  // Deliberately NOT switching back to the proposal tab — see
+                  // the note on the switch below.
+                  // The tab holding the error is the one the driver is on
+                  // now — read its URL so the operator opens the right page.
+                  let refusedUrl = kycUrl;
+                  try {
+                    refusedUrl = await driver.getCurrentUrl();
+                  } catch (e) { }
+                  return {
+                    ok: false,
+                    kycUrl: refusedUrl || kycUrl,
+                    proposalUrl,
+                    stayedOnKycPage: true,
+                    kycStatus: recovery.kycStatus || kycError,
+                    retryable: recovery.retryable === true,
+                    error:
+                      recovery.error ||
+                      `The KSHEMA KYC page refused the verification: "${kycError}". ` +
+                      "Check the customer's Aadhaar number and name on the policy " +
+                      "against their card, then run this policy again. The KYC page " +
+                      "has been left open on screen.",
+                  };
+                }
+              } else {
+                kycCompleted = true;
               }
-              kycCompleted = true;
             } else {
               log("   ⚠️ No valid Aadhaar number found to extract last 4 digits.");
             }

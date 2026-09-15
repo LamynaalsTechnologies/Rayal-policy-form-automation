@@ -4046,200 +4046,6 @@ async function fillNationalForm(
             console.log(`[${jobId}] Failed to select No of Years dropdown: ${e.message}`);
           }
 
-          // C. Fill Nominee Name
-          // C. Fill Nominee Name
-          if (data.nomineeName) {
-            try {
-              const nameInput = await driver.findElement(By.css("input[name='mcy_text_cpaNomineeName_01']"));
-              await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", nameInput);
-              await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
-
-              await driver.executeScript(`
-      const input = arguments[0];
-      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      nativeInputValueSetter.call(input, arguments[1]);
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      input.dispatchEvent(new Event('blur', { bubbles: true }));
-    `, nameInput, data.nomineeName.toUpperCase());
-              await driver.sleep(500);
-              console.log(`[${jobId}] ✅ Filled Nominee Name: ${data.nomineeName}`);
-            } catch (e) {
-              console.log(`[${jobId}] Failed to fill Nominee Name: ${e.message}`);
-            }
-          }
-
-          // D. Fill Nominee Age
-          if (data.nomineeAge) {
-            try {
-              const ageInput = await driver.findElement(By.css("input[name='mcy_dropdown_cpaNomineeAge_01']"));
-              await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", ageInput);
-              await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
-
-              // Use nativeInputValueSetter to properly trigger Angular change detection
-              await driver.executeScript(`
-            const input = arguments[0];
-            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-            nativeInputValueSetter.call(input, arguments[1]);
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            input.dispatchEvent(new Event('blur', { bubbles: true }));
-          `, ageInput, data.nomineeAge.toString());
-              await driver.sleep(500);
-              console.log(`[${jobId}] ✅ Filled Nominee Age: ${data.nomineeAge}`);
-            } catch (e) {
-              console.log(`[${jobId}] Failed to fill Nominee Age: ${e.message}`);
-            }
-          }
-
-          // E. Select Relationship with Nominee.
-          //
-          // This is an AUTOCOMPLETE, not a mat-select: the control is
-          // <input name="mcy_dropdown_nomineeRelation_01" role="combobox"
-          // class="mat-mdc-autocomplete-trigger">. The old code looked for
-          // mat-select[name=...], found nothing, and silently left the field
-          // empty — which then failed the PA validation below with
-          // "Relationship with Nominee" every single run.
-          //
-          // selectAutocompleteOption is the same helper the RTO / make / model
-          // fields use, so this now behaves like every other autocomplete on
-          // the page (types, waits for the panel, picks the matching option).
-          if (data.nomineeRelation) {
-            try {
-              const relInput = await driver.wait(
-                until.elementLocated(
-                  By.css("input[name='mcy_dropdown_nomineeRelation_01']")
-                ),
-                15000
-              );
-              await driver.wait(until.elementIsVisible(relInput), 10000);
-              await driver.executeScript(
-                "arguments[0].scrollIntoView({block: 'center'});",
-                relInput
-              );
-
-              const relationTarget = String(data.nomineeRelation).trim();
-              await selectAutocompleteOption(
-                driver,
-                relInput,
-                relationTarget,
-                "Nominee Relation"
-              );
-
-              // Confirm the portal accepted it — an autocomplete keeps whatever
-              // was typed even when nothing was picked, so a filled-looking box
-              // can still be ng-invalid.
-              const relOk = await driver.executeScript(
-                "const el = document.querySelector(\"input[name='mcy_dropdown_nomineeRelation_01']\");" +
-                "return el ? { value: el.value, invalid: el.classList.contains('ng-invalid') } : null;"
-              );
-              if (relOk && !relOk.invalid) {
-                console.log(`[${jobId}] ✅ Selected Nominee Relation: ${relOk.value}`);
-              } else {
-                console.log(
-                  `[${jobId}] ⚠️ Nominee Relation still rejected after selecting "${relationTarget}" (value: "${relOk?.value || ""}")`
-                );
-              }
-            } catch (e) {
-              console.log(`[${jobId}] Failed to select Nominee Relation: ${e.message}`);
-            }
-          }
-
-          // F. Fill Appointee Name (if visible)
-          if (data.appointeeName) {
-            try {
-              const appointeeInput = await driver.findElement(
-                By.xpath("//mat-label[contains(., 'Appointee Name')]/ancestor::mat-form-field//input")
-              );
-              await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", appointeeInput);
-              await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
-
-              await driver.executeScript(`
-            const input = arguments[0];
-            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-            nativeInputValueSetter.call(input, arguments[1]);
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            input.dispatchEvent(new Event('blur', { bubbles: true }));
-          `, appointeeInput, data.appointeeName.toUpperCase());
-              await driver.sleep(500);
-              console.log(`[${jobId}] ✅ Filled Appointee Name: ${data.appointeeName}`);
-            } catch (e) {
-              console.log(`[${jobId}] Appointee Name not found or not required: ${e.message}`);
-            }
-          }
-
-          // === VALIDATION STEP ===
-          await driver.sleep(1000);
-          console.log(`[${jobId}] 🔍 Validating PA mandatory fields...`);
-
-          const validationResults = await driver.executeScript(`
-        const results = {
-          name: { filled: false, valid: false },
-          age: { filled: false, valid: false },
-          relation: { filled: false, valid: false },
-          noOfYears: { filled: false, valid: false }
-        };
-
-        // in the validation executeScript block — replace paNomineeName with cpaNomineeName
-        const nameInput = document.querySelector('input[name="mcy_text_cpaNomineeName_01"]');
-        if (nameInput) {
-          results.name.filled = !!nameInput.value;
-          results.name.valid = !nameInput.classList.contains('ng-invalid');
-        }
-
-        const ageInput = document.querySelector('input[name="mcy_dropdown_cpaNomineeAge_01"]');
-        if (ageInput) {
-          results.age.filled = !!ageInput.value;
-          results.age.valid = !ageInput.classList.contains('ng-invalid');
-        }
-
-        // Autocomplete INPUT, not a mat-select — querying mat-select returned
-        // null, so relation was reported missing even when it was filled.
-        const relInput = document.querySelector('input[name="mcy_dropdown_nomineeRelation_01"]');
-        if (relInput) {
-          results.relation.filled = !!String(relInput.value || '').trim();
-          results.relation.valid = !relInput.classList.contains('ng-invalid');
-        }
-
-        const yearSelect = document.querySelector('mat-select[name="mcy_dropdown_noy_01"]');
-        if (yearSelect) {
-          const yearText = yearSelect.querySelector('.mat-mdc-select-value-text')?.innerText || '';
-          results.noOfYears.filled = !!yearText.trim();
-          results.noOfYears.valid = !yearSelect.classList.contains('ng-invalid');
-        }
-
-        return results;
-      `);
-
-          console.log(`[${jobId}] PA Validation Results: ${JSON.stringify(validationResults)}`);
-
-          const isNameValid = validationResults.name.filled && validationResults.name.valid;
-          const isAgeValid = validationResults.age.filled && validationResults.age.valid;
-          const isRelationValid = validationResults.relation.filled && validationResults.relation.valid;
-          const isYearValid = validationResults.noOfYears.filled && validationResults.noOfYears.valid;
-
-          if (!isNameValid || !isAgeValid || !isRelationValid || !isYearValid) {
-            const missing = [];
-            if (!isNameValid) missing.push("Nominee Name");
-            if (!isAgeValid) missing.push("Nominee Age");
-            if (!isRelationValid) missing.push("Relationship with Nominee");
-            if (!isYearValid) missing.push("No of Years");
-
-            const errorMsg = "PA Validation Error: The following mandatory fields are missing or invalid: " + missing.join(", ");
-            console.error(`[${jobId}] ❌ ${errorMsg}`);
-
-            const screenshot = await driver.takeScreenshot();
-            const screenshotUrl = await uploadScreenshotToS3(screenshot, generateScreenshotKey(jobId, 0, "pa-validation-error"));
-
-            const validationError = new Error(errorMsg);
-            validationError.screenshotUrl = screenshotUrl;
-            validationError.stage = "pa-validation";
-            throw validationError;
-          }
-
-          console.log(`[${jobId}] ✅ PA mandatory fields validated successfully.`);
-
         } else {
           // PA not required — select "No" radio
           console.log(`[${jobId}] PA not wanted or not with company. Wanted PA: ${data.paCover}, Company: ${data.paCoverCompany}`);
@@ -4302,6 +4108,473 @@ async function fillNationalForm(
       console.log(`[${jobId}] Error handling Compulsory PA section: ${e.message}`);
     }
     await driver.sleep(1000);
+
+    // === NOMINEE DETAILS SECTION ===
+    //
+    // National's portal now demands a nominee on EVERY quote, including
+    // policies with no PA cover — where the Online Policy form never asks for
+    // one (server.js's resolveNationalNominee fills that gap from the saved
+    // default in Account & Policy Settings → National). This used to run only
+    // inside `if (isCompanyPA)` above, which is why a non-PA policy reached
+    // Calculate Premium with an empty nominee and the portal refused it.
+    console.log(`[${jobId}] Handling Nominee Details section...`);
+    try {
+      const paCoverVal = String(data.paCover).toLowerCase() === "true" || data.paCover === true;
+      const paCompanyVal = String(data.paCoverCompany || "").toLowerCase();
+      // Recomputed rather than hoisted out of the Compulsory PA try above —
+      // `data` is already in scope for the whole function, so there is
+      // nothing to thread through. Only changes what the "No of Years" check
+      // below expects to find.
+      const isCompanyPA = paCoverVal && (paCompanyVal === "company" || paCompanyVal === "national");
+
+      // Nothing was filled by either the policy or the saved fallback (both
+      // resolved to nothing in server.js) — worth its own message below,
+      // rather than the generic "these fields are missing" reason.
+      const nothingProvided = !data.nomineeName && !data.nomineeRelation && !data.nomineeAge;
+
+      // The "No" radio path just above can leave a confirmation dialog
+      // closing — wait for it to fully detach before touching the nominee
+      // inputs, or its backdrop swallows the first click.
+      await waitForOverlayGone(driver, 3000);
+
+      // === NOMINEE DETAILS ===
+      //
+      // The portal renamed the nominee controls when it added the mandatory
+      // "Claim Percent" field, which is why every run failed validation with
+      // "Nominee Name, Nominee Age, Relationship with Nominee":
+      //   mcy_text_cpaNomineeName_01    -> mcy_text_nomineeName_01
+      //   mcy_dropdown_cpaNomineeAge_01 -> mcy_text_nomineeAge_01
+      //   relation autocomplete INPUT   -> real mat-select (mcy_dropDown_...)
+      // The old names stay as fallbacks so a portal still on the previous
+      // build keeps working.
+      //
+      // Nothing here clicks the Nominee Details panel header / toggle — the
+      // section is already open when we reach it, and clicking it collapses
+      // the fields we are about to fill.
+      const NOMINEE_NAME_CSS =
+        "input[name='mcy_text_nomineeName_01'], input[name='mcy_text_cpaNomineeName_01']";
+      const NOMINEE_AGE_CSS =
+        "input[name='mcy_text_nomineeAge_01'], input[name='mcy_dropdown_cpaNomineeAge_01']";
+      // Attribute values are case-sensitive in CSS, and the current build
+      // spells it "dropDown" — match both spellings.
+      const NOMINEE_RELATION_SELECT_CSS =
+        "mat-select[name='mcy_dropDown_nomineeRelation_01'], mat-select[name='mcy_dropdown_nomineeRelation_01']";
+      const NOMINEE_RELATION_INPUT_CSS =
+        "input[name='mcy_dropdown_nomineeRelation_01']";
+      const CLAIM_PERCENT_CSS = "input[name='mcy_text_claimPercent_01']";
+      const NOMINEE_OPTION_CSS =
+        ".mat-mdc-select-panel mat-option, .cdk-overlay-pane mat-option";
+
+      // Angular only registers a value written from outside when the native
+      // setter is used and the events are dispatched — same pattern the rest
+      // of this file uses for Material inputs.
+      const setNomineeInputValue = async (element, value) => {
+        await driver.executeScript(`
+          const input = arguments[0];
+          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          nativeInputValueSetter.call(input, arguments[1]);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          input.dispatchEvent(new Event('blur', { bubbles: true }));
+        `, element, value);
+      };
+
+      // Read-only probe of the Nominee Details panel. It NEVER clicks the
+      // header: the section is already open when we get here, and clicking
+      // the chevron would collapse the fields we are about to fill. This
+      // only exists so a collapsed panel shows up as one clear log line
+      // instead of three "no such element" failures further down.
+      try {
+        const nomineePanelState = await driver.executeScript(`
+          const heading = Array.from(document.querySelectorAll('h4.sub-title-right, h4'))
+            .find(function (h) { return (h.innerText || h.textContent || '').trim() === 'Nominee Details'; });
+          if (!heading) return { found: false };
+          const header = heading.closest('mat-expansion-panel-header');
+          const panel = heading.closest('mat-expansion-panel');
+          const expanded =
+            (header && header.getAttribute('aria-expanded') === 'true') ||
+            (panel && (panel.getAttribute('aria-expanded') === 'true' || panel.classList.contains('mat-expanded')));
+          return { found: true, expanded: !!expanded };
+        `);
+
+        if (!nomineePanelState.found) {
+          console.log(`[${jobId}] Nominee Details heading not found — filling fields by name anyway.`);
+        } else if (nomineePanelState.expanded) {
+          console.log(`[${jobId}] Nominee Details panel is open.`);
+        } else {
+          console.log(
+            `[${jobId}] ⚠️ Nominee Details panel reads as collapsed — NOT clicking its toggle, filling fields directly.`
+          );
+        }
+      } catch (e) {
+        console.log(`[${jobId}] Could not read Nominee Details panel state: ${e.message}`);
+      }
+      // C. Fill Nominee Name
+      if (data.nomineeName) {
+        try {
+          const nameInput = await driver.findElement(By.css(NOMINEE_NAME_CSS));
+          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", nameInput);
+          await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
+
+          // The field enforces pattern ^([a-zA-Z][a-zA-Z ]+)$ and maxlength
+          // 30 — a name carrying a dot or digit is rejected as ng-invalid,
+          // so strip anything the portal will not accept before typing.
+          const nomineeNameValue = data.nomineeName
+            .toUpperCase()
+            .replace(/[^A-Z ]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 30);
+
+          await setNomineeInputValue(nameInput, nomineeNameValue);
+          await driver.sleep(300);
+          console.log(`[${jobId}] ✅ Filled Nominee Name: ${nomineeNameValue}`);
+        } catch (e) {
+          console.log(`[${jobId}] Failed to fill Nominee Name: ${e.message}`);
+        }
+      }
+
+      // D. Select Relationship with Nominee (mat-select on the current build)
+      if (data.nomineeRelation) {
+        try {
+          const relationTarget = String(data.nomineeRelation).trim();
+          const relSelects = await driver.findElements(By.css(NOMINEE_RELATION_SELECT_CSS));
+
+          if (relSelects.length > 0) {
+            const relSelect = relSelects[0];
+            await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", relSelect);
+            await driver.sleep(60);
+            await driver.executeScript("arguments[0].click();", relSelect);
+
+            await driver.wait(until.elementLocated(By.css(NOMINEE_OPTION_CSS)), 8000);
+            const options = await driver.findElements(By.css(NOMINEE_OPTION_CSS));
+
+            // Read every label in one round-trip off the SAME handles we are
+            // about to click, so a re-render cannot shift the match.
+            const labels = await driver.executeScript(
+              "return arguments[0].map(function (el) { return (el.innerText || el.textContent || ''); });",
+              options
+            );
+
+            const norm = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+            const wanted = norm(relationTarget);
+            let picked = -1;
+            for (let i = 0; i < labels.length; i++) {
+              const optText = norm(labels[i]);
+              if (!optText || !wanted) continue;
+              if (optText === wanted) {
+                picked = i;
+                break;
+              }
+              if (picked === -1 && (optText.includes(wanted) || wanted.includes(optText))) {
+                picked = i;
+              }
+            }
+
+            if (picked === -1) {
+              console.log(
+                `[${jobId}] ⚠️ No Nominee Relation option matched "${relationTarget}". Available: ${labels
+                  .map((l) => String(l).trim())
+                  .filter(Boolean)
+                  .join(" | ")}`
+              );
+              await driver.executeScript("document.body.click();");
+            } else {
+              await driver.executeScript("arguments[0].click();", options[picked]);
+              console.log(`[${jobId}] ✅ Selected Nominee Relation: ${String(labels[picked]).trim()}`);
+            }
+            await waitForOverlayGone(driver, 3000);
+          } else {
+            // Older build: the relation was an autocomplete input.
+            const relInput = await driver.wait(
+              until.elementLocated(By.css(NOMINEE_RELATION_INPUT_CSS)),
+              10000
+            );
+            await driver.wait(until.elementIsVisible(relInput), 10000);
+            await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", relInput);
+            await selectAutocompleteOption(driver, relInput, relationTarget, "Nominee Relation");
+            console.log(`[${jobId}] ✅ Selected Nominee Relation via autocomplete: ${relationTarget}`);
+          }
+        } catch (e) {
+          console.log(`[${jobId}] Failed to select Nominee Relation: ${e.message}`);
+        }
+      }
+
+      // E. Fill Nominee Age
+      if (data.nomineeAge) {
+        try {
+          const ageInput = await driver.findElement(By.css(NOMINEE_AGE_CSS));
+          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", ageInput);
+          await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
+          await setNomineeInputValue(ageInput, String(data.nomineeAge));
+          await driver.sleep(300);
+          console.log(`[${jobId}] ✅ Filled Nominee Age: ${data.nomineeAge}`);
+        } catch (e) {
+          console.log(`[${jobId}] Failed to fill Nominee Age: ${e.message}`);
+        }
+      }
+
+      // F. Fill Claim Percent — new mandatory field. This flow adds exactly
+      // one nominee, so the whole claim goes to them: 100.
+      try {
+        const claimInputs = await driver.findElements(By.css(CLAIM_PERCENT_CSS));
+        if (claimInputs.length > 0) {
+          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", claimInputs[0]);
+          await driver.sleep(60);
+          await setNomineeInputValue(claimInputs[0], "100");
+          await driver.sleep(300);
+          console.log(`[${jobId}] ✅ Filled Claim Percent: 100`);
+        } else {
+          console.log(`[${jobId}] Claim Percent field not present on this portal build — skipping.`);
+        }
+      } catch (e) {
+        console.log(`[${jobId}] Failed to fill Claim Percent: ${e.message}`);
+      }
+
+      // G. Fill Appointee Name (if visible)
+      if (data.appointeeName) {
+        try {
+          const appointeeInput = await driver.findElement(
+            By.xpath("//mat-label[contains(., 'Appointee Name')]/ancestor::mat-form-field//input")
+          );
+          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", appointeeInput);
+          await driver.sleep(60); // scrollIntoView is synchronous — one repaint frame is enough
+
+          await driver.executeScript(`
+        const input = arguments[0];
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        nativeInputValueSetter.call(input, arguments[1]);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+      `, appointeeInput, data.appointeeName.toUpperCase());
+          await driver.sleep(500);
+          console.log(`[${jobId}] ✅ Filled Appointee Name: ${data.appointeeName}`);
+        } catch (e) {
+          console.log(`[${jobId}] Appointee Name not found or not required: ${e.message}`);
+        }
+      }
+
+      // === CHECK THE NOMINEE INPUTS ===
+      //
+      // This is a PRE-check only — it logs what looks wrong but does not
+      // throw. The portal's real requirement is "at least one nominee row
+      // committed", so the Add / Update click below always runs and the
+      // pass/fail decision is made afterwards from the portal's own banner.
+      // Throwing here was why a fully filled form (name, relation, age,
+      // claim percent all populated) still ended the run with the row
+      // never added.
+      await driver.sleep(600);
+      console.log(`[${jobId}] 🔍 Checking Nominee Details fields...`);
+
+      const validationResults = await driver.executeScript(`
+    const results = {
+      name: { filled: false, valid: false },
+      age: { filled: false, valid: false },
+      relation: { filled: false, valid: false },
+      claimPercent: { present: false, filled: false, valid: false },
+      noOfYears: { filled: false, valid: false }
+    };
+
+    // Same current-then-legacy selector pairs the fill steps use.
+    const nameInput = document.querySelector('input[name="mcy_text_nomineeName_01"], input[name="mcy_text_cpaNomineeName_01"]');
+    if (nameInput) {
+      results.name.filled = !!nameInput.value;
+      results.name.valid = !nameInput.classList.contains('ng-invalid');
+    }
+
+    const ageInput = document.querySelector('input[name="mcy_text_nomineeAge_01"], input[name="mcy_dropdown_cpaNomineeAge_01"]');
+    if (ageInput) {
+      results.age.filled = !!ageInput.value;
+      results.age.valid = !ageInput.classList.contains('ng-invalid');
+    }
+
+    // Relation is a mat-select on the current build and an autocomplete
+    // input on the older one — read whichever is actually present.
+    // Material stamps .mat-mdc-select-empty while nothing is picked, which
+    // is more reliable than reading the label: innerText returns '' for an
+    // element that is scrolled out of view, so a selected "Father" could
+    // read back as empty. textContent has no such dependency.
+    const relSelect = document.querySelector('mat-select[name="mcy_dropDown_nomineeRelation_01"], mat-select[name="mcy_dropdown_nomineeRelation_01"]');
+    if (relSelect) {
+      const valueEl = relSelect.querySelector('.mat-mdc-select-value-text') || relSelect.querySelector('.mat-mdc-select-value');
+      const relText = valueEl ? (valueEl.textContent || '') : '';
+      results.relation.filled =
+        !relSelect.classList.contains('mat-mdc-select-empty') || !!relText.trim();
+      results.relation.valid = !relSelect.classList.contains('ng-invalid');
+    } else {
+      const relInput = document.querySelector('input[name="mcy_dropdown_nomineeRelation_01"]');
+      if (relInput) {
+        results.relation.filled = !!String(relInput.value || '').trim();
+        results.relation.valid = !relInput.classList.contains('ng-invalid');
+      }
+    }
+
+    // Claim Percent only exists on the newer build, so it is validated
+    // only when the portal actually renders it.
+    const claimInput = document.querySelector('input[name="mcy_text_claimPercent_01"]');
+    if (claimInput) {
+      results.claimPercent.present = true;
+      results.claimPercent.filled = !!String(claimInput.value || '').trim();
+      results.claimPercent.valid = !claimInput.classList.contains('ng-invalid');
+    }
+
+    const yearSelect = document.querySelector('mat-select[name="mcy_dropdown_noy_01"]');
+    if (yearSelect) {
+      const yearValueEl = yearSelect.querySelector('.mat-mdc-select-value-text') || yearSelect.querySelector('.mat-mdc-select-value');
+      const yearText = yearValueEl ? (yearValueEl.textContent || '') : '';
+      results.noOfYears.filled =
+        !yearSelect.classList.contains('mat-mdc-select-empty') || !!yearText.trim();
+      results.noOfYears.valid = !yearSelect.classList.contains('ng-invalid');
+    }
+
+    return results;
+  `);
+
+      console.log(`[${jobId}] PA Field Check: ${JSON.stringify(validationResults)}`);
+
+      const isNameValid = validationResults.name.filled && validationResults.name.valid;
+      const isAgeValid = validationResults.age.filled && validationResults.age.valid;
+      const isRelationValid = validationResults.relation.filled && validationResults.relation.valid;
+      // "No of Years" only renders when PA cover is on — on a non-PA
+      // job the control does not exist at all, so treat it as satisfied
+      // rather than reporting it "missing" on every non-PA policy.
+      const isYearValid = !isCompanyPA || (validationResults.noOfYears.filled && validationResults.noOfYears.valid);
+      const isClaimPercentValid =
+        !validationResults.claimPercent.present ||
+        (validationResults.claimPercent.filled && validationResults.claimPercent.valid);
+
+      const missing = [];
+      if (!isNameValid) missing.push("Nominee Name");
+      if (!isAgeValid) missing.push("Nominee Age");
+      if (!isRelationValid) missing.push("Relationship with Nominee");
+      if (!isClaimPercentValid) missing.push("Claim Percent");
+      if (!isYearValid) missing.push("No of Years");
+
+      if (missing.length > 0) {
+        console.log(
+          `[${jobId}] ⚠️ Nominee fields still look incomplete: ${missing.join(", ")} — clicking Add / Update anyway to see what the portal says.`
+        );
+      }
+
+      // === COMMIT THE NOMINEE ROW ===
+      //
+      // Filling the inputs is not enough — the portal keeps showing
+      // "Please add Atleast 1 nominee details" until Add / Update pushes
+      // the typed values into the nominee list. The click CLEARS the
+      // inputs, which is why the field check above runs first.
+      let nomineeCommitted = false;
+      let addButtonFound = false;
+
+      // Reads the portal's own "add at least 1 nominee" banner. That
+      // banner disappearing is the only real proof the row landed.
+      const readNomineeBanner = async () => {
+        try {
+          return await driver.executeScript(`
+            const body = (document.body.innerText || document.body.textContent || '');
+            return /add\\s*Atleast\\s*1\\s*nominee/i.test(body);
+          `);
+        } catch (readError) {
+          return null; // cannot inspect — treat as unknown
+        }
+      };
+
+      try {
+        const addBtnMatch = await firstPresentLocator(
+          driver,
+          [
+            By.css("button[name='mcy_btn_add/update_01']"),
+            By.css("button[aria-label='Add or update insured person']"),
+            By.xpath("//button[contains(normalize-space(.), 'Add / Update')]"),
+          ],
+          8000,
+          { requireVisible: false }
+        );
+
+        if (!addBtnMatch) {
+          console.log(`[${jobId}] ⚠️ Nominee Add / Update button not found.`);
+        } else {
+          addButtonFound = true;
+          console.log(
+            `[${jobId}] Found nominee Add / Update using: ${addBtnMatch.locator.toString()}`
+          );
+
+          // Up to two attempts: Angular occasionally swallows the first
+          // click while the mat-select overlay is still detaching.
+          for (let attempt = 1; attempt <= 2 && !nomineeCommitted; attempt++) {
+            await waitForOverlayGone(driver, 2000);
+            await driver.executeScript(
+              "arguments[0].scrollIntoView({block: 'center'});",
+              addBtnMatch.element
+            );
+            await driver.sleep(150);
+
+            // Real click first so Angular sees a trusted event; JS click is
+            // the fallback for when a sticky header covers the button.
+            try {
+              await addBtnMatch.element.click();
+            } catch (nativeClickError) {
+              await driver.executeScript("arguments[0].click();", addBtnMatch.element);
+            }
+            console.log(`[${jobId}] Clicked nominee Add / Update (attempt ${attempt})`);
+
+            // Poll for the banner to clear instead of a flat sleep.
+            const deadline = Date.now() + 6000;
+            while (Date.now() < deadline) {
+              const stillAsking = await readNomineeBanner();
+              if (stillAsking === false) {
+                nomineeCommitted = true;
+                break;
+              }
+              if (stillAsking === null) break; // cannot read — stop polling
+              await driver.sleep(200);
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`[${jobId}] Failed to click nominee Add / Update: ${e.message}`);
+      }
+
+      if (nomineeCommitted) {
+        console.log(`[${jobId}] ✅ Nominee added — "Please add Atleast 1 nominee details" cleared.`);
+      } else {
+        // Only now is this a real failure: the fields were filled, the
+        // button was clicked, and the portal still refuses the row.
+        const bannerState = await readNomineeBanner();
+        const reason = !addButtonFound
+          ? "the Add / Update button was not found"
+          : nothingProvided
+            ? "no nominee was provided by the policy or the saved default — add one to the policy, or save a default under Account & Policy Settings → National"
+            : missing.length > 0
+              ? "these fields are missing or invalid: " + missing.join(", ")
+              : bannerState === null
+                ? "the nominee row could not be confirmed"
+                : "the portal still shows \"Please add Atleast 1 nominee details\" after Add / Update";
+
+        const errorMsg = "Nominee Validation Error: nominee not committed — " + reason;
+        console.error(`[${jobId}] ❌ ${errorMsg}`);
+
+        const screenshot = await driver.takeScreenshot();
+        const screenshotUrl = await uploadScreenshotToS3(screenshot, generateScreenshotKey(jobId, 0, "nominee-validation-error"));
+
+        const validationError = new Error(errorMsg);
+        validationError.screenshotUrl = screenshotUrl;
+        validationError.stage = "nominee-validation";
+        throw validationError;
+      }
+    } catch (e) {
+      // The "nominee not committed" failure above is a deliberate, hard stop —
+      // rethrow it so it reaches fillNationalForm's own top-level catch (see
+      // the bottom of this function), which already knows how to turn a
+      // staged error into a proper {success:false, stage, screenshotUrl}
+      // result. Swallowing it here would just log the failure and let the job
+      // carry on to Calculate Premium with no nominee at all — the exact
+      // outcome National's portal now always rejects.
+      if (e.stage === "nominee-validation") {
+        throw e;
+      }
+      console.log(`[${jobId}] Error handling Nominee Details section: ${e.message}`);
+    }
 
 
     // === FINANCIER INTEREST SECTION ===
@@ -4884,10 +5157,12 @@ async function fillNationalForm(
       By.xpath("//button[contains(@class, 'mat-mdc-raised-button') and .//span[contains(text(), 'Calculate Premium')]]"),
     ];
     let premiumClicked = false;
+    let premiumLocatorUsed = null;
     for (const locator of calculatePremiumLocators) {
       try {
         await scrollAndClick(driver, locator, 12000);
         premiumClicked = true;
+        premiumLocatorUsed = locator;
         console.log(`[${jobId}] ✅ Clicked Calculate Premium using locator: ${locator.toString()}`);
         break;
       } catch (calcError) {
@@ -4898,6 +5173,41 @@ async function fillNationalForm(
     if (!premiumClicked) {
       throw new Error("Critical Error: Unable to click Calculate Premium button. Automation cannot proceed.");
     }
+
+    // Second Calculate Premium click.
+    //
+    // The portal's first click frequently only runs its client-side validation
+    // pass and leaves the quote uncalculated, so it is clicked again after a
+    // 2s pause. Skipped when a dialog opened or the button is gone/disabled --
+    // any of those means the first click already submitted, and clicking again
+    // would either hit a backdrop or raise a duplicate quote.
+    await driver.sleep(2000);
+    try {
+      if (await isBlockingDialogOpen(driver)) {
+        console.log(`[${jobId}] Dialog open after first Calculate Premium click - skipping the second click.`);
+      } else {
+        const stillClickable = await driver.executeScript(`
+          const btn = document.querySelector("button[name='mcy_button_calculatePremium_01']")
+            || Array.from(document.querySelectorAll('button')).find(function (b) {
+                 return (b.innerText || b.textContent || '').trim() === 'Calculate Premium';
+               });
+          if (!btn) return false;
+          if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
+          const rect = btn.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        `);
+
+        if (!stillClickable) {
+          console.log(`[${jobId}] Calculate Premium button no longer clickable - skipping the second click.`);
+        } else {
+          await scrollAndClick(driver, premiumLocatorUsed, 8000);
+          console.log(`[${jobId}] ✅ Clicked Calculate Premium a second time`);
+        }
+      }
+    } catch (secondClickError) {
+      console.log(`[${jobId}] Second Calculate Premium click skipped: ${secondClickError.message}`);
+    }
+
     await driver.sleep(3000);
     await waitForPortalLoaderToDisappear(driver, NON_BLOCKING_LOADER_CHECK);
     console.log(`[${jobId}] ✅ Calculate Premium button clicked successfully`);

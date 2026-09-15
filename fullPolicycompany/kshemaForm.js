@@ -1301,7 +1301,11 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
       return {
         success: false,
         stage: "kyc-details",
-        retryable: false,
+        // The document-upload recovery path (kshemaQuoteForm.js) signals
+        // retryable:true when verification just didn't resolve in time —
+        // nothing there points to a genuine data problem. Every other KYC
+        // failure keeps the original terminal behaviour.
+        retryable: kycResult.retryable === true,
         error: kycResult.error,
         kycUrl: kycResult.kycUrl,
         proposalUrl: kycResult.proposalUrl,

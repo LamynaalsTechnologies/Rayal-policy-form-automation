@@ -213,6 +213,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const { ProviderCredential } = require("./models");
 const { resolvePortalCredentials } = require("./lib/credentialResolver");
+const { resolveNationalNominee } = require("./lib/nomineeResolver");
 
 mongoose.connect(process.env.MONGODB_URI);
 
@@ -1282,6 +1283,45 @@ const runPolicyJob = async (rawJob) => {
     // Route to appropriate form filling function based on Companyname
     let fillFormPromise;
     if (companyName === "national") {
+      // National's portal now demands a nominee on EVERY quote, including
+      // policies with no PA cover — where the Online Policy form never asks
+      // for one. Resolve the operator's saved default and use it ONLY to fill
+      // whatever the policy itself left blank; the policy's own nominee always
+      // wins. Resolved here (not in the backend's job-building step) so a
+      // nominee saved after a job was queued still applies on retry.
+      const nomineeFallback = await resolveNationalNominee({
+        userId: job.formData.userId,
+        clientId: job.formData.clientId,
+        log: (line) => console.log(`→ [${queueName}] ${line}`),
+      });
+
+      // Whether National's OWN Compulsory PA section will run off the
+      // policy's own nominee (collected on the Online Policy form under PA
+      // Cover Details) — matches fullPolicycompany/national.js's own
+      // isCompanyPA check. When PA Cover is off, or routed through Brisk
+      // instead of National, the policy never asked for a nominee at all, so
+      // the saved default below is the only other source.
+      const paCoverVal = job.formData.paCover === true || job.formData.paCover === "true";
+      const paCompanyVal = String(job.formData.paCoverCompany || "").toLowerCase();
+      const isCompanyPA = paCoverVal && (paCompanyVal === "company" || paCompanyVal === "national");
+
+      const resolvedNomineeName = job.formData.nomineeName || nomineeFallback?.name;
+      const resolvedNomineeRelation = job.formData.nomineeRelation || nomineeFallback?.relation;
+      const resolvedNomineeAge = job.formData.nomineeAge || nomineeFallback?.age;
+      const hasNominee = !!(resolvedNomineeName && resolvedNomineeRelation && resolvedNomineeAge);
+
+      // National demands a nominee on EVERY quote. Refuse to even open a
+      // browser for a job that is already known to fail this step — the
+      // portal only says so after login, Vahan check and half the form.
+      if (!isCompanyPA && !hasNominee) {
+        throw new Error(
+          `[E101] National requires nominee details when PA Cover is off or ` +
+          `routed through Brisk (this policy never collected one). Add a ` +
+          `nominee to the policy, or save a default one in Account & Policy ` +
+          `Settings → National → Nominee Details, then re-run this policy.`
+        );
+      }
+
       // National Insurance form
       fillFormPromise = fillNationalForm({
         ...job.formData,
@@ -1294,6 +1334,9 @@ const runPolicyJob = async (rawJob) => {
         // database", so a client with its own portal URL could be sent to
         // somebody else's.
         loginUrl: creds.loginUrl,
+        nomineeName: resolvedNomineeName,
+        nomineeRelation: resolvedNomineeRelation,
+        nomineeAge: resolvedNomineeAge,
         _jobId: job._id, // Pass job ID for error logging
         _jobIdentifier: jobIdentifier,
         _attemptNumber: job.attempts + 1, // Current attempt number
