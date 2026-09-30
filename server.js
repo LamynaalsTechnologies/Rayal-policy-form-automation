@@ -119,6 +119,14 @@ const {
   sweepOrphanedFrameDirs,
   shutdownRecordings,
 } = require("./lib/jobRecorder");
+// multiCompany failure screenshots: only when the framework is switched on, so
+// nothing touches S3 otherwise. Expiry is enforced by S3 itself (a lifecycle
+// rule on screenshots/multiCompany/), not by a cron.
+if (require("./multiCompany/common/featureGate").MULTI_COMPANY_AUTOMATION_ENABLED) {
+  require("./s3Uploader")
+    .ensureMultiCompanyScreenshotLifecycleRule()
+    .catch((e) => console.error("multiCompany screenshot lifecycle setup error:", e.message));
+}
 if (isRecordingEnabled()) {
   const {
     ensureRecordingLifecycleRule,
@@ -187,6 +195,11 @@ const { captureAndLogError } = require("./errorLogger");
 const { fillRelianceForm } = require("./fullPolicycompany/relianceForm");
 const { fillNationalForm } = require("./fullPolicycompany/national");
 const { fillKshemaForm } = require("./fullPolicycompany/kshemaForm");
+// New OD/TP-only automation. A job only reaches this when its formData
+// carries a policyType — every job without one keeps dispatching through the
+// bundled companyName if/else chain below, completely unchanged.
+const { resolveMultiCompanyHandler } = require("./multiCompany/registry");
+const { assertMultiCompanyEnabled } = require("./multiCompany/common/featureGate");
 const { isAutomationStop, stoppedResult } = require("./automationStopper");
 const { extractCaptchaText } = require("./Captcha");
 // National uses fresh login for each job, no master session needed
@@ -214,6 +227,11 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const { ProviderCredential } = require("./models");
 const { resolvePortalCredentials } = require("./lib/credentialResolver");
 const { resolveNationalNominee } = require("./lib/nomineeResolver");
+// One job per policy with a separate status per part (OD / TP / OD+TP / PA).
+// Only jobs that carry `parts` go through these; every other job keeps the
+// original path below unchanged.
+const partRunner = require("./lib/partRunner");
+const { runBriskPart } = require("./lib/briskPartRunner");
 
 mongoose.connect(process.env.MONGODB_URI);
 
@@ -263,18 +281,31 @@ const maxParallelEnvKeys = (company) => {
   ];
 };
 
+// The Brisk PA part is API-only (no browser), so it has its own window budget
+// under the bucket name "brisk": BRISKMAXWINDOW in .env, default 1.
+const BRISK_BUCKET = "brisk";
+const DEFAULT_BRISK_MAX_PARALLEL_JOBS = 1;
+
 /** Window budget for a company. Unknown companies use the default. */
 const maxParallelFor = (company) => {
+  const fallback =
+    String(company).toLowerCase() === BRISK_BUCKET
+      ? DEFAULT_BRISK_MAX_PARALLEL_JOBS
+      : DEFAULT_MAX_PARALLEL_JOBS;
   for (const key of maxParallelEnvKeys(company)) {
     if (process.env[key] !== undefined) {
-      return parsePositiveInt(process.env[key], DEFAULT_MAX_PARALLEL_JOBS);
+      return parsePositiveInt(process.env[key], fallback);
     }
   }
-  return DEFAULT_MAX_PARALLEL_JOBS;
+  return fallback;
 };
 
 /** Normalized company name for a queued job. Any value is supported. */
 const companyOfJob = (job) => {
+  // A job with parts runs ONE part at a time; while it runs it counts against
+  // that part's window (an insurer's, or "brisk"), set when the part was claimed.
+  const running = job?.currentPart?.bucket || job?.currentPart?.company;
+  if (running) return String(running).trim().toLowerCase();
   const raw = job?.formData?.Companyname || job?.formData?.company || "reliance";
   return String(raw).trim().toLowerCase() || "reliance";
 };
@@ -304,9 +335,11 @@ const CONFIGURED_COMPANIES = [
 ];
 
 // Generous upper bound used only by the "any spare capacity?" poll check.
+// (+ the Brisk window, unless it is configured and already counted above.)
 const MAX_PARALLEL_JOBS =
-  CONFIGURED_COMPANIES.reduce((sum, c) => sum + maxParallelFor(c), 0) ||
-  DEFAULT_MAX_PARALLEL_JOBS;
+  (CONFIGURED_COMPANIES.reduce((sum, c) => sum + maxParallelFor(c), 0) ||
+    DEFAULT_MAX_PARALLEL_JOBS) +
+  (CONFIGURED_COMPANIES.includes(BRISK_BUCKET) ? 0 : maxParallelFor(BRISK_BUCKET));
 
 console.log(
   `[Queue] Parallel window limits -> ${CONFIGURED_COMPANIES.length
@@ -411,6 +444,7 @@ let auditLogCollection = null; // For audit logging
 // Job statuses
 const JOB_STATUS = {
   PENDING: "pending", // Waiting in queue
+  HOLD: "hold", // Parked by an operator; the queue never claims it (set by the backend)
   PROCESSING: "processing", // Currently being processed
   COMPLETED: "completed", // Successfully completed
   COMPLETED_WITH_ERRORS: "completed_with_errors", // Form submitted but post steps failed (Brisk cert / doc upload)
@@ -434,7 +468,8 @@ const gracefulShutdown = async (signal) => {
   try {
     if (jobQueueCollection) {
       const res = await jobQueueCollection.updateMany(
-        { status: JOB_STATUS.PROCESSING },
+        // Legacy jobs only — a job with parts needs its part reset (below).
+        { status: JOB_STATUS.PROCESSING, ...partRunner.LEGACY_JOBS },
         {
           $set: {
             status: JOB_STATUS.PENDING,
@@ -443,7 +478,14 @@ const gracefulShutdown = async (signal) => {
           },
         }
       );
-      console.log(`[Shutdown] Re-queued ${res.modifiedCount} processing job(s).`);
+      const resParts = await partRunner.recoverPartsJobs(jobQueueCollection, {
+        applyRequeues: false, // the next start applies them; nothing may delay the exit
+        extraSet: {
+          lastError: `Server stopped (${signal}) while job was running — re-queued`,
+          lastErrorTimestamp: new Date(),
+        },
+      });
+      console.log(`[Shutdown] Re-queued ${res.modifiedCount + resParts.modifiedCount} processing job(s).`);
     }
   } catch (err) {
     console.error("[Shutdown] Failed to re-queue jobs:", err.message);
@@ -564,6 +606,10 @@ const buildFormDataFromPolicy = async (data) => {
       paCover: data?.paCover,
       paCoverCompany: data?.paCoverCompany,
       paCoverAmount: data?.paCoverAmount,
+      // Mirrors the backend's buildFullJobFormData — KSHEMA reads these.
+      notPaCoverReason: data?.notPaCoverReason,
+      nomineeType: data?.nomineeType,
+      nomineeShare: data?.nomineeShare,
       nomineeName: data?.nomineeName,
       nomineeRelation: data?.nomineeRelation,
       nomineeAge: data?.nomineeAge,
@@ -587,6 +633,10 @@ const buildFormDataFromPolicy = async (data) => {
       ODDiscount: data?.ODDiscount ?? data?.odDiscount ?? data?.Detariff_Discount_Rate ?? data?.discount,
       // Payment Method
       Paymentmethod: data?.Paymentmethod,
+      // Company routing: { isMultipleCompany, PACompany, ODCompany, TPCompany }.
+      // null on a policy saved before it existed — the job's own copy (see
+      // hydrateJobFormData) or the flat fields above cover that case.
+      settings: data?.settings || null,
       // Company name mapping - check both 'company' and 'Companyname' fields, normalize to lowercase
       Companyname: data?.Companyname || (data?.company ? data.company.toLowerCase() : "reliance")
     };
@@ -890,22 +940,28 @@ const processRelianceQueue = async () => {
     // `startedAt` is the fallback for jobs claimed before heartbeats existed.
     const silentSince = new Date(Date.now() - HEARTBEAT_STALE_MS);
     const legacyCutoff = new Date(Date.now() - (JOB_TIMEOUT + ZOMBIE_GRACE_MS));
+    const silentJobs = {
+      $or: [
+        { lastHeartbeatAt: { $lt: silentSince } },
+        { lastHeartbeatAt: { $exists: false }, startedAt: { $lt: legacyCutoff } },
+      ],
+    };
     const zombies = await jobQueueCollection.updateMany(
-      {
-        status: JOB_STATUS.PROCESSING,
-        $or: [
-          { lastHeartbeatAt: { $lt: silentSince } },
-          { lastHeartbeatAt: { $exists: false }, startedAt: { $lt: legacyCutoff } },
-        ],
-      },
+      { status: JOB_STATUS.PROCESSING, ...partRunner.LEGACY_JOBS, ...silentJobs },
       {
         $set: { status: JOB_STATUS.PENDING, recoveredAt: new Date() },
         $unset: { nextRetryAt: "", lastHeartbeatAt: "" },
       }
     );
-    if (zombies.modifiedCount > 0) {
+    // Jobs with parts: the silent PART goes back to pending (its own update:
+    // arrayFilters would fail on a legacy document).
+    const zombieParts = await partRunner.recoverPartsJobs(jobQueueCollection, {
+      filter: silentJobs,
+    });
+    const zombieCount = zombies.modifiedCount + zombieParts.modifiedCount;
+    if (zombieCount > 0) {
       console.warn(
-        `[Reliance Queue] 🧟 Reclaimed ${zombies.modifiedCount} zombie job(s) stuck in processing > ${(JOB_TIMEOUT + ZOMBIE_GRACE_MS) / 1000}s`
+        `[Reliance Queue] 🧟 Reclaimed ${zombieCount} zombie job(s) stuck in processing > ${(JOB_TIMEOUT + ZOMBIE_GRACE_MS) / 1000}s`
       );
     }
 
@@ -946,7 +1002,9 @@ const processRelianceQueue = async () => {
       .find({
         status: JOB_STATUS.PENDING,
         $or: [
-          { nextRetryAt: { $exists: false } }, // New jobs
+          // Never scheduled: absent, or a stored null (which the old
+          // `$exists: false` never matched, so such a job never ran).
+          { nextRetryAt: null },
           { nextRetryAt: { $lte: new Date() } }, // Ready for retry
         ],
       })
@@ -954,18 +1012,12 @@ const processRelianceQueue = async () => {
       .limit(100)
       .toArray();
 
-    const pendingJobs = [];
-    const skippedByCompany = {};
-    for (const candidate of candidateJobs) {
-      const company = companyOfJob(candidate);
-      const active = activeByCompany[company] || 0;
-      if (active >= maxParallelFor(company)) {
-        skippedByCompany[company] = (skippedByCompany[company] || 0) + 1;
-        continue;
-      }
-      activeByCompany[company] = active + 1; // reserve the slot for this pass
-      pendingJobs.push(candidate);
-    }
+    // A job with `parts` contributes ONE part (the first due one whose insurer
+    // has a free window); any other job is counted against its company as before.
+    const { toStart: pendingJobs, skippedByCompany } = partRunner.planClaims(
+      candidateJobs,
+      { now: new Date(), activeByCompany, maxParallelFor, companyOfJob }
+    );
 
     if (Object.keys(skippedByCompany).length) {
       // Also change-gated: while a company is saturated this would otherwise
@@ -1014,40 +1066,51 @@ const processRelianceQueue = async () => {
     );
 
     // Start processing each job
-    for (const job of pendingJobs) {
+    for (const { job: candidate, part } of pendingJobs) {
+      let job = candidate;
       // Claim the job ATOMICALLY: only transition it if it is still PENDING.
       // With parallel workers (and the re-entrant call in .finally below) two
       // passes can otherwise select and start the same job twice — which would
       // submit the same policy twice.
-      const claim = await jobQueueCollection.findOneAndUpdate(
-        { _id: job._id, status: JOB_STATUS.PENDING },
-        {
-          $set: {
-            status: JOB_STATUS.PROCESSING,
-            startedAt: new Date(),
-            lastHeartbeatAt: new Date(),
-          },
-        }
-      );
+      // A job with parts claims ONE part, and only if the job has not been
+      // edited since it was read (rev) — see partRunner.claimPart.
+      let claimed;
+      if (part) {
+        claimed = await partRunner.claimPart(jobQueueCollection, candidate, part);
+      } else {
+        const claim = await jobQueueCollection.findOneAndUpdate(
+          { _id: candidate._id, status: JOB_STATUS.PENDING },
+          {
+            $set: {
+              status: JOB_STATUS.PROCESSING,
+              startedAt: new Date(),
+              lastHeartbeatAt: new Date(),
+            },
+          }
+        );
+        claimed = claim && (claim.value !== undefined ? claim.value : claim);
+      }
 
-      const claimed = claim && (claim.value !== undefined ? claim.value : claim);
       if (!claimed) {
         console.log(
           `[Queue] Job ${job._id} was already claimed by another pass, skipping.`
         );
         continue;
       }
+      if (part) job = claimed; // the document as it is now: the part is "processing"
 
       activeRelianceJobs++;
       console.log(
-        `[${companyOfJob(job) === "national" ? "National" : "Reliance"} Queue] Starting job for ${job.formData.firstName} (ID: ${job._id}); active=${activeRelianceJobs}`
+        part
+          ? `[${companyLabel(part.company)} Queue] Starting ${part.key.toUpperCase()} part for ${job.formData.firstName} (ID: ${job._id}); active=${activeRelianceJobs}`
+          : `[${companyOfJob(job) === "national" ? "National" : "Reliance"} Queue] Starting job for ${job.formData.firstName} (ID: ${job._id}); active=${activeRelianceJobs}`
       );
 
       // Keep proving this job is alive for as long as it runs.
       const heartbeat = startJobHeartbeat(job._id);
 
       // Run job in parallel (don't await)
-      runPolicyJob(job)
+      (part ? partRunner.runPartJob(partRunnerDeps, job) : runPolicyJob(job))
         .catch((unexpectedError) => {
           // Safety net: Catch any unhandled errors
           console.error(
@@ -1055,6 +1118,17 @@ const processRelianceQueue = async () => {
             unexpectedError.message
           );
           console.error("Stack trace:", unexpectedError.stack);
+
+          if (part) {
+            // Same safety net for a part: record the failure against it so the
+            // job goes back to the queue (with backoff) instead of sitting in "processing".
+            partRunner
+              .recordUnexpectedError({ collection: jobQueueCollection, job, error: unexpectedError, companyLabel })
+              .catch((err) =>
+                console.error("Failed to update job after unexpected error:", err)
+              );
+            return;
+          }
 
           // Ensure job is not left in "processing" state
           // companyName is a runPolicyJob local — referencing it here threw
@@ -1133,8 +1207,29 @@ const hydrateJobFormData = async (job) => {
   // directly, and without this an invalid pincode/mobile would drive a real
   // portal submission instead of being rejected up front.
   const formData = sanitizeFormData(rawFormData);
+
+  // buildFormDataFromPolicy describes the POLICY; a fan-out job is one LEG of
+  // it. Carry the job's own routing back over the rebuilt payload, or an OD/TP
+  // job would come out of hydration as the whole bundled policy on the OD
+  // insurer — buying it twice. Everything here was set by the backend's
+  // enqueuePolicyJob when it queued the job.
+  const jobType = job.policyType || job.formData?.policyType || null;
+  if (jobType) {
+    formData.policyType = jobType;
+    const jobCompany = job.metadata?.company || job.formData?.Companyname;
+    if (jobCompany) formData.Companyname = String(jobCompany).toLowerCase();
+    // This leg's share of PA Cover (exactly one leg buys it — see the
+    // backend's jobPaRouting).
+    if (job.formData && "paCover" in job.formData) formData.paCover = job.formData.paCover;
+    if (job.formData?.paCoverCompany) formData.paCoverCompany = job.formData.paCoverCompany;
+  }
+  const jobSettings = job.formData?.settings || job.settings || null;
+  if (jobSettings) formData.settings = jobSettings;
+
   const validation = validateFormData(formData, companyOfJob({ formData }));
-  if (!validation.isValid) {
+  // validateFormData returns { valid, errors, errorSummary } — this read
+  // `isValid`, which is never set, so EVERY hydrated job was failed here.
+  if (!validation.valid) {
     console.error(
       `[Queue] ❌ Job ${job._id} failed validation: ${validation.errors.join(", ")}`
     );
@@ -1156,6 +1251,126 @@ const hydrateJobFormData = async (job) => {
 
   console.log(`[Queue] ✅ Hydrated job ${job._id} (${formData.firstName}, company: ${formData.Companyname})`);
   return { ...job, formData, needsHydration: false };
+};
+
+/**
+ * The bundled insurer flows (National / KSHEMA / Reliance): everything a job
+ * that buys the whole policy at one insurer needs to START its form run.
+ * Shared by the original job path (runPolicyJob) and the parts path
+ * (lib/partRunner.js), so there is exactly one place that decides how a bundled
+ * flow is called.
+ *
+ * Async so prerequisites (National's nominee lookup and its refusal to open a
+ * browser without one) finish BEFORE the run starts and stay outside the
+ * JOB_TIMEOUT window. The run itself is returned inside an object — returning
+ * the promise would make the caller wait for the whole run here.
+ *
+ * @returns {Promise<{run: Promise}>}
+ */
+const dispatchBundled = async (
+  formData,
+  { companyName, creds, jobId, jobIdentifier, attemptNumber, queueName }
+) => {
+  let run;
+  if (companyName === "national") {
+    // National's portal now demands a nominee on EVERY quote, including
+    // policies with no PA cover — where the Online Policy form never asks
+    // for one. Resolve the operator's saved default and use it ONLY to fill
+    // whatever the policy itself left blank; the policy's own nominee always
+    // wins. Resolved here (not in the backend's job-building step) so a
+    // nominee saved after a job was queued still applies on retry.
+    const nomineeFallback = await resolveNationalNominee({
+      userId: formData.userId,
+      clientId: formData.clientId,
+      log: (line) => console.log(`→ [${queueName}] ${line}`),
+    });
+
+    // Whether National's OWN Compulsory PA section will run off the
+    // policy's own nominee (collected on the Online Policy form under PA
+    // Cover Details) — matches fullPolicycompany/national.js's own
+    // isCompanyPA check. When PA Cover is off, or routed through Brisk
+    // instead of National, the policy never asked for a nominee at all, so
+    // the saved default below is the only other source.
+    const paCoverVal = formData.paCover === true || formData.paCover === "true";
+    const paCompanyVal = String(formData.paCoverCompany || "").toLowerCase();
+    const isCompanyPA = paCoverVal && (paCompanyVal === "company" || paCompanyVal === "national");
+
+    const resolvedNomineeName = formData.nomineeName || nomineeFallback?.name;
+    const resolvedNomineeRelation = formData.nomineeRelation || nomineeFallback?.relation;
+    const resolvedNomineeAge = formData.nomineeAge || nomineeFallback?.age;
+    const hasNominee = !!(resolvedNomineeName && resolvedNomineeRelation && resolvedNomineeAge);
+
+    // National demands a nominee on EVERY quote. Refuse to even open a
+    // browser for a job that is already known to fail this step — the
+    // portal only says so after login, Vahan check and half the form.
+    if (!isCompanyPA && !hasNominee) {
+      throw new Error(
+        `[E101] National requires nominee details when PA Cover is off or ` +
+        `routed through Brisk (this policy never collected one). Add a ` +
+        `nominee to the policy, or save a default one in Account & Policy ` +
+        `Settings → National → Nominee Details, then re-run this policy.`
+      );
+    }
+
+    // National Insurance form
+    run = fillNationalForm({
+      ...formData,
+      // username: "9999839907", // Always use this username for National
+      // password: "Rayal$2025",
+      username: creds.username,
+      password: creds.password,
+      // Passed through like KSHEMA's. Without it National fell back to a
+      // lookup of its own that ended in "first active National row in the
+      // database", so a client with its own portal URL could be sent to
+      // somebody else's.
+      loginUrl: creds.loginUrl,
+      nomineeName: resolvedNomineeName,
+      nomineeRelation: resolvedNomineeRelation,
+      nomineeAge: resolvedNomineeAge,
+      _jobId: jobId, // Pass job ID for error logging
+      _jobIdentifier: jobIdentifier,
+      _attemptNumber: attemptNumber, // Current attempt number
+      _jobQueueCollection: jobQueueCollection, // Pass collection for logging
+    });
+  } else if (companyName === "kshema") {
+    // KSHEMA. Phase 1: opens the portal login page, fills the credentials in
+    // and stops there without submitting — so it reports failure on purpose
+    // (see fullPolicycompany/kshemaForm.js). loginUrl is passed through
+    // because KSHEMA credentials store their own portal URL.
+    run = fillKshemaForm({
+      ...formData,
+      username: creds.username,
+      password: creds.password,
+      loginUrl: creds.loginUrl,
+      _jobId: jobId,
+      _jobIdentifier: jobIdentifier,
+      _attemptNumber: attemptNumber,
+      _jobQueueCollection: jobQueueCollection,
+    });
+  } else {
+    // Reliance form (default)
+    run = fillRelianceForm({
+      // NOTE: credentials come AFTER the spread on purpose. formData carries
+      // hardcoded defaults ("rfcpolicy"/"Pass@123"), so spreading it last
+      // silently overwrote this client's real credentials — every job then
+      // logged into the portal as the default user and policies were issued
+      // under the wrong IMD code. (The National branch above already had the
+      // correct order.)
+      ...formData,
+      username: creds.username,
+      password: creds.password,
+      // Reliance credentials carry their own portal URL too. Without this the
+      // login fell back to the shared CONFIG.LOGIN_URL, which whichever job
+      // ran last had rewritten.
+      loginUrl: creds.loginUrl,
+      _jobId: jobId, // Pass job ID for error logging
+      _jobIdentifier: jobIdentifier,
+      _attemptNumber: attemptNumber, // Current attempt number
+      _jobQueueCollection: jobQueueCollection, // Pass collection for logging
+    });
+  }
+
+  return { run };
 };
 
 const runPolicyJob = async (rawJob) => {
@@ -1280,74 +1495,37 @@ const runPolicyJob = async (rawJob) => {
       { $set: { lastUsedAt: new Date() } }
     ).catch((e) => console.warn(`[${queueName}] could not stamp lastUsedAt:`, e.message));
 
+    // A Brisk certificate is paid for from the master wallet. If this policy
+    // already has one (a retry, an edit re-run, or the other leg of an OD/TP
+    // pair), buying it again would charge twice — so tell the fillers, and
+    // shouldCreateBriskCertificate skips it. Read-only, never blocks the job.
+    try {
+      const existingBrisk = await db
+        .collection("onlinePolicy")
+        .findOne({ _id: job.captchaId }, { projection: { briskCertificate: 1 } });
+      const bc = existingBrisk?.briskCertificate;
+      if (bc && (bc.key || bc.location || bc.certificateNo)) {
+        job.formData.briskCertificateExists = true;
+      }
+    } catch (e) {
+      console.warn(`[${queueName}] could not check for an existing Brisk certificate: ${e.message}`);
+    }
+
     // Route to appropriate form filling function based on Companyname
     let fillFormPromise;
-    if (companyName === "national") {
-      // National's portal now demands a nominee on EVERY quote, including
-      // policies with no PA cover — where the Online Policy form never asks
-      // for one. Resolve the operator's saved default and use it ONLY to fill
-      // whatever the policy itself left blank; the policy's own nominee always
-      // wins. Resolved here (not in the backend's job-building step) so a
-      // nominee saved after a job was queued still applies on retry.
-      const nomineeFallback = await resolveNationalNominee({
-        userId: job.formData.userId,
-        clientId: job.formData.clientId,
-        log: (line) => console.log(`→ [${queueName}] ${line}`),
-      });
-
-      // Whether National's OWN Compulsory PA section will run off the
-      // policy's own nominee (collected on the Online Policy form under PA
-      // Cover Details) — matches fullPolicycompany/national.js's own
-      // isCompanyPA check. When PA Cover is off, or routed through Brisk
-      // instead of National, the policy never asked for a nominee at all, so
-      // the saved default below is the only other source.
-      const paCoverVal = job.formData.paCover === true || job.formData.paCover === "true";
-      const paCompanyVal = String(job.formData.paCoverCompany || "").toLowerCase();
-      const isCompanyPA = paCoverVal && (paCompanyVal === "company" || paCompanyVal === "national");
-
-      const resolvedNomineeName = job.formData.nomineeName || nomineeFallback?.name;
-      const resolvedNomineeRelation = job.formData.nomineeRelation || nomineeFallback?.relation;
-      const resolvedNomineeAge = job.formData.nomineeAge || nomineeFallback?.age;
-      const hasNominee = !!(resolvedNomineeName && resolvedNomineeRelation && resolvedNomineeAge);
-
-      // National demands a nominee on EVERY quote. Refuse to even open a
-      // browser for a job that is already known to fail this step — the
-      // portal only says so after login, Vahan check and half the form.
-      if (!isCompanyPA && !hasNominee) {
+    const policyType = String(job.formData.policyType || "").toLowerCase();
+    if (policyType === "od" || policyType === "tp") {
+      // New multiCompany OD/TP-only automation (see multiCompany/registry.js).
+      // Unreachable for any job without policyType set, so every existing
+      // bundled job keeps dispatching through the branches below, unchanged.
+      assertMultiCompanyEnabled();
+      const handler = resolveMultiCompanyHandler(companyName, policyType);
+      if (!handler) {
         throw new Error(
-          `[E101] National requires nominee details when PA Cover is off or ` +
-          `routed through Brisk (this policy never collected one). Add a ` +
-          `nominee to the policy, or save a default one in Account & Policy ` +
-          `Settings → National → Nominee Details, then re-run this policy.`
+          `[E110] No ${policyType.toUpperCase()} automation exists yet for ${companyLabel(companyName)}.`
         );
       }
-
-      // National Insurance form
-      fillFormPromise = fillNationalForm({
-        ...job.formData,
-        // username: "9999839907", // Always use this username for National
-        // password: "Rayal$2025",
-        username: creds.username,
-        password: creds.password,
-        // Passed through like KSHEMA's. Without it National fell back to a
-        // lookup of its own that ended in "first active National row in the
-        // database", so a client with its own portal URL could be sent to
-        // somebody else's.
-        loginUrl: creds.loginUrl,
-        nomineeName: resolvedNomineeName,
-        nomineeRelation: resolvedNomineeRelation,
-        nomineeAge: resolvedNomineeAge,
-        _jobId: job._id, // Pass job ID for error logging
-        _jobIdentifier: jobIdentifier,
-        _attemptNumber: job.attempts + 1, // Current attempt number
-        _jobQueueCollection: jobQueueCollection, // Pass collection for logging
-      });
-    } else if (companyName === "kshema") {
-      // KSHEMA. Phase 1: opens the portal login page, fills the credentials in
-      // and stops there without submitting — so it reports failure on purpose
-      // (see fullPolicycompany/kshemaForm.js). loginUrl is passed through
-      // because KSHEMA credentials store their own portal URL.
-      fillFormPromise = fillKshemaForm({
+      fillFormPromise = handler({
         ...job.formData,
         username: creds.username,
         password: creds.password,
@@ -1358,26 +1536,15 @@ const runPolicyJob = async (rawJob) => {
         _jobQueueCollection: jobQueueCollection,
       });
     } else {
-      // Reliance form (default)
-      fillFormPromise = fillRelianceForm({
-        // NOTE: credentials come AFTER the spread on purpose. formData carries
-        // hardcoded defaults ("rfcpolicy"/"Pass@123"), so spreading it last
-        // silently overwrote this client's real credentials — every job then
-        // logged into the portal as the default user and policies were issued
-        // under the wrong IMD code. (The National branch above already had the
-        // correct order.)
-        ...job.formData,
-        username: creds.username,
-        password: creds.password,
-        // Reliance credentials carry their own portal URL too. Without this the
-        // login fell back to the shared CONFIG.LOGIN_URL, which whichever job
-        // ran last had rewritten.
-        loginUrl: creds.loginUrl,
-        _jobId: job._id, // Pass job ID for error logging
-        _jobIdentifier: jobIdentifier,
-        _attemptNumber: job.attempts + 1, // Current attempt number
-        _jobQueueCollection: jobQueueCollection, // Pass collection for logging
-      });
+      // The bundled flows: National, KSHEMA, Reliance (the default).
+      ({ run: fillFormPromise } = await dispatchBundled(job.formData, {
+        companyName,
+        creds,
+        jobId: job._id,
+        jobIdentifier,
+        attemptNumber: job.attempts + 1,
+        queueName,
+      }));
     }
 
     const timeoutPromise = new Promise((_, reject) =>
@@ -1403,7 +1570,7 @@ const runPolicyJob = async (rawJob) => {
         completionWarnings.push(result.documentUploadError);
       }
 
-      const finalStatus = completionWarnings.length
+      const finalStatus = completionWarnings.length 
         ? JOB_STATUS.COMPLETED_WITH_ERRORS
         : JOB_STATUS.COMPLETED;
 
@@ -1485,16 +1652,31 @@ const runPolicyJob = async (rawJob) => {
       // entry are both wrong for it.
       const isInProgress = result?.inProgress === true;
 
-      // Use structured error codes
-      const errorCode = isPostSubmissionFailure
-        ? 'E401'
-        : isInProgress ? 'E100' : 'E300';
+      // Use structured error codes.
+      //
+      // multiCompany handlers (multiCompany/common/errors.js failureResult)
+      // carry their own catalogue code — E203 bad credentials, E204 locked,
+      // E302 timeout ... — and their own retry decision, so record THAT rather
+      // than the blanket E300. A code that is not in the catalogue is ignored.
+      // The bundled Reliance/National/KSHEMA flows never set errorCode, so for
+      // them this is exactly the old three-way choice.
+      const handlerCode =
+        result?.errorCode && !isPostSubmissionFailure && !isInProgress
+          ? Object.values(ERROR_CODES).find((c) => c.code === result.errorCode)
+          : null;
+      const errorCode = handlerCode
+        ? handlerCode.code
+        : isPostSubmissionFailure
+          ? 'E401'
+          : isInProgress ? 'E100' : 'E300';
       const failureType = isPostSubmissionFailure
         ? "PostSubmissionError"
         : isInProgress ? "AutomationIncomplete" : "LoginFormError";
-      const severity = isPostSubmissionFailure
-        ? 'critical'
-        : isInProgress ? 'info' : 'warning';
+      const severity = handlerCode
+        ? handlerCode.severity
+        : isPostSubmissionFailure
+          ? 'critical'
+          : isInProgress ? 'info' : 'warning';
 
       // Use proper extracted message if available, otherwise fallback to Selenium error
       const rawError = result?.onPageError || result?.error || "Unknown error";
@@ -1859,6 +2041,51 @@ const runPolicyJob = async (rawJob) => {
   }
 };
 
+// Everything lib/partRunner.js needs to run one part of a job with `parts`.
+// Getters, because the collection only exists once the DB connection is open.
+const partRunnerDeps = {
+  get collection() {
+    return jobQueueCollection;
+  },
+  get policies() {
+    return db.collection("onlinePolicy");
+  },
+  hydrateJobFormData,
+  // Same lookup + lastUsedAt stamp as the original path, for the PART's insurer.
+  resolveCredentials: async (companyName, formData, log) => {
+    const resolved = await resolvePortalCredentials({
+      provider: companyName,
+      userId: formData.userId,
+      clientId: formData.clientId,
+      log,
+    });
+    if (resolved) {
+      ProviderCredential.updateOne(
+        { _id: resolved.creds._id },
+        { $set: { lastUsedAt: new Date() } }
+      ).catch((e) => console.warn(`[${companyName}] could not stamp lastUsedAt:`, e.message));
+    }
+    return resolved;
+  },
+  dispatchBundled,
+  resolveMultiCompanyHandler,
+  assertMultiCompanyEnabled,
+  runBriskPart,
+  // Video per part: named ${policyId}_${part}, only that part's entry replaced.
+  finalizeRecording: (job, part, companyName) =>
+    finalizeRecording(job._id, {
+      companyName,
+      policyId: job.captchaId,
+      collection: jobQueueCollection,
+      partKey: part.key,
+    }),
+  scheduleWakeup: scheduleQueueWakeup,
+  logAudit: logAuditEntry,
+  jobTimeoutMs: JOB_TIMEOUT,
+  companyLabel,
+  logger: console,
+};
+
 db.on("error", console.error.bind(console, "connection error:"));
 db.once("open", async () => {
   console.log("Connected to MongoDB");
@@ -1880,7 +2107,7 @@ db.once("open", async () => {
   // unconditionally rather than waiting for the heartbeat window. (While the
   // server is RUNNING the opposite rule applies: a live job is never touched.)
   const stuckJobs = await jobQueueCollection.updateMany(
-    { status: JOB_STATUS.PROCESSING },
+    { status: JOB_STATUS.PROCESSING, ...partRunner.LEGACY_JOBS },
     {
       $set: {
         status: JOB_STATUS.PENDING,
@@ -1890,23 +2117,32 @@ db.once("open", async () => {
       $unset: { lastHeartbeatAt: "" },
     }
   );
+  // Jobs with parts: the part that was running goes back to pending too.
+  const stuckParts = await partRunner.recoverPartsJobs(jobQueueCollection);
+  // An edit that arrived during a run that never reported back would otherwise
+  // be lost (the part would run again with the old insurer).
+  await partRunner.applyPendingRequeues(jobQueueCollection);
 
-  if (stuckJobs.modifiedCount > 0) {
+  const stuckCount = stuckJobs.modifiedCount + stuckParts.modifiedCount;
+  if (stuckCount > 0) {
     console.log(
-      `[Job Queue] 🔄 Recovered ${stuckJobs.modifiedCount} jobs that were stuck in processing state`
+      `[Job Queue] 🔄 Recovered ${stuckCount} jobs that were stuck in processing state`
     );
   }
 
   // Clear stale retry backoff on restart — otherwise "will start processing" waits
   // silently until an old nextRetryAt (1-16 min backoff) expires + next 30s poll tick
   const clearedBackoff = await jobQueueCollection.updateMany(
-    { status: JOB_STATUS.PENDING, nextRetryAt: { $exists: true } },
+    { status: JOB_STATUS.PENDING, ...partRunner.LEGACY_JOBS, nextRetryAt: { $exists: true } },
     { $unset: { nextRetryAt: "" } }
   );
+  // Jobs with parts keep a Date job-level nextRetryAt; only the backoff is zeroed.
+  const clearedPartsBackoff = await partRunner.clearPartsBackoff(jobQueueCollection);
+  const clearedCount = clearedBackoff.modifiedCount + clearedPartsBackoff.modifiedCount;
 
-  if (clearedBackoff.modifiedCount > 0) {
+  if (clearedCount > 0) {
     console.log(
-      `[Job Queue] ⏩ Cleared retry backoff on ${clearedBackoff.modifiedCount} pending job(s) — running them now`
+      `[Job Queue] ⏩ Cleared retry backoff on ${clearedCount} pending job(s) — running them now`
     );
   }
 
@@ -1956,14 +2192,20 @@ db.once("open", async () => {
   // poll above is the safety net if this stream drops.
   // ─────────────────────────────────────────────────────────────────────────
   try {
-    const jobChangeStream = jobQueueCollection.watch(
-      [{ $match: { operationType: { $in: ["insert", "replace"] } } }],
-      { fullDocument: "updateLookup" }
-    );
+    // Jobs with parts are updated IN PLACE (an edit, a retry, a released hold,
+    // a part finishing), not re-inserted — so an update that puts the job back to
+    // "pending" or (re)schedules it must wake the queue too (the pipeline is in
+    // partRunner so it can be tested). No fullDocument lookup: only the id is
+    // used, and heartbeats would otherwise each cost one.
+    const jobChangeStream = jobQueueCollection.watch(partRunner.QUEUE_WAKE_PIPELINE);
 
     jobChangeStream.on("change", (change) => {
       const newJobId = change.documentKey?._id;
-      console.log(`[Job Queue] 📥 New job detected (${newJobId}) — processing...`);
+      console.log(
+        change.operationType === "update"
+          ? `[Job Queue] 📥 Job ${newJobId} was re-queued or rescheduled — processing...`
+          : `[Job Queue] 📥 New job detected (${newJobId}) — processing...`
+      );
       void processRelianceQueue();
     });
 
@@ -2038,10 +2280,12 @@ app.get("/api/job-status/:captchaId", async (req, res) => {
     const ObjectId = require("mongodb").ObjectId;
     const captchaObjectId = new ObjectId(captchaId);
 
-    // Find job by captchaId reference (use lean for plain object)
+    // Find job by captchaId reference. (Raw driver: findOne returns a plain
+    // object — the `.lean()` that used to be chained here is Mongoose-only and
+    // made this endpoint throw on every call.)
     const job = await jobQueueCollection.findOne({
       captchaId: captchaObjectId,
-    }).lean();
+    });
 
     if (!job) {
       return res.status(404).json({
@@ -2092,6 +2336,11 @@ app.get("/api/job-status/:captchaId", async (req, res) => {
       // Status
       status: job.status,
       failureType: job.failureType || null, // "LoginFormError" or "PostSubmissionError"
+
+      // One job per policy: the status of each part (OD / TP / OD+TP / PA).
+      // null for a job created before parts existed.
+      parts: job.parts || null,
+      currentPart: job.currentPart || null,
 
       // Progress
       attempts: job.attempts,

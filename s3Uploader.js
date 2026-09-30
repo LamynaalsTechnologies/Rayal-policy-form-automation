@@ -229,17 +229,19 @@ async function uploadRecordingToS3(filePath, s3Key) {
 }
 
 /**
- * Make sure the bucket expires recordings on its own.
+ * Make sure the bucket expires everything under `prefix` on its own.
  *
  * Runs on every server start (idempotent). Reads the existing lifecycle
- * configuration and re-writes it with our rule added/updated — other rules on
- * the bucket are preserved untouched. After this, S3 itself deletes every
- * object under recordings/ once it is RECORDING_RETENTION_DAYS old; no cron,
- * no manual cleanup.
+ * configuration and re-writes it with our rule added/updated — every OTHER
+ * rule on the bucket is preserved untouched. After this, S3 itself deletes
+ * each object under the prefix once it is `days` old; no cron, no manual
+ * cleanup.
+ *
+ * @param {{id: string, prefix: string, days: number, label?: string}} rule
  */
-async function ensureRecordingLifecycleRule() {
+async function ensureLifecycleRule({ id, prefix, days, label = prefix }) {
   if (!hasAwsCredentials || !s3) {
-    console.warn("⚠️ Recording lifecycle rule skipped — S3 not configured");
+    console.warn(`⚠️ Lifecycle rule for ${label} skipped — S3 not configured`);
     return false;
   }
 
@@ -255,23 +257,19 @@ async function ensureRecordingLifecycleRule() {
     }
 
     const ours = {
-      ID: RECORDING_LIFECYCLE_RULE_ID,
-      Filter: { Prefix: RECORDING_PREFIX },
+      ID: id,
+      Filter: { Prefix: prefix },
       Status: "Enabled",
-      Expiration: { Days: RECORDING_RETENTION_DAYS },
+      Expiration: { Days: days },
     };
 
-    const current = rules.find((r) => r.ID === RECORDING_LIFECYCLE_RULE_ID);
-    if (current && current.Expiration?.Days === RECORDING_RETENTION_DAYS) {
-      console.log(
-        `🗓️  S3 lifecycle: recordings already expire after ${RECORDING_RETENTION_DAYS} days`
-      );
+    const current = rules.find((r) => r.ID === id);
+    if (current && current.Expiration?.Days === days) {
+      console.log(`🗓️  S3 lifecycle: ${label} already expire after ${days} days`);
       return true;
     }
 
-    const nextRules = rules
-      .filter((r) => r.ID !== RECORDING_LIFECYCLE_RULE_ID)
-      .concat([ours]);
+    const nextRules = rules.filter((r) => r.ID !== id).concat([ours]);
 
     await s3
       .putBucketLifecycleConfiguration({
@@ -280,20 +278,45 @@ async function ensureRecordingLifecycleRule() {
       })
       .promise();
 
-    console.log(
-      `🗓️  S3 lifecycle rule set: recordings/ auto-deletes after ${RECORDING_RETENTION_DAYS} days`
-    );
+    console.log(`🗓️  S3 lifecycle rule set: ${label} auto-delete after ${days} days`);
     return true;
   } catch (error) {
     console.error(
-      `⚠️ Could not set the S3 lifecycle rule for recordings (${error.message}).\n` +
-        `   Recordings will still upload, but WON'T auto-delete. Either grant the\n` +
+      `⚠️ Could not set the S3 lifecycle rule for ${label} (${error.message}).\n` +
+        `   They will still upload, but WON'T auto-delete. Either grant the\n` +
         `   IAM user s3:GetLifecycleConfiguration + s3:PutLifecycleConfiguration on\n` +
         `   ${BUCKET_NAME}, or add a rule manually in the S3 console: prefix\n` +
-        `   "${RECORDING_PREFIX}", expire after ${RECORDING_RETENTION_DAYS} days.`
+        `   "${prefix}", expire after ${days} days.`
     );
     return false;
   }
+}
+
+/** Recordings expire on their own — see ensureLifecycleRule. */
+function ensureRecordingLifecycleRule() {
+  return ensureLifecycleRule({
+    id: RECORDING_LIFECYCLE_RULE_ID,
+    prefix: RECORDING_PREFIX,
+    days: RECORDING_RETENTION_DAYS,
+    label: "recordings/",
+  });
+}
+
+// ─── multiCompany failure screenshots ────────────────────────────────────────
+// One prefix, so one lifecycle rule expires them all without touching the
+// older screenshots/error|post-submission objects that have no rule.
+const MULTI_COMPANY_SCREENSHOT_PREFIX = "screenshots/multiCompany/";
+const MULTI_COMPANY_SCREENSHOT_RULE_ID = "auto-delete-multicompany-screenshots";
+const MULTI_COMPANY_SCREENSHOT_RETENTION_DAYS =
+  parseInt(process.env.MULTI_COMPANY_SCREENSHOT_RETENTION_DAYS, 10) || 10;
+
+function ensureMultiCompanyScreenshotLifecycleRule() {
+  return ensureLifecycleRule({
+    id: MULTI_COMPANY_SCREENSHOT_RULE_ID,
+    prefix: MULTI_COMPANY_SCREENSHOT_PREFIX,
+    days: MULTI_COMPANY_SCREENSHOT_RETENTION_DAYS,
+    label: "multiCompany screenshots",
+  });
 }
 
 /**
@@ -399,5 +422,7 @@ module.exports = {
   generateRecordingKey,
   deleteRecordingFromS3,
   ensureRecordingLifecycleRule,
+  ensureLifecycleRule,
+  ensureMultiCompanyScreenshotLifecycleRule,
   purgeOldLocalRecordings,
 };

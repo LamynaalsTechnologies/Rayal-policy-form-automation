@@ -32,6 +32,11 @@ const ErrorLogSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    // Which part of a job with parts this entry belongs to ("od" | "tp" | "motor" | "pa").
+    part: {
+      type: String,
+      default: undefined,
+    },
   },
   { _id: false }
 ); // _id: false to not create _id for subdocuments
@@ -47,19 +52,84 @@ const RelianceJobQueueSchema = new mongoose.Schema(
       index: true,
     },
 
+    // "od" | "tp" — set only by the new multiCompany fan-out
+    // (RayalBrokers-backend's dao/onlinePolicyDao.js enqueueProductJobs).
+    // null/absent on every job the legacy single-job path creates — this is
+    // what keeps server.js's existing bundled companyName if/else dispatch
+    // untouched for those jobs. One policy (one captchaId) can now own more
+    // than one job — an OD job and a TP job — distinguished by this field;
+    // see the compound index below.
+    policyType: {
+      type: String,
+      default: null,
+    },
+
     // Form data submitted by the user
     formData: {
       type: mongoose.Schema.Types.Mixed,
       required: true,
     },
 
-    // Job status
+    // ── Company routing ────────────────────────────────────────────────────
+    // Copy of the policy's `settings` (shared/policySettings.js) taken when the
+    // job was queued: { isMultipleCompany, PACompany, ODCompany, TPCompany }.
+    // Also mirrored in formData.settings, which is what the automation reads.
+    settings: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+
+    // Job status. The automation writes all of these through the raw driver
+    // (no Mongoose validation), so the list is kept accurate for a future
+    // .save(): it is the union of server.js JOB_STATUS and "hold", which is the
+    // operator's parking state — the automation only claims "pending".
     status: {
       type: String,
-      enum: ["pending", "processing", "completed", "failed"],
+      enum: [
+        "pending",
+        "hold",
+        "processing",
+        "completed",
+        "completed_with_errors",
+        "failed",
+        "failed_login_form",
+        "failed_post_submission",
+        "failed_validation",
+        "failed_duplicate",
+      ],
       default: "pending",
       required: true,
       index: true,
+    },
+
+    // ── One job per policy, a separate status per part ─────────────────────
+    // Created by the backend when POLICY_JOB_PARTS_ENABLED is on; absent on
+    // every older job, which keeps running through the original code path.
+    // Each part: { key: "motor"|"od"|"tp"|"pa", kind: "bundled"|"portal"|
+    // "brisk"|"withPart", company, status, carriesPa, paCoverCompany, dependsOn,
+    // mirrors, attempts, maxAttempts, nextRetryAt, lastError, lastErrorCode,
+    // stage, startedAt, completedAt, failedAt, result, requeue, ... } — the
+    // rules are in lib/jobPartsCore.js. The job's own `status` / `nextRetryAt`
+    // are derived from them (summarizeParts), so readers that only know the
+    // queue states keep working.
+    // `default: undefined`: a Mongoose array would otherwise default to [] and
+    // make an ordinary job look like a parts job.
+    parts: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: undefined,
+    },
+    // Optimistic-lock counter for a job with parts: every write that changes
+    // parts (claim, outcome, edit, recovery) is conditional on it and bumps it.
+    // The heartbeat deliberately does not.
+    rev: {
+      type: Number,
+      default: undefined,
+    },
+    // The part being run right now: { key, company, kind, bucket, attempt,
+    // startedAt }. Set when the part is claimed, unset when its outcome is saved.
+    currentPart: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
     },
 
     // Timestamps
@@ -149,6 +219,20 @@ const RelianceJobQueueSchema = new mongoose.Schema(
 RelianceJobQueueSchema.index({ status: 1, createdAt: 1 });
 RelianceJobQueueSchema.index({ createdAt: 1 });
 RelianceJobQueueSchema.index({ captchaId: 1 });
+// A policy can now own more than one job (OD + TP); this is the key that
+// keeps them from colliding — see the policyType field comment above.
+RelianceJobQueueSchema.index({ captchaId: 1, policyType: 1 });
+// One job per policy for jobs with parts. Declared here for parity with the
+// backend model; this server talks to the collection through the raw driver
+// and never syncs Mongoose indexes, so it is the backend that builds it.
+RelianceJobQueueSchema.index(
+  { captchaId: 1 },
+  {
+    name: "captchaId_parts_unique",
+    unique: true,
+    partialFilterExpression: { "parts.0": { $exists: true } },
+  }
+);
 RelianceJobQueueSchema.index({ "errorLogs.timestamp": 1 });
 
 // Instance methods

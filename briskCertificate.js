@@ -414,7 +414,11 @@ async function createBriskCertificate(data) {
       netPremium: String(briskNetPremium),
       gst: String(briskGst),
       minimumPremium: 0,
-      policyType: data.policyType || "CPA/RSA"
+      // A fan-out job carries policyType "od"/"tp" (which LEG of the policy it
+      // is). That is not a Brisk product name, so never forward it.
+      policyType: ["od", "tp"].includes(String(data.policyType || "").toLowerCase())
+        ? "CPA/RSA"
+        : data.policyType || "CPA/RSA"
     };
 
     console.log("📤 Sending Brisk Certificate request with payload:", JSON.stringify(payload, null, 2));
@@ -669,6 +673,12 @@ const shouldCreateBriskCertificate = (data) => {
 
   if (!paCoverSelected) {
     return { create: false, reason: "PA Cover not selected (nothing to certify)" };
+  }
+
+  // server.js sets this when the policy already holds a certificate. The
+  // certificate is paid for from the master wallet, so never buy a second one.
+  if (data?.briskCertificateExists === true) {
+    return { create: false, reason: "a Brisk certificate already exists for this policy" };
   }
 
   const provider = String(data?.paCoverCompany || "").trim().toLowerCase();
