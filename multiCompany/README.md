@@ -62,6 +62,8 @@ so the two cannot disagree. The server recomputes both on every create/edit/upda
 - *Different OD/TP insurers, flag on, `schemaVersion 2`* → OD share (`odPremium × 1.18`) to the OD company, the rest
   of the motor premium (TP) to the TP company, PA to `PACompany`. The two motor shares add back to the motor
   premium to the paisa. If the OD/TP breakup is missing it falls back to the single debit and logs a warning.
+- *A "user" login also pays from its personal **Policy Wallet**:* the same total as the Company Wallet legs (motor premium + PA with GST), as
+  one amount (`policyWalletCharge`); see `RayalBrokers-backend/README.md` section 4.
 
 **Premium split per company.** The premium engine is the same for every insurer: Total A = OD, Total B = TP with
 PA folded in. `premiumSplit` (frontend, `companyRules.js`) / `buildPremiumSplit` (backend, `policySettings.js`) —
