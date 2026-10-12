@@ -10,6 +10,10 @@ const path = require("path");
 const { extractCaptchaText } = require("../Captcha");
 const { uploadScreenshotToS3, generateScreenshotKey } = require("../s3Uploader");
 const { beautifyError } = require("../lib/errorHandler");
+// A deliberate stop — stopper(), or a Breaker.checkpoint() that .env switched on — must
+// reach the top-level catch below as a stop, not be dressed up as a failure and retried.
+const { isAutomationStop, stoppedResult } = require("../automationStopper");
+require("../breaker"); // defines the global `Breaker` for a standalone run of this file
 // Shared with Reliance — National previously had NO Brisk handling at all, so
 // a National policy with PA Cover through Brisk never got its CPA/RSA
 // certificate.
@@ -3905,6 +3909,7 @@ async function fillNationalForm(
 
       await driver.sleep(500);
     } catch (e) {
+      if (isAutomationStop(e)) throw e;
       console.log("Year of Manufacture handling failed:", e.message);
     }
     // === COMPULSORY PA FOR OWNER DRIVER SECTION ===
@@ -4101,10 +4106,12 @@ async function fillNationalForm(
         }
 
       } catch (innerErr) {
+        if (isAutomationStop(innerErr)) throw innerErr;
         console.log(`[${jobId}] Error in Compulsory PA sub-steps: ${innerErr.message}`);
       }
 
     } catch (e) {
+      if (isAutomationStop(e)) throw e;
       console.log(`[${jobId}] Error handling Compulsory PA section: ${e.message}`);
     }
     await driver.sleep(1000);
@@ -4570,7 +4577,7 @@ async function fillNationalForm(
       // result. Swallowing it here would just log the failure and let the job
       // carry on to Calculate Premium with no nominee at all — the exact
       // outcome National's portal now always rejects.
-      if (e.stage === "nominee-validation") {
+      if (isAutomationStop(e) || e.stage === "nominee-validation") {
         throw e;
       }
       console.log(`[${jobId}] Error handling Nominee Details section: ${e.message}`);
@@ -4770,6 +4777,7 @@ async function fillNationalForm(
           console.log("Could not select Financier Interest Type.");
         }
       } catch (e) {
+        if (isAutomationStop(e)) throw e;
         console.log("Financier Interest Type handling failed:", e.message);
       }
 
@@ -5098,6 +5106,7 @@ async function fillNationalForm(
       await driver.sleep(500);
 
     } catch (e) {
+      if (isAutomationStop(e)) throw e;
       console.log(`[${jobId}] Declaration checkbox handling error:`, e.message);
     }
 
@@ -5345,6 +5354,7 @@ async function fillNationalForm(
         await driver.sleep(1000);
 
       } catch (e) {
+        if (isAutomationStop(e)) throw e;
         throw new Error(`Critical Error: Proceed For Payment flow failed: ${e.message}`);
       }
 
@@ -5423,6 +5433,17 @@ async function fillNationalForm(
     return { success: true, briskCertificateError };
   } catch (error) {
     hadError = true;
+
+    // stopper() / Breaker.checkpoint() ended the run on purpose. Hand it back as a
+    // stop: no error screenshot, no retry, and (KEEP_BROWSER_OPEN_ON_ERROR) the
+    // browser stays on the page where it stopped.
+    if (isAutomationStop(error)) {
+      console.log(`[${jobId}] ⏸️  ${error.message}`);
+      const stopped = stoppedResult(error);
+      stopped.pageUrl = driver ? await driver.getCurrentUrl().catch(() => null) : null;
+      return stopped;
+    }
+
     console.error(`[${jobId}] [nationalForm] Error:`, error.message || error);
 
     const isValidationError =

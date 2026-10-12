@@ -9,8 +9,9 @@
  *   node multiCompany/cli/runHandler.js --company kshema   --type od -u EMAIL -p PASS
  *
  * A deliberately WRONG password is the way to check invalid-credential handling:
- * the result should come back errorCode "E203", retryable false, with the
- * portal's own message in it.
+ * the result should come back errorCode "E203", retryable false. National and
+ * KSHEMA put the portal's own message in it; Reliance (the full-company login,
+ * after its 5 attempts) says "Reliance rejected the login for ...".
  */
 
 // Dev convenience only, and must run BEFORE the require below —

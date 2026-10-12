@@ -101,7 +101,8 @@ duplicated amount.
 | `MULTI_COMPANY_AUTOMATION_ENABLED` | `Rayal-policy-form-automation/.env` | `false` | Off: every handler throws `[E110]` **before** opening a browser, touching the DB or S3. Also gates the S3 screenshot lifecycle rule at startup. |
 | `MULTI_COMPANY_SCREENSHOT_RETENTION_DAYS` | automation `.env` | `10` | S3 expiry for failure screenshots. |
 | `KEEP_BROWSER_OPEN_ON_ERROR` | automation `.env` | existing | A failed/stopped job's browser stays open for inspection (needs a display). |
-| `POLICY_JOB_PARTS_ENABLED` | **`RayalBrokers-backend/.env`** | `false` | Off: the backend queues jobs as before (one bundled job, or an OD job + a TP job). On: **one job per policy** carrying a `parts` array (OD / TP / OD+TP / PA, each with its own status). The automation server has no switch of its own — it simply runs any job that has `parts` (see §4), so **deploy the automation server first, then turn this on**. Jobs without `parts` keep running through the original code path unchanged. |
+| `BREAKER_ENABLED` / `BREAKER_STOP_AT` | automation `.env` | `false` / — | Master switch and the checkpoint name(s) for `Breaker.checkpoint("…")` — see §8. Off: a checkpoint line in the code does nothing. |
+| `POLICY_JOB_PARTS_ENABLED` | **`RayalBrokers-backend/.env`** | `false` | Off: the backend queues jobs the old way — **one bundled job whenever OD and TP are the same insurer**, and an OD job + a TP job only when two *different* insurers sell the policy. On: **one job per policy** carrying a `parts` array (OD / TP / OD+TP / PA, each with its own status). The automation server has no switch of its own — it simply runs any job that has `parts` (see §4), so **deploy the automation server first, then turn this on**. Jobs without `parts` keep running through the original code path unchanged. |
 | `BRISKMAXWINDOW` | automation `.env` | `1` | How many Brisk PA parts may run at once. Brisk is API-only (no browser), so it has its own window, separate from the insurers' `RELIANCEMAXWINDOW` etc. |
 
 `MULTI_COMPANY_AUTOMATION_ENABLED` gates the OD/TP **portal** handlers (both the old OD-job / TP-job shape and `od` / `tp`
@@ -117,7 +118,8 @@ multiCompany/
     featureGate.js                MULTI_COMPANY_AUTOMATION_ENABLED, assertMultiCompanyEnabled() → [E110]
     engine.js  matchText.js       field-table filler (fillSection) and text matching
     adapters/kendoAdapter.js      Kendo autocomplete
-    reliance/vehicleIdentityFields.js   make & model fields (OD and TP share them)
+    reliance/vehicleIdentityFields.js   make & model fields (OD and TP share them; unused while Reliance OD is login-only)
+    reliance/fullCompanyLogin.js        the Reliance login: a COPY of the full-company one (OD and TP share it)
     errors.js                     MultiCompanyError(code, message, opts) + failureResult()
     loader.js                     waitForLoader(driver, company) — one loading wait, [E302] on timeout
     elements.js                   firstVisible, clickWithFallback, typeWithReadback
@@ -128,8 +130,8 @@ multiCompany/
     loginOnlyHandler.js           factory for handlers whose form is not built yet
     login/
       index.js                    login(driver, company, creds, ctx)  ← THE entry point
-      runLogin.js                 the shared login loop
-      relianceLogin.js nationalLogin.js kshemaLogin.js    per-insurer strategy (data + small hooks)
+      runLogin.js                 the shared login loop (National, KSHEMA)
+      nationalLogin.js kshemaLogin.js    per-insurer strategy (data + small hooks)
   odCompany/  relianceOD/ nationalOD/ kshemaOD/     one handler file each
   tpCompany/  relianceTP/ nationalTP/ kshemaTP/     one handler file each
   cli/runHandler.js               standalone runner for any handler
@@ -215,6 +217,14 @@ queue pass ──► planClaims ──► claimPart ──► runPartJob ──�
    overwritten: the backend flags the running part with `requeue`, and the outcome decides whether it is applied
    (failed part: runs again with the new insurer) or only recorded (bought part: `routingChanged`). A part that is
    already bought is never demoted by a late failure.
+   **Checked before every part runs** (`runPartJob`, before credentials, a browser or any purchase):
+   - the policy still exists — a deleted policy fails every unfinished part with `failed_validation` and buys nothing, not even
+     the Brisk PA (paid from the master wallet). A database error while checking is *not* "deleted": the part retries in 30 s
+     and no attempt is spent;
+   - the part matches how the policy was sold (`routingConflict`) — a bundled `motor` part on a two-insurer policy, or a
+     single-company policy split into `od` + `tp` portal parts, is refused with `failed_validation` (E100);
+   - the `tp` portal part fills the **TP vehicle** (`tpVehicleOverrides`, `lib/tpVehicle.js`, a byte-identical copy of the
+     backend's `shared/tpVehicle.js`); the `od` part and a bundled part keep the OD vehicle.
 5. **Next.** The job is `pending` again (immediately due) if any part can still run, so the queue picks the next part
    at once — by the run's own `.finally`, and by the change stream, which also wakes on updates that put a job back to
    `pending` or set `nextRetryAt`. A retry backoff wakes the queue at exactly that moment. The 5-minute
@@ -267,32 +277,48 @@ each other; only that part's entry (tagged `part`) and S3 object are replaced.
 ## 5. Common login
 
 `login(driver, company, { username, password, loginUrl }, { jobId, log })` → resolves when logged in and the
-dashboard is ready, or throws a `MultiCompanyError`. One loop (`runLogin.js`), for all three insurers:
+dashboard is ready, or throws a `MultiCompanyError`.
+
+**Reliance (OD and TP) logs in with a copy of the full-company Reliance login**, `common/reliance/fullCompanyLogin.js`,
+so both log in the very same way:
+
+- *copied word for word:* `performLogin` and `isUserLoggedIn` (`browserv2.js`), the captcha helpers (`captchaUtils.js`),
+  and from `fullPolicycompany/relianceForm.js` the login-URL fallback, the `[E203] rejected` rule, closing the promo popup
+  and waiting for the Motors menu;
+- *shared, not copied:* opening / closing the browser window (`common/browser.js` calls the same
+  `createRelianceJobBrowser` / `cleanupJobBrowser`) and the GPT-4o captcha reader (`Captcha.js`);
+- *behaviour* (same as the full-company flow): up to 5 attempts, a captcha read that is not accepted is retried inside;
+  any other rejection ends as `[E203]`, not retried — the portal's own message is **not** read;
+- *the only differences:* the rejection is a `MultiCompanyError("E203")`, the temporary captcha PNG is written under the
+  project root, and the function returns the Motors-menu element (listed at the top of the file);
+- *kept the same by a test:* `test/multiCompanyRelianceLogin.test.js` compares the copy with the originals and fails if
+  either side changes. If you change the full-company login on purpose, change the copy to match — or delete that test
+  if the two should part ways.
+
+**National and KSHEMA** go through one loop (`runLogin.js`):
 
 1. no username/password → `[E205]`; no login URL → `[E205]` (National has no built-in URL)
 2. open the URL, wait for the login form (`E304` if it never renders), wait for the loader
 3. `beforeFill` hook (National: INTERMEDIARY → BROKER POSP dropdowns)
-4. captcha (Reliance only: read with GPT-4o; up to 5 attempts, a bad read costs no submit)
-5. type username/password **with read-back**, submit
-6. poll for the portal's answer: success marker, captcha error, or a **new** message on screen
-7. classify and act; `afterLogin` hook (close pop-ups, wait for the dashboard)
+4. type username/password **with read-back**, submit
+5. poll for the portal's answer: success marker or a **new** message on screen
+6. classify and act; `afterLogin` hook (close pop-ups, wait for the dashboard)
 
 Per-insurer strategy — data copied from the working flows:
 
-| | Reliance | National | KSHEMA |
-|---|---|---|---|
-| default URL | smartzone…/Login/IMDLogin | none (must be saved on the credential) | motorinsurance.kshema.co/app/home |
-| fields | `#txtUserName` `#txtPassword` `#CaptchaInputText` `#btnLogin` | `log_txtfield_iUsername_01` `log_pwd_iPassword_01` `log_btn_login_01` | `#login_email` `#login_password` `button[data-iid=sign-in]` (+ fallbacks) |
-| logged in when | URL `?un=` / `FromImdLogin=fromlogin`, `#divMainMotors`, `#divLogout` | off `/signin/login` and username box gone | dashboard tiles (`.top-product` …) |
-| attempts / result wait | 5 / 5 s | 1 / 30 s | 1 / 20 s |
-| loading | `.k-loading-mask` | NIC overlay (+ Kendo), popups ignored | Material spinner |
+| | National | KSHEMA |
+|---|---|---|
+| default URL | none (must be saved on the credential) | motorinsurance.kshema.co/app/home |
+| fields | `log_txtfield_iUsername_01` `log_pwd_iPassword_01` `log_btn_login_01` | `#login_email` `#login_password` `button[data-iid=sign-in]` (+ fallbacks) |
+| logged in when | off `/signin/login` and username box gone | dashboard tiles (`.top-product` …) |
+| attempts / result wait | 1 / 30 s | 1 / 20 s |
+| loading | NIC overlay (+ Kendo), popups ignored | Material spinner |
 
-**Loading detection** is one function (`waitForLoader`). Every insurer throws `[E302]` if the page never settles;
-before, Reliance and National carried on and failed later with an unrelated "element not found".
+**Loading detection** is one function (`waitForLoader`). National and KSHEMA throw `[E302]` if the page never settles;
+before, National carried on and failed later with an unrelated "element not found".
 
-**Invalid credentials** are recognised by the portal's own words (`classifyLoginMessage`), for every insurer, and
-fail the job at once. Reliance never read the portal's text before (every failure was "E203"), and National never
-detected it at all (it was retried).
+**Invalid credentials** are recognised by the portal's own words (`classifyLoginMessage`), for National and KSHEMA, and
+fail the job at once. National never detected it at all before (it was retried).
 
 ## 6. Error codes and retry rules
 
@@ -313,19 +339,25 @@ message so `classifyError` also honours it if it is ever thrown rather than retu
 | A required form field could not be filled | `E306` | yes |
 | Feature flag off | `E110` | no |
 
-Only a captcha failure is retried inside the login loop. Anything else that time could fix is left to the job-level
-retry, so a wrong password is never submitted twice. Operator sentences name the fix and say whether the policy
-needs re-running; the portal's own words are kept in quotes on the end.
+In the shared loop (National, KSHEMA) anything that time could fix is left to the job-level retry, so a wrong password
+is never submitted twice. Operator sentences name the fix and say whether the policy needs re-running; the portal's
+own words are kept in quotes on the end.
+
+**Reliance is different, because its login is the full-company one:** no credentials → `E205`; Reliance rejects the login
+(wrong password, locked account, or a captcha it could not get right in 5 attempts) → `E203`, not retried, with the fixed
+sentence "Reliance rejected the login for …"; the dashboard never appears → a timeout error, retried. The `E202` / `E204` /
+`E301` rows above are not produced for Reliance.
 
 ## 7. Adding a handler or a company
 
-- **Write a form:** copy `odCompany/relianceOD/relianceOD.js` — `runHandler({ company, policyType, data, body })`,
-  fill with `fillSection`, end with `ctx.stop(...)`. Replace the `makeLoginOnlyHandler` line in the stub file.
-  Throw `MultiCompanyError(code, message, { stage })` for failures.
+- **Write a form:** replace the `makeLoginOnlyHandler` line in the handler's stub file with
+  `runHandler({ company, policyType, data, body })` (the example is in `relianceOD.js`'s header), fill with `fillSection`,
+  end with `ctx.stop(...)`. Throw `MultiCompanyError(code, message, { stage })` for failures.
 - **New policy type / company entry:** one line in `registry.js`.
 - **New insurer:** a `common/login/<company>Login.js` strategy (fields, `isLoggedIn`, optional `beforeFill` /
   `solveCaptcha` / `afterLogin`), one line each in `login/index.js`, `browser.js` and `loader.js` (loading preset),
-  then handler files.
+  then handler files. An insurer whose login must stay exactly as in its full-company flow (Reliance) instead gets its own
+  login file under `common/<company>/` and one line in `OWN_LOGIN` in `login/index.js`.
 
 ## 8. Testing
 
@@ -336,11 +368,22 @@ node multiCompany/cli/runHandler.js --company national --type tp -u USER -p PASS
 node multiCompany/cli/runHandler.js --company kshema   --type od -u EMAIL -p PASS
 ```
 
-- Correct login → `inProgress` result, stage `logged-in` (Reliance OD: make & model filled, stage `vehicle_identity`).
-- **Wrong password** (deliberate) → `errorCode: "E203"`, `retryable: false`, a `screenshotKey`, and the portal's
-  message inside `error`. Do this once per portal: the Reliance and National rejection selectors are generic
-  (validation spans, alerts, toasts) and this run confirms the portal's real wording is caught.
+- Correct login → `inProgress` result, stage `logged-in`, "Logged in to <insurer> — the <insurer> OD/TP form is not built yet" (every handler is login-only except Reliance OD, which also opens Motors → Two Wheeler and stops there with stage `motors-two-wheeler`).
+- **Wrong password** (deliberate) → `errorCode: "E203"`, `retryable: false` and a `screenshotKey`. For National and KSHEMA
+  the portal's message is inside `error`; do this once per portal, because their rejection selectors are generic
+  (validation spans, alerts, toasts) and this run confirms the portal's real wording is caught. For Reliance `error` is
+  the fixed sentence "Reliance rejected the login for …" (the full-company login does not read the portal's message), and
+  it takes the full 5 attempts to get there.
 - Flag off → `[E110]` before a browser opens.
+
+**Stopping a run at a chosen point (Breaker).** Put one line anywhere in a flow or handler body (no import needed):
+`Breaker.checkpoint("RTO/Make/Model/Variant");`. It does nothing until `.env` has `BREAKER_ENABLED=true` and the name in
+`BREAKER_STOP_AT` (comma-separated, case ignored, or `*` for the first checkpoint reached); restart after editing `.env`.
+The run then ends as a calm "stopped on purpose" (`stopper()`: no retry, nothing submitted) and, with
+`KEEP_BROWSER_OPEN_ON_ERROR=true` and a display, the browser stays on that page. It stops that *part*; a policy's other parts still
+run next, as they do after any failed part. To run past it: switch it off, restart, Retry. The stop travels up as a thrown error, so
+put the checkpoint outside small best-effort `try` blocks — the big ones in `national.js` / `relianceForm.js` already start with
+`if (isAutomationStop(e)) throw e;`, and Breaker warns after 10 s if a stop was swallowed or turned into another error anyway.
 
 The CLI sets `MULTI_COMPANY_AUTOMATION_ENABLED=true` for its own process only (it must do so before requiring
 `featureGate`, which reads the flag once at load).
@@ -360,8 +403,10 @@ The CLI sets `MULTI_COMPANY_AUTOMATION_ENABLED=true` for its own process only (i
 
 ## 10. Not built yet
 
-- **Form filling** for everything except Reliance OD's make & model: National OD/TP, KSHEMA OD/TP, Reliance TP
-  log in through the common login and then stop with "form not built yet". A multi-company policy therefore shows its
+- **Form filling** for every handler: Reliance TP, National OD/TP and KSHEMA OD/TP log in and then stop with
+  "form not built yet". Reliance OD also opens Motors → Two Wheeler (`odCompany/relianceOD/motorsMenu.js`, copied from
+  `relianceForm.js` STEP 2–3) and stops there; choosing the product in the dropdown is the next step. (Reliance logs in
+  through the copy of the full-company login.) A multi-company policy therefore shows its
   `od` / `tp` parts as "not automated yet" (`failed_login_form`, `stopped`) for now — the job's per-part status and the
   retry rules are in place, the portal handlers are not.
 - **Multi-company Brisk PA waits for the OD part** to succeed (same as the bundled flows, which buy Brisk only after the
@@ -399,6 +444,12 @@ matches a stored `nextRetryAt: null`; one part per claim; `dispatchBundled` shar
 sites; change stream wakes on in-place updates; `/api/job-status` returns `parts` and no longer calls `.lean()` on a
 raw-driver result), `models/RelianceJobQueue.js` (`parts`, `rev`, `currentPart`, full status list), `test/`
 (`npm test`).
+
+**One job per policy, hardening** — `lib/partRunner.js` (policy-must-exist guard, `routingConflict`, TP vehicle overlay),
+`lib/tpVehicle.js` (new, byte-identical to the backend's `shared/tpVehicle.js`), `server.js` `buildFormDataFromPolicy`
+(carries `makeModelCombo`, `makeModelComboName`, `tpVehicle`); backend `shared/jobParts.js` (`fansOutToTwoJobs`, v1 policies are
+one `motor` part) and `dao/onlinePolicyDao.js` (`enqueueLegacyJobs` splits only two *different* insurers; `queuePolicyJobs` never
+falls back to the fan-out beside a running legacy job).
 
 **Automation (`Rayal-policy-form-automation`)** — this folder; `server.js` (import paths, `errorCode`, Brisk
 guard, hydration keeps per-job routing and `settings`, and the `validation.isValid` typo — every hydrated job used to

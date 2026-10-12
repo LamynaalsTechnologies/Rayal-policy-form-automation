@@ -75,6 +75,9 @@ function isAutomationStop(error) {
  *   browser handle, whatever the caller wants back
  */
 function stoppedResult(error, extra = {}) {
+  // A stop that wants to know it was received (Breaker's does: it warns if a
+  // try/catch swallowed it) is told here, the one place every handler goes through.
+  if (error && typeof error.acknowledge === "function") error.acknowledge();
   return {
     // Not a success: nothing was filed at the insurer.
     success: false,

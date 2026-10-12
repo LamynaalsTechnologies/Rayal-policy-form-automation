@@ -52,13 +52,17 @@ const singleParts = () => [
   part("pa", "brisk", "Brisk", { dependsOn: "motor", paCoverCompany: "Brisk" }),
 ];
 
+/** What the policy's `settings` say, to agree with the parts built for it. */
+const SINGLE_SETTINGS = { isMultipleCompany: false, ODCompany: "Reliance", TPCompany: "Reliance", PACompany: "Brisk" };
+
 const jobDoc = (parts, extra = {}) => ({
   _id: "job1",
   captchaId: "policy1",
   status: "pending",
   rev: 0,
   parts,
-  formData: formData(),
+  // One bundled `motor` part is a single-company policy; od + tp are two insurers.
+  formData: formData(parts.some((p) => p.key === "motor") ? { settings: SINGLE_SETTINGS } : {}),
   needsHydration: false,
   createdAt: NOW,
   nextRetryAt: NOW,
@@ -119,6 +123,7 @@ module.exports = {
   formData,
   multiParts,
   singleParts,
+  SINGLE_SETTINGS,
   jobDoc,
   withPart,
   partOf,

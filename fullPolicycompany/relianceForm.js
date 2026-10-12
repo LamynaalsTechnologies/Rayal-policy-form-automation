@@ -26,6 +26,11 @@ const AWS = require("aws-sdk");
 const { extractCaptchaText } = require("../Captcha");
 const { uploadScreenshotToS3, generateScreenshotKey } = require("../s3Uploader");
 const { beautifyError: beautifyErrorShared } = require("../lib/errorHandler");
+// A deliberate stop — stopper(), or a Breaker.checkpoint() that .env switched on — must
+// reach the top-level catch at the end of fillRelianceForm as a stop, not be swallowed
+// by a best-effort try/catch or dressed up as a failure.
+const { isAutomationStop, stoppedResult } = require("../automationStopper");
+require("../breaker"); // defines the global `Breaker` for a standalone run of this file
 
 // Configure AWS S3 for presigned URL generation (fallback)
 const s3 = new AWS.S3({
@@ -2653,6 +2658,7 @@ async function fillRelianceForm(
 
             console.log("✅ Financier details filled successfully");
           } catch (err) {
+            if (isAutomationStop(err)) throw err;
             console.log("❌ Error handling financier fields:", err.message);
           }
         } else {
@@ -2793,6 +2799,7 @@ async function fillRelianceForm(
               } catch (e) { }
             }
           } catch (nomErr) {
+            if (isAutomationStop(nomErr)) throw nomErr;
             console.error("❌ Error in ultimate nominee block:", nomErr.message);
           }
         }
@@ -3428,6 +3435,7 @@ async function fillRelianceForm(
               jobId
             );
           } catch (methodPageErr) {
+            if (isAutomationStop(methodPageErr)) throw methodPageErr;
             console.log(
               `⚠️ 'Choose KYC Method' page not detected (${methodPageErr.message}) — continuing with existing flow...`
             );
@@ -4481,10 +4489,12 @@ async function fillRelianceForm(
 
 
                                 } catch (payBtnErr) {
+                                  if (isAutomationStop(payBtnErr)) throw payBtnErr;
                                   console.log(`⚠️  Pay button error: ${payBtnErr.message}`);
                                 }
 
                               } catch (tpErr) {
+                                if (isAutomationStop(tpErr)) throw tpErr;
                                 console.log(`⚠️  TP Declaration error: ${tpErr.message}`);
                               }
                             } else {
@@ -4492,10 +4502,12 @@ async function fillRelianceForm(
                             }
 
                           } catch (proposalErr) {
+                            if (isAutomationStop(proposalErr)) throw proposalErr;
                             console.log(`⚠️  Proposal checkbox error: ${proposalErr.message}`);
                           }
 
                         } catch (paymentMenuErr) {
+                          if (isAutomationStop(paymentMenuErr)) throw paymentMenuErr;
                           console.log(`⚠️  Payment menu error: ${paymentMenuErr.message}`);
                         }
 
@@ -4519,10 +4531,12 @@ async function fillRelianceForm(
                     }
 
                   } catch (submitErr) {
+                    if (isAutomationStop(submitErr)) throw submitErr;
                     console.log(`⚠️  Submit button error: ${submitErr.message}`);
                   }
 
                 } catch (uploadErr) {
+                  if (isAutomationStop(uploadErr)) throw uploadErr;
                   console.log(`⚠️ Upload error: ${uploadErr.message}`);
                 }
               } else {
@@ -4532,6 +4546,7 @@ async function fillRelianceForm(
               console.log("⚠️ No Aadhar card found in database");
             }
           } catch (err) {
+            if (isAutomationStop(err)) throw err;
             console.log("Error uploading document:", err.message);
             documentUploadError = `Aadhaar document upload to portal failed: ${err.message}`;
           }
@@ -4781,6 +4796,7 @@ async function fillRelianceForm(
           console.log("All post-calculation elements handled successfully!");
           */
         } catch (err) {
+          if (isAutomationStop(err)) throw err;
           console.log("Error handling post-calculation elements:", err.message);
 
           // Mark post-calculation as failed
@@ -4807,6 +4823,7 @@ async function fillRelianceForm(
 
         console.log("All vehicle details filled successfully!");
       } catch (err) {
+        if (isAutomationStop(err)) throw err;
         console.log("Error handling post-submission elements:", err.message);
 
         // Mark post-submission as failed
@@ -4831,6 +4848,7 @@ async function fillRelianceForm(
         // Don't throw error here, just set flag to mark job as failed
       }
     } catch (err) {
+      if (isAutomationStop(err)) throw err;
       console.log("Error filling modal fields:", err.message);
       // Capture error screenshot using centralized handler
       await captureErrorScreenshot(driver, err, data, "modal-error");
@@ -5034,6 +5052,17 @@ async function fillRelianceForm(
       };
     }
   } catch (e) {
+    // stopper() / Breaker.checkpoint() ended the run on purpose. Hand it back as a
+    // stop: no error screenshot, no retry, and (KEEP_BROWSER_OPEN_ON_ERROR) the
+    // browser stays on the page where it stopped.
+    if (isAutomationStop(e)) {
+      hadError = true;
+      console.log(`[${jobId}] ⏸️  ${e.message}`);
+      const stopped = stoppedResult(e);
+      stopped.pageUrl = driver ? await driver.getCurrentUrl().catch(() => null) : null;
+      return stopped;
+    }
+
     console.error("[relianceForm] Error:", e.message || e);
     hadError = true;
 

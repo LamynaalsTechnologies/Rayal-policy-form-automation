@@ -17,3 +17,15 @@ test("jobPartsCore has no requires (it is copied between repos as is)", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "lib", "jobPartsCore.js"), "utf8");
   assert.equal(/\brequire\s*\(/.test(src), false);
 });
+
+test("lib/tpVehicle.js is byte-identical to the backend's shared/tpVehicle.js", (t) => {
+  const backend = path.join(__dirname, "..", "..", "RayalBrokers-backend", "shared", "tpVehicle.js");
+  if (!fs.existsSync(backend)) return t.skip("backend repo not next to this one");
+  const mine = fs.readFileSync(path.join(__dirname, "..", "lib", "tpVehicle.js"));
+  assert.ok(mine.equals(fs.readFileSync(backend)), "the two copies of tpVehicle.js differ");
+});
+
+test("tpVehicle has no requires (it is copied between repos as is)", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "lib", "tpVehicle.js"), "utf8");
+  assert.equal(/\brequire\s*\(/.test(src), false);
+});

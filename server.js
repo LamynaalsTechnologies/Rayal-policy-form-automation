@@ -201,6 +201,8 @@ const { fillKshemaForm } = require("./fullPolicycompany/kshemaForm");
 const { resolveMultiCompanyHandler } = require("./multiCompany/registry");
 const { assertMultiCompanyEnabled } = require("./multiCompany/common/featureGate");
 const { isAutomationStop, stoppedResult } = require("./automationStopper");
+// Defines the global `Breaker` (.env: BREAKER_ENABLED / BREAKER_STOP_AT) for every flow and handler.
+require("./breaker");
 const { extractCaptchaText } = require("./Captcha");
 // National uses fresh login for each job, no master session needed
 const express = require("express");
@@ -585,6 +587,12 @@ const buildFormDataFromPolicy = async (data) => {
       manufacturerSellingPrice: data?.manufacturerSellingPrice,
       idvRangeFrom: data?.idvRangeFrom,
       idvRangeTo: data?.idvRangeTo,
+      // Combined Make & Model (mirrors the backend's buildFullJobFormData): the
+      // vehicle above is the OD vehicle; the TP part overlays `tpVehicle` onto it
+      // (lib/partRunner.js buildPartFormData).
+      makeModelCombo: data?.makeModelCombo ? String(data.makeModelCombo) : null,
+      makeModelComboName: data?.makeModelComboName || "",
+      tpVehicle: data?.tpVehicle && typeof data.tpVehicle === "object" ? data.tpVehicle : null,
       manufacturingYear: data?.manufacturingYear,
       manufacturingMonth: data?.manufacturingMonth,
       engineNumber: data?.engineNumber,

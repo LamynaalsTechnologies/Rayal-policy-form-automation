@@ -11,6 +11,7 @@ const {
   formData,
   multiParts,
   singleParts,
+  SINGLE_SETTINGS,
   jobDoc,
   withPart,
   partOf,
@@ -143,6 +144,95 @@ test("buildPartFormData: a bundled part keeps the policy's PA (inline Brisk) and
 test("buildPartFormData: company is lower-cased the way the rest of the automation does it", () => {
   const job = jobDoc([part("od", "portal", "KSHEMA")]);
   assert.equal(runner.buildPartFormData(job, job.parts[0]).Companyname, "kshema");
+});
+
+/* ------------------------- TP vehicle (Combined Make & Model) ------------------------- */
+
+const TP_VEHICLE = {
+  vehicleMake: "Honda",
+  vehicleModel: "Activa 6G",
+  vehicleCC: 110,
+  vehicleVariant: "STD",
+  modelNotFound: false,
+  manufacturerSellingPrice: 0,
+};
+const comboForm = (extra = {}) =>
+  formData({
+    vehicleMake: "TVS",
+    vehicleModel: "Jupiter",
+    vehicleCC: 109,
+    vehicleVariant: "ZX",
+    modelNotFound: true,
+    manufacturerSellingPrice: 80000,
+    idv: 70000,
+    tpVehicle: TP_VEHICLE,
+    ...extra,
+  });
+
+test("buildPartFormData: the TP part fills the TP insurer's vehicle; the OD part keeps the OD vehicle; the IDV stays the OD side's", () => {
+  const job = jobDoc(multiParts(), { formData: comboForm() });
+  const tp = runner.buildPartFormData(job, partOf(job, "tp"));
+  assert.equal(tp.vehicleMake, "Honda");
+  assert.equal(tp.vehicleModel, "Activa 6G");
+  assert.equal(tp.vehicleCC, 110);
+  assert.equal(tp.vehicleVariant, "STD");
+  assert.equal(tp.modelNotFound, false);
+  assert.equal(tp.manufacturerSellingPrice, undefined, "the OD selling price must not leak into the TP vehicle");
+  assert.equal(tp.idv, 70000);
+
+  const od = runner.buildPartFormData(job, partOf(job, "od"));
+  assert.equal(od.vehicleMake, "TVS");
+  assert.equal(od.vehicleModel, "Jupiter");
+  assert.equal(od.vehicleVariant, "ZX");
+  assert.equal(od.modelNotFound, true);
+  assert.equal(od.manufacturerSellingPrice, 80000);
+
+  assert.equal(job.formData.vehicleMake, "TVS", "the job's formData is not mutated");
+});
+
+test("buildPartFormData: a bundled single-company part never takes the TP vehicle; a policy without one keeps its vehicle", () => {
+  const single = jobDoc(singleParts(), { formData: comboForm({ settings: SINGLE_SETTINGS }) });
+  assert.equal(runner.buildPartFormData(single, partOf(single, "motor")).vehicleMake, "TVS");
+
+  const none = jobDoc(multiParts(), { formData: comboForm({ tpVehicle: null }) });
+  const tp = runner.buildPartFormData(none, partOf(none, "tp"));
+  assert.equal(tp.vehicleMake, "TVS");
+  assert.equal(tp.manufacturerSellingPrice, 80000);
+});
+
+/* ------------------------------ routingConflict ------------------------------ */
+
+test("routingConflict: a bundled part on a two-insurer policy is refused (it would buy everything at one insurer)", () => {
+  const job = jobDoc(singleParts(), { formData: formData() }); // two-company settings
+  const msg = runner.routingConflict(partOf(job, "motor"), job.formData, job.parts);
+  assert.match(msg, /two insurers \(OD Reliance, TP National\)/);
+  assert.match(msg, /one insurer/);
+});
+
+test("routingConflict: a single-company policy split into od + tp portal parts is refused", () => {
+  const job = jobDoc(multiParts(), { formData: formData({ settings: SINGLE_SETTINGS }) });
+  const msg = runner.routingConflict(partOf(job, "od"), job.formData, job.parts);
+  assert.match(msg, /one insurer \(Reliance\)/);
+  assert.match(msg, /separate OD and TP parts/);
+});
+
+test("routingConflict: the right shape for the policy is never refused", () => {
+  const multi = jobDoc(multiParts());
+  for (const key of ["od", "tp", "pa"]) assert.equal(runner.routingConflict(partOf(multi, key), multi.formData, multi.parts), null);
+
+  const single = jobDoc(singleParts());
+  for (const key of ["motor", "pa"]) assert.equal(runner.routingConflict(partOf(single, key), single.formData, single.parts), null);
+
+  // A standalone cover of a single-company policy: only an od part exists.
+  const standalone = [part("od", "portal", "Reliance")];
+  assert.equal(runner.routingConflict(standalone[0], formData({ settings: SINGLE_SETTINGS }), standalone), null);
+});
+
+test("routingConflict: a job without routing settings (queued before they existed) is not second-guessed", () => {
+  const parts = singleParts();
+  assert.equal(runner.routingConflict(parts[0], formData({ settings: null }), parts), null);
+  assert.equal(runner.routingConflict(parts[0], formData({ settings: {} }), parts), null);
+  assert.equal(runner.routingConflict(parts[0], null, parts), null);
 });
 
 /* ------------------------- outcome mapping table ------------------------- */
@@ -398,7 +488,9 @@ function makeDeps(collection, over = {}) {
   const calls = { handler: [], bundled: [], brisk: [], creds: [], finalize: [], wake: [], audit: [] };
   const policies = {
     async findOne() {
-      return over.policyDoc === undefined ? null : over.policyDoc;
+      if (over.policyError) throw over.policyError;
+      // The policy exists unless a test says it was deleted (`policyDoc: null`).
+      return over.policyDoc === undefined ? { _id: "policy1" } : over.policyDoc;
     },
     async updateOne() {
       return { matchedCount: 1 };
@@ -575,6 +667,115 @@ test("runPartJob: hydration hiccup retries soon without spending an attempt; a m
   assert.equal(partOf(col.state.doc, "od").status, "failed_validation");
   assert.equal(partOf(col.state.doc, "pa").status, "failed_validation");
   assert.equal(col.state.doc.status, "failed_validation");
+});
+
+test("runPartJob: a policy deleted while an earlier part ran -> nothing is bought, no login, unfinished parts fail validation", async () => {
+  const done = withPart(multiParts(), "tp", { status: "completed" });
+  const claimed = claimedFrom(jobDoc(done), "od");
+  const col = fakeCollection(claimed);
+  const { deps, calls } = makeDeps(col, { policyDoc: null });
+  await runner.runPartJob(deps, claimed);
+
+  assert.equal(calls.creds.length, 0, "no credentials looked up");
+  assert.equal(calls.handler.length, 0, "no portal opened");
+  assert.equal(calls.brisk.length, 0, "no Brisk certificate bought");
+  assert.equal(calls.bundled.length, 0);
+  const doc = col.state.doc;
+  assert.equal(partOf(doc, "tp").status, "completed", "what was already bought stays recorded");
+  assert.equal(partOf(doc, "od").status, "failed_validation");
+  assert.equal(partOf(doc, "pa").status, "failed_validation");
+  assert.match(partOf(doc, "od").lastError, /deleted/);
+  assert.equal(doc.status, "failed_validation");
+});
+
+test("runPartJob: the Brisk PA is NOT bought for a policy that no longer exists (paid from the master wallet)", async () => {
+  const done = withPart(withPart(multiParts(), "od", { status: "completed" }), "tp", { status: "completed" });
+  const claimed = claimedFrom(jobDoc(done), "pa");
+  const col = fakeCollection(claimed);
+  const { deps, calls } = makeDeps(col, { policyDoc: null });
+  await runner.runPartJob(deps, claimed);
+
+  assert.equal(calls.brisk.length, 0);
+  assert.equal(partOf(col.state.doc, "pa").status, "failed_validation");
+});
+
+test("runPartJob: a database error while checking the policy retries soon and spends no attempt (it is not 'deleted')", async () => {
+  const claimed = claimedFrom(jobDoc(multiParts()), "od");
+  const col = fakeCollection(claimed);
+  const { deps, calls } = makeDeps(col, { policyError: new Error("mongo blip") });
+  await runner.runPartJob(deps, claimed);
+
+  assert.equal(calls.handler.length, 0);
+  assert.equal(calls.creds.length, 0);
+  const od = partOf(col.state.doc, "od");
+  assert.equal(od.status, "pending");
+  assert.equal(od.attempts, 0);
+  assert.equal(od.nextRetryAt.getTime(), later(30000).getTime());
+});
+
+test("runPartJob: a bundled part on a two-insurer policy is refused before any credentials or browser", async () => {
+  const claimed = claimedFrom(jobDoc(singleParts(), { formData: formData() }), "motor"); // two-company settings
+  const col = fakeCollection(claimed);
+  const { deps, calls } = makeDeps(col);
+  await runner.runPartJob(deps, claimed);
+
+  assert.equal(calls.bundled.length, 0, "the whole policy must not be bought at one insurer");
+  assert.equal(calls.creds.length, 0);
+  assert.equal(partOf(col.state.doc, "motor").status, "failed_validation");
+  assert.match(partOf(col.state.doc, "motor").lastError, /two insurers/);
+});
+
+test("runPartJob: a single-company policy split into OD and TP portal parts is refused before any login", async () => {
+  const claimed = claimedFrom(jobDoc(multiParts(), { formData: formData({ settings: SINGLE_SETTINGS }) }), "od");
+  const col = fakeCollection(claimed);
+  const { deps, calls } = makeDeps(col);
+  await runner.runPartJob(deps, claimed);
+
+  assert.equal(calls.handler.length, 0);
+  assert.equal(calls.creds.length, 0);
+  assert.equal(partOf(col.state.doc, "od").status, "failed_validation");
+  assert.equal(partOf(col.state.doc, "tp").status, "failed_validation");
+});
+
+test("runPartJob: a Breaker checkpoint inside a handler stops the part calmly (no retry); switched off, the same handler completes", async () => {
+  const { createBreaker } = require("../breaker");
+  const env = { BREAKER_ENABLED: "true", BREAKER_STOP_AT: "OD vehicle" };
+  const breaker = createBreaker({ env, log: () => {}, graceMs: 60000 });
+  const handler = async () => {
+    breaker.checkpoint("OD vehicle");
+    return { success: true };
+  };
+  const runOd = async () => {
+    const claimed = claimedFrom(jobDoc(multiParts()), "od");
+    const col = fakeCollection(claimed);
+    const { deps, calls } = makeDeps(col, { handlerRun: handler });
+    await runner.runPartJob(deps, claimed);
+    return { od: partOf(col.state.doc, "od"), doc: col.state.doc, calls };
+  };
+
+  const stopped = await runOd();
+  assert.equal(stopped.calls.handler.length, 1, "the run got as far as the handler");
+  assert.equal(stopped.od.status, "failed_login_form");
+  assert.equal(stopped.od.stopped, true);
+  assert.equal(stopped.od.lastErrorCode, "E100");
+  assert.equal(stopped.od.nextRetryAt, null, "never retried on its own");
+  assert.match(stopped.od.lastError, /checkpoint "OD vehicle"/);
+  assert.equal(stopped.doc.status, "pending", "the TP part is still to run: a stop on OD does not stop the policy's other parts");
+
+  env.BREAKER_ENABLED = "false"; // the operator switched it off and pressed Retry
+  const ran = await runOd();
+  assert.equal(ran.od.status, "completed");
+});
+
+test("runPartJob: the TP part reaches its portal handler with the TP vehicle", async () => {
+  const claimed = claimedFrom(jobDoc(multiParts(), { formData: comboForm() }), "tp");
+  const col = fakeCollection(claimed);
+  const { deps, calls } = makeDeps(col, { handlerResult: { success: true } });
+  await runner.runPartJob(deps, claimed);
+
+  assert.equal(calls.handler.length, 1);
+  assert.equal(calls.handler[0].data.vehicleMake, "Honda");
+  assert.equal(calls.handler[0].data.vehicleModel, "Activa 6G");
 });
 
 test("runPartJob (bundled): success with the Brisk PA bought inline -> motor completed, PA completed with the certificate", async () => {

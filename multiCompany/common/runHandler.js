@@ -20,6 +20,7 @@
  */
 const { startRecording } = require("../../lib/jobRecorder");
 const { stopper, isAutomationStop, stoppedResult } = require("../../automationStopper");
+require("../../breaker"); // defines the global `Breaker`, usable in any handler body
 const { assertMultiCompanyEnabled } = require("./featureGate");
 const { openJobBrowser, closeJobBrowser } = require("./browser");
 const { login } = require("./login");
