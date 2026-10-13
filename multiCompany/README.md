@@ -107,6 +107,9 @@ duplicated amount.
 | `OD_WAITS_FOR_TP` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | A two-insurer policy buys its **TP first**: the OD job is not started until the TP job of the same policy is `completed` / `completed_with_errors`; while it is anything else (pending, running, on hold, failed) the OD waits, and starts by itself when TP is fixed and completes. Only the old two-job shape needs this switch (`lib/jobSequence.js`); one job with parts orders them with `dependsOn`. Off: OD and TP are independent jobs again. |
 | `NATIONAL_TP_FORM_ENABLED` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | On: a National TP part selects the plan "5 Year Long Term Liability Only" and runs the whole duplicated National form for a third-party-only policy (§5, §10) up to the payment link that goes to the customer — no `.env` line needed. `false`: it logs in, opens the quote form, lists the "Your Plan" options and stops (stage `tp-plan`) — nothing is chosen or bought, no nominee lookup. To look at the TP quote before anything is sent use the Breaker instead (`BREAKER_STOP_AT=National TP/quote`, then `National TP/payment`). Needs `MULTI_COMPANY_AUTOMATION_ENABLED` too. |
 | `BRISKMAXWINDOW` | automation `.env` | `1` | How many Brisk PA parts may run at once. Brisk is API-only (no browser), so it has its own window, separate from the insurers' `RELIANCEMAXWINDOW` etc. |
+| `RELIANCE_WALLET_HOLD_ENABLED` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | The **bundled Reliance full-company** flow (`fullPolicycompany/relianceForm.js`, not the OD/TP handlers). On: after **Pay** is clicked, a policy whose `Paymentmethod` is wallet (or blank — the backend default) stops on the payment page: browser left open, nothing paid at Reliance, no Brisk certificate, no PDF merge; the job is recorded as stopped on purpose (`E100`, stage `reliance-wallet-hold`, no retry). `link` policies are not affected. `false`: the old behaviour — skip the link flow and carry on to the Brisk call. The wallet payment steps themselves are **not built yet**; this is where they go (`relianceForm.js`, the `shouldHoldForWallet` branch). Not related to the Breaker, which is a dev switch and must stay off on a real server. |
+| `KSHEMA_TP_FORM_ENABLED` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | On (and `KSHEMA_TP_PRODUCT_TYPE` set): a KSHEMA TP part runs the duplicated KSHEMA form for a third-party-only policy (§13) up to the Razorpay QR and the payment link, then releases the OD of the same policy. `false`: it logs in, fills the quote as far as the Product Type, lists the portal's Product Type options in the stop message (stage `tp-product`) and stops — nothing is chosen or bought. Needs `MULTI_COMPANY_AUTOMATION_ENABLED` too. |
+| `KSHEMA_TP_PRODUCT_TYPE` | automation `.env` | *(empty)* | The exact text of the liability-only option in KSHEMA's Product Type dropdown (matched exactly, spaces/case ignored, then read back). **Empty = the same stop as the switch-off one**, which is how the right text is found on the first run. |
 
 `MULTI_COMPANY_AUTOMATION_ENABLED` gates the OD/TP **portal** handlers (both the old OD-job / TP-job shape and `od` / `tp`
 parts). It does not gate the bundled flows or the Brisk PA part.
@@ -141,6 +144,11 @@ multiCompany/
               nationalTP/tpPlan.js           the plan "5 Year Long Term Liability Only": exact match, read back
               nationalTP/tpConfig.js         NATIONAL_TP_FORM_ENABLED
               nationalTP/stopBeforePlan.js   the stop taken while that switch is off (lists the plan options)
+              kshemaTP/kshemaTPForm.js       DUPLICATE of fullPolicycompany/kshemaForm.js + tagged [TP] changes — see §13
+              kshemaTP/kshemaTPQuoteForm.js  DUPLICATE of fullPolicycompany/kshema/kshemaQuoteForm.js + tagged [TP] changes — see §13
+              kshemaTP/tpProduct.js          the Product Type: exact match, read back, never retried when missing
+              kshemaTP/tpConfig.js           KSHEMA_TP_FORM_ENABLED, KSHEMA_TP_PRODUCT_TYPE
+              kshemaTP/stopBeforeProduct.js  the stop taken while the product text is not set (lists the options)
   cli/runHandler.js               standalone runner for any handler
 ```
 
@@ -457,7 +465,7 @@ The CLI sets `MULTI_COMPANY_AUTOMATION_ENABLED=true` for its own process only (i
 
 ## 10. Not built yet
 
-- **Form filling** for every handler except National TP (next bullet): Reliance TP, National OD and KSHEMA OD/TP log in and
+- **Form filling** for every handler except National TP and KSHEMA TP (next bullets): Reliance TP, National OD and KSHEMA OD log in and
   then stop with "form not built yet". Reliance OD also opens Motors → Two Wheeler (`odCompany/relianceOD/motorsMenu.js`, copied from
   `relianceForm.js` STEP 2–3) and stops there; choosing the product in the dropdown is the next step. (Reliance logs in
   through the copy of the full-company login.) A multi-company policy therefore shows its
@@ -468,6 +476,10 @@ The CLI sets `MULTI_COMPANY_AUTOMATION_ENABLED=true` for its own process only (i
   Not proven against the live portal yet: how the TP plan page differs (a field that appears or disappears), whether the portal
   asks the Manufacturer's Selling Price in the model-not-found mode without an IDV. Use the Breaker checkpoints for the first real run. While Reliance OD is
   still login-only a two-company policy buys only its TP half.
+- **KSHEMA TP** is built (`tpCompany/kshemaTP/`, §13) but **starts held at the Product Type**: the liability-only option's text is
+  not known, so until `KSHEMA_TP_PRODUCT_TYPE` is set a run lists the portal's options and stops. What the TP quote page hides
+  (IDV, the add-ons page) is learnt from the Breaker runs (`KSHEMA TP/product`, `/quote`, `/payment`) — nothing here is proven on
+  the live portal yet.
 - **TP → OD hand-off** (the TP policy's number and dates reaching the OD form) — **not built**, see §12.2. Ordering is (§4.0); the data
   is not passed yet, and National's flow reads no number or date from the portal at all.
 - **Multi-company Brisk PA waits for the OD part** to succeed (same as the bundled flows, which buy Brisk only after the
@@ -615,3 +627,42 @@ exist yet at that moment. The OD therefore starts as soon as the link is out —
 2. Where on National's portal is the TP policy number (and are the dates) read? Needs the screen or the steps.
 3. A TP `completed_with_errors` (bought, a document upload or Brisk step failed) releases the OD today. Should it?
 4. TPPD Restrict is not applied on the portal (neither is it in the full flow).
+
+## 13. KSHEMA TP — the duplicate of the full-company KSHEMA flow
+
+Same idea as National TP (§12): a third-party-only policy at KSHEMA is bought **first**, and the OD of the same policy (for example
+Reliance) waits for it. The waiting needed no new code — `lib/jobSequence.js` and `dependsOn: "tp"` do not look at the company —
+so a KSHEMA TP that finishes releases the OD and one that stops keeps it "Waiting for TP to finish" (`test/kshemaTP.test.js`).
+
+### 13.1 What was added (`multiCompany/tpCompany/kshemaTP/`)
+
+| File | What it is |
+|---|---|
+| `kshemaTP.js` | the handler: feature gate (`[E110]`), the notice about the product text, then `kshemaTPForm`. It does **not** go through `runHandler` (the form has its own browser and login, like `kshemaForm.js`). Nothing is prepared before the browser: the bundled KSHEMA dispatch prepares nothing either. |
+| `kshemaTPForm.js` | duplicate of `fullPolicycompany/kshemaForm.js` (untouched) with `[TP]` changes: **1** require depth · **2** failure screenshots under `screenshots/multiCompany/kshema/` (10-day S3 lifecycle prefix) · **6** no inline Brisk certificate · **7** an unexpected error is stage `tp-form` · **8** Breaker checkpoints `KSHEMA TP/quote`, `KSHEMA TP/payment`. |
+| `kshemaTPQuoteForm.js` | duplicate of `fullPolicycompany/kshema/kshemaQuoteForm.js` (untouched; its field tables are module constants, so it had to be copied) with `[TP]` changes: **3** the Product Type is `tpProduct.js`, at the same place in the field order, plus the stop while the text is not set · **4** no IDV (and no range check), no OD discount, no add-ons / Nil Depreciation · **5** a TP quote may have no add-ons page: the proposal page also counts as "the quote went through" · **8** checkpoint `KSHEMA TP/product`. |
+| `tpProduct.js` | Product Type: exact match (never the original's "contains" fallback), read back, `TpProductError` listing the portal's options, never retried. |
+| `tpConfig.js` / `stopBeforeProduct.js` | the two `.env` settings, and the stop that lists the options. |
+
+The helpers in `fullPolicycompany/kshema/` (session manager, log, toast, fields) are shared, not copied — they have no TP/OD fork.
+`test/kshemaTP.test.js` is the drift guard: each copy may differ from its original **only** on `[TP]` lines, so a portal fix made in
+the original fails the test until it is ported.
+
+### 13.2 What it does today
+
+- **Default (no `KSHEMA_TP_PRODUCT_TYPE`):** logs in, fills the customer and vehicle fields that come before the Product Type, lists
+  the portal's Product Type options in the stop message (stage `tp-product`, E100, not retried) with the dropdown left open on the
+  held browser. Copy the liability-only option's text into `.env`, restart, run the policy again.
+- **With the text set:** chooses it (exact, read back), fills the rest, submits the quote, proposal, nominee, KYC, and ends at the
+  Razorpay QR with the payment link saved — like the full-company flow. The job is then `completed` and the OD is released.
+- The **Mongo writes** (`proposalPdf`, `kycLink`, `paymentLink`) are kept so the app still shows the payment link. They write the
+  *policy* document, not the part. Harmless while the Reliance OD is login-only; they **must become per-part** before the OD form is
+  built, or the OD will overwrite the TP's link.
+
+### 13.3 Not proven / open
+
+1. The liability-only **Product Type text**, and whether the quote page hides IDV and the add-ons page — unverified, found by running with the Breaker.
+2. **Used vehicles:** the full-company KSHEMA flow files new vehicles only ("Is New Vehicle" is always Yes) and the copy keeps that.
+3. A KSHEMA TP's **PA**: a portal part has PA only when it `carriesPa`; the PA year handling is the full-company one, untouched.
+4. Same open decisions as §12.7 (when the OD starts: link sent vs policy issued; `completed_with_errors` releasing the OD).
+5. Frontend/backend: nothing changed. Possible follow-ups: `partChanges.js` `isNationalPart` nominee group for a KSHEMA TP, and whether a KSHEMA TP should force a "No of Year" pick as National's does.

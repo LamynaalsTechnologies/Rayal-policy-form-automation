@@ -29,7 +29,12 @@ const { beautifyError: beautifyErrorShared } = require("../lib/errorHandler");
 // A deliberate stop — stopper(), or a Breaker.checkpoint() that .env switched on — must
 // reach the top-level catch at the end of fillRelianceForm as a stop, not be swallowed
 // by a best-effort try/catch or dressed up as a failure.
-const { isAutomationStop, stoppedResult } = require("../automationStopper");
+const { isAutomationStop, stoppedResult, stopper } = require("../automationStopper");
+const {
+  shouldHoldForWallet,
+  WALLET_HOLD_STAGE,
+  WALLET_HOLD_MESSAGE,
+} = require("./relianceWalletHold");
 require("../breaker"); // defines the global `Breaker` for a standalone run of this file
 
 // Configure AWS S3 for presigned URL generation (fallback)
@@ -4400,8 +4405,20 @@ async function fillRelianceForm(
                                     } catch (linkFlowErr) {
                                       console.log("❌ Error in Payment Link flow: " + linkFlowErr.message);
                                     }
+                                  } else if (shouldHoldForWallet(data.Paymentmethod)) {
+                                    // WALLET: hold right here, on the page Pay opened, browser left open.
+                                    // The wallet payment steps are added once they are known. Switch:
+                                    // RELIANCE_WALLET_HOLD_ENABLED (relianceWalletHold.js). The stop travels up
+                                    // as a thrown error; the catches below let it through.
+                                    const holdUrl = await driver.getCurrentUrl().catch(() => null);
+                                    console.log(`\n${"⏸️ ".repeat(23)}`);
+                                    console.log(`⏸️  [${jobId}] WALLET HOLD — Payment Method is '${data.Paymentmethod || 'wallet'}'`);
+                                    console.log(`   Pay was clicked; stopping on the payment page. Nothing is paid at Reliance.`);
+                                    console.log(`   Page: ${holdUrl || "(unknown)"}`);
+                                    console.log(`${"⏸️ ".repeat(23)}\n`);
+                                    stopper(WALLET_HOLD_MESSAGE, { stage: WALLET_HOLD_STAGE, pageUrl: holdUrl });
                                   } else {
-                                    console.log(`👉 Payment Method is '${data.Paymentmethod || 'wallet'}'. Skipping Link flow.`);
+                                    console.log(`👉 Payment Method is '${data.Paymentmethod || 'wallet'}', wallet hold is switched off. Skipping Link flow.`);
                                   }
 
                                   // === STEP 11: Enter amount in currency input ===

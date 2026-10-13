@@ -42,50 +42,11 @@ require.cache[captchaPath] = {
 
 /* ----------------------- 1. the copy is the original + [TP] ----------------------- */
 
-/**
- * Line diff of `a` (original) against `b` (copy) as a list of hunks { removed, added }. Both files are nearly
- * identical, so this walks them together and, at a mismatch, looks for the closest point where `lookahead`
- * consecutive lines agree again. Anything it cannot re-synchronise becomes one last big hunk — which has no [TP]
- * and therefore fails the guard, the safe direction.
- */
-function diffHunks(a, b, { lookahead = 3, window = 400 } = {}) {
-  const hunks = [];
-  const same = (i, j, n) => {
-    for (let k = 0; k < n; k++) {
-      if (i + k >= a.length || j + k >= b.length || a[i + k] !== b[j + k]) return false;
-    }
-    return true;
-  };
-  let i = 0;
-  let j = 0;
-  while (i < a.length || j < b.length) {
-    if (i < a.length && j < b.length && a[i] === b[j]) {
-      i++;
-      j++;
-      continue;
-    }
-    let found = null;
-    // closest resync first: smallest x + y wins
-    for (let d = 0; d <= window && !found; d++) {
-      for (let x = 0; x <= d && !found; x++) {
-        const y = d - x;
-        const atEndA = i + x >= a.length;
-        const atEndB = j + y >= b.length;
-        if ((atEndA && atEndB) || (!atEndA && !atEndB && same(i + x, j + y, lookahead))) found = { x, y };
-      }
-    }
-    if (!found) found = { x: a.length - i, y: b.length - j };
-    hunks.push({ removed: a.slice(i, i + found.x), added: b.slice(j, j + found.y) });
-    i += found.x;
-    j += found.y;
-  }
-  return hunks;
-}
+const { diffHunks, untagged } = require("./driftGuard");
 
 /** The copy's text as if it sat next to the original: only the three-folders-deeper require paths are undone. */
 const normalisePaths = (text) => text.replace(/require\("\.\.\/\.\.\/\.\.\//g, 'require("../');
 
-const untagged = (hunks) => hunks.filter((h) => !h.added.some((line) => line.includes("[TP]")));
 
 test("sync: the copy is national.js plus [TP]-tagged changes only", () => {
   const original = fs.readFileSync(ORIGINAL, "utf8").split("\n");
@@ -695,13 +656,13 @@ test("handler: with the feature on it runs the duplicated form once, with the sa
   assert.equal(calls[0], data, "the payload is handed over untouched");
 });
 
-test("registry: national / tp is the National TP handler; the other five are still login-only stubs", () => {
+test("registry: national / tp is the National TP handler; the other four are still login-only stubs (kshema / tp has its own test)", () => {
   const { registry, resolveMultiCompanyHandler } = require("../multiCompany/registry");
   const { fillNationalTP } = require("../multiCompany/tpCompany/nationalTP/nationalTP");
   assert.equal(registry.national.tp, fillNationalTP);
   assert.equal(resolveMultiCompanyHandler("National", "TP"), fillNationalTP);
   assert.notEqual(registry.national.tp.name, "loginOnlyHandler");
-  for (const [company, type] of [["national", "od"], ["reliance", "tp"], ["kshema", "od"], ["kshema", "tp"]]) {
+  for (const [company, type] of [["national", "od"], ["reliance", "tp"], ["kshema", "od"]]) {
     assert.equal(registry[company][type].name, "loginOnlyHandler", `${company} ${type} changed`);
   }
 });
