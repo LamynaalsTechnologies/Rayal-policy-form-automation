@@ -9,7 +9,8 @@ Contents: [1. The `settings` object](#1-the-settings-object) ·
 [4. How a job runs](#4-how-a-job-runs) · [5. Common login](#5-common-login) ·
 [6. Error codes](#6-error-codes-and-retry-rules) · [7. Adding things](#7-adding-a-handler-or-a-company) ·
 [8. Testing](#8-testing) · [9. Storage / disk](#9-storage-and-disk) ·
-[10. Not built yet](#10-not-built-yet) · [11. Everything that changed](#11-everything-that-changed)
+[10. Not built yet](#10-not-built-yet) · [11. Everything that changed](#11-everything-that-changed) ·
+[12. National TP and "TP first, then OD"](#12-national-tp-and-tp-first-then-od--why-what-was-added-what-is-left)
 
 ---
 
@@ -103,6 +104,8 @@ duplicated amount.
 | `KEEP_BROWSER_OPEN_ON_ERROR` | automation `.env` | existing | A failed/stopped job's browser stays open for inspection (needs a display). |
 | `BREAKER_ENABLED` / `BREAKER_STOP_AT` | automation `.env` | `false` / — | Master switch and the checkpoint name(s) for `Breaker.checkpoint("…")` — see §8. Off: a checkpoint line in the code does nothing. |
 | `POLICY_JOB_PARTS_ENABLED` | **`RayalBrokers-backend/.env`** | `false` | Off: the backend queues jobs the old way — **one bundled job whenever OD and TP are the same insurer**, and an OD job + a TP job only when two *different* insurers sell the policy. On: **one job per policy** carrying a `parts` array (OD / TP / OD+TP / PA, each with its own status). The automation server has no switch of its own — it simply runs any job that has `parts` (see §4), so **deploy the automation server first, then turn this on**. Jobs without `parts` keep running through the original code path unchanged. |
+| `OD_WAITS_FOR_TP` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | A two-insurer policy buys its **TP first**: the OD job is not started until the TP job of the same policy is `completed` / `completed_with_errors`; while it is anything else (pending, running, on hold, failed) the OD waits, and starts by itself when TP is fixed and completes. Only the old two-job shape needs this switch (`lib/jobSequence.js`); one job with parts orders them with `dependsOn`. Off: OD and TP are independent jobs again. |
+| `NATIONAL_TP_FORM_ENABLED` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | On: a National TP part selects the plan "5 Year Long Term Liability Only" and runs the whole duplicated National form for a third-party-only policy (§5, §10) up to the payment link that goes to the customer — no `.env` line needed. `false`: it logs in, opens the quote form, lists the "Your Plan" options and stops (stage `tp-plan`) — nothing is chosen or bought, no nominee lookup. To look at the TP quote before anything is sent use the Breaker instead (`BREAKER_STOP_AT=National TP/quote`, then `National TP/payment`). Needs `MULTI_COMPANY_AUTOMATION_ENABLED` too. |
 | `BRISKMAXWINDOW` | automation `.env` | `1` | How many Brisk PA parts may run at once. Brisk is API-only (no browser), so it has its own window, separate from the insurers' `RELIANCEMAXWINDOW` etc. |
 
 `MULTI_COMPANY_AUTOMATION_ENABLED` gates the OD/TP **portal** handlers (both the old OD-job / TP-job shape and `od` / `tp`
@@ -134,6 +137,10 @@ multiCompany/
       nationalLogin.js kshemaLogin.js    per-insurer strategy (data + small hooks)
   odCompany/  relianceOD/ nationalOD/ kshemaOD/     one handler file each
   tpCompany/  relianceTP/ nationalTP/ kshemaTP/     one handler file each
+              nationalTP/nationalTPForm.js   DUPLICATE of fullPolicycompany/national.js + tagged [TP] changes — see §5, §10
+              nationalTP/tpPlan.js           the plan "5 Year Long Term Liability Only": exact match, read back
+              nationalTP/tpConfig.js         NATIONAL_TP_FORM_ENABLED
+              nationalTP/stopBeforePlan.js   the stop taken while that switch is off (lists the plan options)
   cli/runHandler.js               standalone runner for any handler
 ```
 
@@ -149,6 +156,21 @@ There are two job shapes. The queue tells them apart by one thing: **does the jo
 | Claimed | the whole job | **one part** at a time |
 | Status lives in | the job (`status`, `attempts`, `errorLogs`…) | each part; the job's own `status` / `nextRetryAt` are derived from them |
 | Code path | `runPolicyJob` in `server.js` — **unchanged** | `lib/partRunner.js` (`runPartJob`) |
+
+### 4.0 TP first, then OD
+
+A policy sold by two insurers buys its **TP before its OD**. The reason is the business one: an own-damage policy sold on its own
+(Reliance OD) asks for the existing third-party policy (insurer, number, dates), and an OD must not be bought when the TP half
+failed — the customer would be left with OD and no TP. So the two never run at the same time, and OD only starts once the TP
+insurer's job has been bought.
+
+| Shape | How the order is kept |
+|---|---|
+| **Two jobs** (`POLICY_JOB_PARTS_ENABLED` off — OD and TP are two documents, `{captchaId, policyType}`) | `processRelianceQueue` filters the candidates before it plans the windows: an OD job whose TP job (same `captchaId`) is not `completed` / `completed_with_errors` is held — it stays `pending`, takes no window, and is logged once (`[Queue] ⏳ TP first, then OD -> …`). The TP job finishing triggers the next pass, which starts the OD job. No TP job (single company, TP deselected) = nothing to wait for. If the TP jobs cannot be read, the OD jobs wait that pass. `lib/jobSequence.js`, switch `OD_WAITS_FOR_TP`. |
+| **One job with parts** | the backend builds `od` with `dependsOn: "tp"` (the mechanism PA already uses): `waitingFor: "tp"` until TP is bought, `blockedBy: "tp"` when it failed. A job saved before this keeps its old order until it is next saved (`mergeJobParts` refreshes `dependsOn`). |
+
+The policy list reads both the same way: the OD part says **Waiting for TP to finish** — also when the TP failed (it is not an
+error of the OD; the hint says to retry TP, and OD then starts by itself). `legacyJobsToParts` gives the two-job OD the same `dependsOn`. PA through Brisk still waits for OD, so the chain is TP → OD → PA.
 
 ### 4.1 Jobs without `parts`
 
@@ -186,7 +208,7 @@ backend's `shared/jobPartsCore.js`, unit-tested there.
 | Part | Kind | What runs | Company |
 |---|---|---|---|
 | `motor` | `bundled` | the live bundled flow (`dispatchBundled`): one comprehensive policy, OD + TP, at one insurer | the OD company (= the TP company) |
-| `od`, `tp` | `portal` | `resolveMultiCompanyHandler(company, key)` (§3) — **still login-only stubs**, see §10 | that leg's insurer |
+| `od`, `tp` | `portal` | `resolveMultiCompanyHandler(company, key)` (§3) — **login-only stubs, except National TP** (the duplicated National form with the TP changes; stops before the plan only when `NATIONAL_TP_FORM_ENABLED=false`), see §10 | that leg's insurer |
 | `pa` | `brisk` | `lib/briskPartRunner.js`: API only, no browser, no credentials | Brisk (own window, `BRISKMAXWINDOW`) |
 | `pa` | `withPart` | nothing — PA bought by an insurer is bought together with the part that carries it (`carriesPa`); it just mirrors that part | the insurer |
 
@@ -199,7 +221,7 @@ queue pass ──► planClaims ──► claimPart ──► runPartJob ──�
 
 1. **Pick.** A pass reads pending jobs due now (`nextRetryAt` missing, `null`, or past). For a job with parts,
    `selectRunnablePart` picks the first part that is `pending`, due, whose `dependsOn` is done and whose insurer has a
-   free window — order `od`, `tp`, `motor`, `pa`. The window is that **part's** company (`RELIANCEMAXWINDOW`, …) or
+   free window — order `od`, `tp`, `motor`, `pa` (but `od` depends on `tp`, §4.0, so TP is the one that is offered first). The window is that **part's** company (`RELIANCEMAXWINDOW`, …) or
    `brisk`; a running job counts against the part it is running (`job.currentPart`).
 2. **Claim, atomically.** `findOneAndUpdate({_id, status:"pending", rev, parts:{$elemMatch:{key,status:"pending"}}}, …)`
    sets the job to `processing`, that part to `processing`, `currentPart`, and bumps `rev`. If the job was edited since
@@ -236,7 +258,7 @@ queue pass ──► planClaims ──► claimPart ──► runPartJob ──�
 |---|---|
 | success | `completed` (`completed_with_errors` if the policy documents could not be stored) |
 | post-submission failure (`postSubmissionFailed`, stage `post-submission`) | `failed_post_submission`, never auto-retried (money involved) |
-| deliberate stop / `inProgress` / `stopper()` / `E100` — **the login-only stubs** | `failed_login_form` with `stopped: true` ("not automated yet"), not retried |
+| deliberate stop / `inProgress` / `stopper()` / `E100` — **the login-only stubs**, National TP's stop while its switch is set to false | `failed_login_form` with `stopped: true` ("not automated yet"), not retried |
 | `retryable: false` (E110, E203–E205 …) | `failed_login_form`, not retried |
 | retryable failure, thrown error, E302 timeout | attempts + 1 → `pending` with backoff 60 s · 2ⁿ⁻¹, or `failed_login_form` when attempts run out |
 | hydration hiccup (DB / S3 blip) | `pending` again in 30 s, attempt not counted |
@@ -295,7 +317,34 @@ so both log in the very same way:
   either side changes. If you change the full-company login on purpose, change the copy to match — or delete that test
   if the two should part ways.
 
-**National and KSHEMA** go through one loop (`runLogin.js`):
+**National TP does not use the shared loop at all.** `tpCompany/nationalTP/nationalTPForm.js` is a duplicate of
+`fullPolicycompany/national.js` — its own inline login, form, error mapping and browser cleanup. The browser / session manager,
+`nationalBrowserConfig.js`, S3, the error catalogue and `Captcha.js` are the shared ones, not copies. `nationalTP.js` checks the
+feature gate and the `NATIONAL_TP_FORM_ENABLED` switch (on unless set to false), prepares the payload (below) and calls it.
+
+- *every line that differs from the original is tagged `[TP]`* (header lists them): require depth, failure screenshots under
+  `screenshots/multiCompany/`, **the plan** `5 Year Long Term Liability Only` (`tpPlan.js`: option text must EQUAL it, read back,
+  checked again right before the quote; the original's `safeSelectOption` matched by substring and silently kept the portal's plan),
+  **no IDV, no Manufacturer's Selling Price and no discount %** (the TP part still carries the OD's `idv` and discount; the Vahan
+  lookup that used to be "re-run after the discount" stays as the flow's one lookup), no inline Brisk certificate, a
+  `TpPlanError` returned as a non-retryable failure (stage `tp-plan`, code `E306`), and three `Breaker.checkpoint`s
+  (`National TP/plan`, `National TP/quote`, `National TP/payment`). `test/nationalTP.test.js` fails if anything else differs, so a
+  portal fix made in `national.js` has to be ported into the copy — or delete that test if the two should part ways;
+- *the portal's Compulsory PA for Owner Driver* (`tpPa.js` `portalPaTerm`, `[TP] 8`) is the policy's year — 1 or 5, `paCoverYears` — whatever
+  the PA Cover box says; the one exception is PA Cover bought from **Brisk** (`settings.PACompany`), which keeps the portal on **No** so the
+  customer is not covered and charged twice. Before, the year was used only when PA Cover = National, and a policy with PA Cover off and
+  "1 Year" in the TP panel went to the portal as "No";
+- *left exactly as the full flow:* the model-not-found tick, the PA radio / "No of Years" mechanics (only which term they get changed),
+  nominee, financier, Vahan, the payment link. TPPD Restrict is not applied on the portal (neither is it in the full flow);
+- *prepared before the browser opens* (`prepareNationalTp`, what `server.js dispatchBundled` does for bundled National only): the
+  saved default nominee fills what the policy left blank and `[E101]` when there is none at all (National demands one on every quote);
+  the PA term must be exactly 1 or 5 unless PA Cover is Brisk's (`[E101]`) — the original silently fell back to "1 Year". The Online
+  Policy form asks that term once for every National TP policy ("No of Year *", no default): in the TP panel while PA Cover is not
+  ticked, inside PA Cover Details (the field that was always there) once it is;
+- *behaviour you will notice against the shared loop:* a wrong password is **retried** (the full-company flow's behaviour) instead
+  of ending as a non-retried `[E203]`.
+
+**National and KSHEMA** (the other handlers) go through one loop (`runLogin.js`):
 
 1. no username/password → `[E205]`; no login URL → `[E205]` (National has no built-in URL)
 2. open the URL, wait for the login form (`E304` if it never renders), wait for the loader
@@ -353,6 +402,11 @@ sentence "Reliance rejected the login for …"; the dashboard never appears → 
 - **Write a form:** replace the `makeLoginOnlyHandler` line in the handler's stub file with
   `runHandler({ company, policyType, data, body })` (the example is in `relianceOD.js`'s header), fill with `fillSection`,
   end with `ctx.stop(...)`. Throw `MultiCompanyError(code, message, { stage })` for failures.
+- **Operator sentences go through `lib/errorHandler.js beautifyError`**, and it is blunt: it keeps only the text after the **last
+  colon** of a message, and replaces any message containing `Wait timed out after` / `Waiting for element` with a generic "the portal
+  took too long" line. So write ONE colon (right after the label, e.g. `National TP: ...`), list things without a colon
+  (`The plans on the portal are "A", "B".`), and keep the driver's own error text out of the sentence (log it, put it in `details`).
+  National TP's first stop message had a colon before its plan list and showed the operator nothing but four plan names.
 - **New policy type / company entry:** one line in `registry.js`.
 - **New insurer:** a `common/login/<company>Login.js` strategy (fields, `isLoggedIn`, optional `beforeFill` /
   `solveCaptcha` / `afterLogin`), one line each in `login/index.js`, `browser.js` and `loader.js` (loading preset),
@@ -368,7 +422,7 @@ node multiCompany/cli/runHandler.js --company national --type tp -u USER -p PASS
 node multiCompany/cli/runHandler.js --company kshema   --type od -u EMAIL -p PASS
 ```
 
-- Correct login → `inProgress` result, stage `logged-in`, "Logged in to <insurer> — the <insurer> OD/TP form is not built yet" (every handler is login-only except Reliance OD, which also opens Motors → Two Wheeler and stops there with stage `motors-two-wheeler`).
+- Correct login → `inProgress` result, stage `logged-in`, "Logged in to <insurer> — the <insurer> OD/TP form is not built yet" (every handler is login-only except Reliance OD, which also opens Motors → Two Wheeler and stops there with stage `motors-two-wheeler`, and National TP: it runs the whole TP form up to the payment link, so stop it with `Breaker` first, e.g. `BREAKER_STOP_AT=National TP/quote`, and look at the quote before anything is sent; with `NATIONAL_TP_FORM_ENABLED=false` it logs in, opens Calculate Premium, chooses Vehicle Type "New" and stops with stage `tp-plan` — its `error` lists the "Your Plan" options the portal offers).
 - **Wrong password** (deliberate) → `errorCode: "E203"`, `retryable: false` and a `screenshotKey`. For National and KSHEMA
   the portal's message is inside `error`; do this once per portal, because their rejection selectors are generic
   (validation spans, alerts, toasts) and this run confirms the portal's real wording is caught. For Reliance `error` is
@@ -403,12 +457,19 @@ The CLI sets `MULTI_COMPANY_AUTOMATION_ENABLED=true` for its own process only (i
 
 ## 10. Not built yet
 
-- **Form filling** for every handler: Reliance TP, National OD/TP and KSHEMA OD/TP log in and then stop with
-  "form not built yet". Reliance OD also opens Motors → Two Wheeler (`odCompany/relianceOD/motorsMenu.js`, copied from
+- **Form filling** for every handler except National TP (next bullet): Reliance TP, National OD and KSHEMA OD/TP log in and
+  then stop with "form not built yet". Reliance OD also opens Motors → Two Wheeler (`odCompany/relianceOD/motorsMenu.js`, copied from
   `relianceForm.js` STEP 2–3) and stops there; choosing the product in the dropdown is the next step. (Reliance logs in
   through the copy of the full-company login.) A multi-company policy therefore shows its
   `od` / `tp` parts as "not automated yet" (`failed_login_form`, `stopped`) for now — the job's per-part status and the
   retry rules are in place, the portal handlers are not.
+- **National TP** is built (`tpCompany/nationalTP/`, §5) and **on by default**: it selects "5 Year Long Term Liability Only" and goes on to
+  buy a third-party-only policy and send the payment link. `NATIONAL_TP_FORM_ENABLED=false` holds it at "Your Plan" (the plan list in the message).
+  Not proven against the live portal yet: how the TP plan page differs (a field that appears or disappears), whether the portal
+  asks the Manufacturer's Selling Price in the model-not-found mode without an IDV. Use the Breaker checkpoints for the first real run. While Reliance OD is
+  still login-only a two-company policy buys only its TP half.
+- **TP → OD hand-off** (the TP policy's number and dates reaching the OD form) — **not built**, see §12.2. Ordering is (§4.0); the data
+  is not passed yet, and National's flow reads no number or date from the portal at all.
 - **Multi-company Brisk PA waits for the OD part** to succeed (same as the bundled flows, which buy Brisk only after the
   portal part). Until the OD handler is built, that PA stays "waiting for OD".
 - **Single-company policies** (OD insurer = TP insurer) are one `motor` part and go through the **live bundled flows**,
@@ -451,8 +512,106 @@ raw-driver result), `models/RelianceJobQueue.js` (`parts`, `rev`, `currentPart`,
 one `motor` part) and `dao/onlinePolicyDao.js` (`enqueueLegacyJobs` splits only two *different* insurers; `queuePolicyJobs` never
 falls back to the fan-out beside a running legacy job).
 
+**National TP, TP-first ordering** — the full list, grouped by area, is in §12.4.
+
 **Automation (`Rayal-policy-form-automation`)** — this folder; `server.js` (import paths, `errorCode`, Brisk
 guard, hydration keeps per-job routing and `settings`, and the `validation.isValid` typo — every hydrated job used to
 be failed — is now `valid`); `briskCertificate.js` (existing-certificate guard, never send `od`/`tp` as the Brisk
 policy type); `s3Uploader.js` (`ensureLifecycleRule`, multiCompany screenshot rule); `models/RelianceJobQueue.js`
 (`settings`).
+
+---
+
+## 12. National TP and "TP first, then OD" — why, what was added, what is left
+
+### 12.1 Why TP is bought before OD
+
+An OD-only policy at Reliance asks for the **existing third-party policy**: its insurer, **policy number**, **policy start date**
+and **policy end date** (the "exist third party insurance" block of the OD form — `plan-OD-Relience.txt` in the workspace root,
+steps 7 and 23–26). Those values come from the **finished TP**. So:
+
+- the OD cannot start before the TP has been bought, and
+- an OD must not be bought when the TP failed (the customer would be left with OD and no TP).
+
+That is the whole rule: **TP first, OD waits for it** (§4.0). TP and OD never run at the same time. If the TP fails, the OD stays
+"Waiting for TP to finish" and starts by itself once the TP has been fixed and bought.
+
+### 12.2 The hand-off — what the TP has to give the OD, and what exists today  *(NOT BUILT YET)*
+
+| OD form needs | Where it comes from | State |
+|---|---|---|
+| TP insurer | `settings.TPCompany` of the policy | known, nothing to build |
+| TP policy start date | the TP policy's start = the purchase date of the new vehicle (`purchaseDate`) — to be confirmed against the issued policy | **not read or passed** |
+| TP policy end date | start + 5 years − 1 day for "5 Year Long Term Liability Only" — to be confirmed against the issued policy | **not read or passed** |
+| TP policy number | issued by National only **after the customer pays the payment link** | **not read or passed** |
+
+What exists: the OnlinePolicy model has `policyNumber` and `proposalNumber`. Nothing in the automation writes the insurer's number
+for National — `national.js` reads **nothing** from the portal (not even the proposal number; only the Reliance flow saves
+`proposalNumber`). `partRunner.pickResult` would carry a `policyNumber` / `proposalNumber` in a part's `result` if a flow returned one.
+
+**The timing catch:** "TP finished" today means the payment link was **sent** (job `completed`). The policy number does not
+exist yet at that moment. The OD therefore starts as soon as the link is out — before there is a number to give it.
+
+### 12.3 What the hand-off will need (when the Reliance OD form is built)
+
+1. **A step that reads the TP's policy number (and dates) from National** — after payment. Needs: which screen / search on National's
+   portal shows it (proposal number → policy number? the "view policy" page?). Per-part storage: `parts[tp].result`
+   (`policyNumber`, `startDate`, `endDate`, `insurer`).
+2. **`buildPartFormData` for the `od` part** adds `tpPolicy: { insurer, policyNumber, startDate, endDate }` from the TP part's
+   result, and the Reliance OD handler types it into "exist third party insurance".
+3. **The gate (§4.0) means "TP details available"** instead of "TP bought" if the number only exists after payment. Decision for
+   the owner: start the OD when the link is sent (the OD form cannot be completed without the number), or when the TP policy has been
+   issued (the OD can wait for hours or days for the customer to pay).
+
+### 12.4 What was added — by area
+
+**Automation (`Rayal-policy-form-automation`)**
+- `multiCompany/tpCompany/nationalTP/` — `nationalTPForm.js`: a duplicate of `fullPolicycompany/national.js` (untouched) with the
+  `[TP]` changes listed in its header: **1** require depth · **2** failure screenshots under `screenshots/multiCompany/` · **3** the plan
+  "5 Year Long Term Liability Only" (exact match, read back, never retried when missing) · **4** no IDV, no Manufacturer's Selling
+  Price, no discount % · **5** plan re-checked before the quote + Breaker checkpoints `National TP/plan`, `/quote`, `/payment` ·
+  **6** no inline Brisk certificate · **7** a plan error is a non-retryable failure · **8** the portal's Compulsory PA is the policy's
+  year (1 or 5), "No" only when PA Cover is bought from Brisk. `tpPlan.js` (plan select, reads `textContent`, waits for the list),
+  `tpPa.js` (`portalPaTerm`), `tpConfig.js` (the switch), `stopBeforePlan.js` (the stop while the switch is `false`),
+  `nationalTP.js` (feature gate, switch, `prepareNationalTp`: nominee fallback, `[E101]` for an unusable PA term or no nominee).
+- `lib/jobSequence.js` + `server.js processRelianceQueue` — an OD job (old two-job shape) is held until the TP job of the same policy
+  is `completed` / `completed_with_errors`.
+- Tests: `test/nationalTP.test.js` (also the drift guard: the copy may differ from `national.js` only in `[TP]` lines),
+  `test/jobSequence.test.js`.
+
+**Backend (`RayalBrokers-backend`)**
+- `shared/jobParts.js` — `buildJobParts` gives the `od` part `dependsOn: "tp"`; `legacyJobsToParts` gives the two-job OD the same, so the
+  list reads "Waiting for TP to finish". `shared/policySettings.js validateSettings` — a present PA term other than 1 or 5 on a National
+  TP is refused (a missing one keeps the model default 1). Tests: `test/jobParts.test.js`, `test/policySettings.nationalTpYears.test.js`.
+
+**Frontend (`OnlinePolicy/`)**
+- `BasicPolicyDetailsStep.js` — **one** "No of Year *" field for a National TP: in the TP panel while PA Cover is not ticked, inside PA
+  Cover Details (the field that was always there) once it is; no default, must be picked. `validationSchemas.js` (`paCoverYears`),
+  `constants/initialValues.js` (`_paYearsChosen`, UI-only), `OnlinePolicy.js` (a saved policy counts as chosen), `utils/partChanges.js`
+  (a year edit flags a National TP part), `utils/policyParts.js` + `AutomationStatusCard.js` ("Waiting for TP to finish", never "Blocked").
+
+### 12.5 Settings (automation `.env`)
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `MULTI_COMPANY_AUTOMATION_ENABLED` | `false` | master switch for every OD / TP handler |
+| `NATIONAL_TP_FORM_ENABLED` | **on** | `false` holds a National TP at "Your Plan" (lists the plans, stops) |
+| `OD_WAITS_FOR_TP` | **on** | `false` makes OD and TP independent jobs again |
+| `BREAKER_ENABLED`, `BREAKER_STOP_AT` | off | stop at `National TP/quote` to look at the quote before the payment link goes out |
+| `POLICY_JOB_PARTS_ENABLED` (backend) | `false` | one job per policy with parts; off = the old OD job + TP job |
+
+### 12.6 Behaviour worth knowing
+
+- **The payment link goes to the customer.** A National TP runs to "Send Payment Link" unless the Breaker or the switch holds it.
+- **PA:** the portal's Compulsory PA = the policy's year. PA Cover with Brisk keeps it on "No" (Brisk's certificate is the cover).
+  With PA Cover off and a year picked, the portal quote includes PA but the policy's premium does not — tick PA Cover → National to
+  put the amount in.
+- **A TP that stops never lets its OD run** (switch `false`, or a TP handler that is still login-only).
+- **Operator messages** go through `beautifyError`, which keeps only the text after the last colon: one colon, no driver text (§7).
+
+### 12.7 Open decisions
+
+1. When does OD start — when the TP payment link is sent (today) or when the TP policy has been issued (§12.3)?
+2. Where on National's portal is the TP policy number (and are the dates) read? Needs the screen or the steps.
+3. A TP `completed_with_errors` (bought, a document upload or Brisk step failed) releases the OD today. Should it?
+4. TPPD Restrict is not applied on the portal (neither is it in the full flow).

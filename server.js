@@ -233,6 +233,8 @@ const { resolveNationalNominee } = require("./lib/nomineeResolver");
 // Only jobs that carry `parts` go through these; every other job keeps the
 // original path below unchanged.
 const partRunner = require("./lib/partRunner");
+// OD waits for its policy's TP job (the old two-job shape) — see lib/jobSequence.js.
+const jobSequence = require("./lib/jobSequence");
 const { runBriskPart } = require("./lib/briskPartRunner");
 
 mongoose.connect(process.env.MONGODB_URI);
@@ -927,6 +929,7 @@ let queuePassRequested = false;
 let lastLoggedQueueState = null;
 let lastLoggedCapacityState = null;
 let lastLoggedBackoffAt = null;
+let lastLoggedSequenceState = null;
 
 const processRelianceQueue = async () => {
   if (!jobQueueCollection) {
@@ -1020,10 +1023,35 @@ const processRelianceQueue = async () => {
       .limit(100)
       .toArray();
 
+    // A policy sold by two insurers in the old two-job shape has an OD job and a
+    // TP job that would start together, each in its own insurer's window. The TP
+    // job goes first: an OD job is held until the TP job of the SAME policy has
+    // been bought (lib/jobSequence.js). Held jobs stay pending and take no window.
+    const { ready: orderedCandidates, waiting: waitingForTp } = await jobSequence.holdOdJobsUntilTpDone(
+      jobQueueCollection,
+      candidateJobs
+    );
+    if (waitingForTp.length) {
+      // Change-gated like the capacity line: the same wait is not repeated on every pass.
+      const waitingMsg = waitingForTp
+        .map(({ job: odJob, tp }) =>
+          tp
+            ? `${odJob.formData?.firstName || odJob._id} (${companyLabel(companyOfJob(odJob))} OD waits for ${companyLabel(companyOfJob(tp))} TP: ${tp.status})`
+            : `${odJob.formData?.firstName || odJob._id} (${companyLabel(companyOfJob(odJob))} OD waits — TP job not readable)`
+        )
+        .join(", ");
+      if (waitingMsg !== lastLoggedSequenceState) {
+        console.log(`[Queue] ⏳ TP first, then OD -> ${waitingMsg}`);
+        lastLoggedSequenceState = waitingMsg;
+      }
+    } else {
+      lastLoggedSequenceState = null;
+    }
+
     // A job with `parts` contributes ONE part (the first due one whose insurer
     // has a free window); any other job is counted against its company as before.
     const { toStart: pendingJobs, skippedByCompany } = partRunner.planClaims(
-      candidateJobs,
+      orderedCandidates,
       { now: new Date(), activeByCompany, maxParallelFor, companyOfJob }
     );
 
