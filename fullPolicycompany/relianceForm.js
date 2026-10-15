@@ -32,9 +32,95 @@ const { beautifyError: beautifyErrorShared } = require("../lib/errorHandler");
 const { isAutomationStop, stoppedResult, stopper } = require("../automationStopper");
 const {
   shouldHoldForWallet,
+  isWalletPayment,
+  isWalletCdtEnabled,
+  isWalletSubmitEnabled,
+  isWalletRecoverEnabled,
   WALLET_HOLD_STAGE,
   WALLET_HOLD_MESSAGE,
 } = require("./relianceWalletHold");
+// A wallet policy, past Pay: the CDT option, the payable amount, Add — then wait (instead of only holding).
+const {
+  PaymentStepError,
+  payWithCdtOrStop,
+  waitForProposalCheckbox,
+  readSelection,
+} = require("./relianceWalletCdt");
+// After Add: Submit Details (once, behind a note on the policy), the policy number, the policy PDF — saved on the policy —
+// and the run carries on to the Brisk / merge steps. checkSubmitGate refuses a policy whose payment was already submitted.
+const {
+  checkSubmitGate,
+  decideAfterGate,
+  payWithCdtAndIssue,
+  recoverIssuedPolicyPdf,
+  createPolicyPdfUploader,
+} = require("./relianceWalletIssue");
+// What the portal answered to "Get Coverage Details": the cover table, or only a refusal sentence in
+// #DivCoverDetails ("No Discount available for mentioned Details ...").
+const {
+  isCoverDetailsCheckEnabled,
+  waitForCoverDetails,
+  coverDetailsFailureMessage,
+  readCoverDetailsRejection,
+  sentDetails,
+  isPortalSuccessMessage,
+} = require("./relianceCoverDetails");
+// Get Coverage Details is fired four ways, so Reliance answers four times, in any order, and every answer redraws
+// the cover table and re-ticks PA to Owner Driver. Wait for the last answer; check PA is really off.
+const {
+  isCoverSettleEnabled,
+  waitForPortalIdle,
+  ensureOwnerDriverPaOff,
+  ownerDriverPaStillOnMessage,
+} = require("./relianceCoverSettle");
+// The KYC (OVD upload) page: wait for the SUBMIT button and for the page after SUBMIT instead of pressing a hidden
+// button with a JavaScript click and carrying on as if the portal had accepted the document.
+const {
+  isKycSubmitWaitEnabled,
+  isKycFallbackEnabled,
+  isProcessLinksEnabled,
+  readKycPage,
+  findKycButton,
+  waitForKycSubmitReady,
+  waitForKycProceed,
+  kycStuckMessage,
+  describeUploadedFile,
+  PortalRejectedError,
+  KycDocumentError,
+  inspectDocumentFile,
+  kycDocumentMessage,
+  // what the View page is told ("KYC failed — upload the document manually")
+  KYC_UNFINISHED,
+  KYC_NO_DOCUMENT,
+  kycReasonText,
+  kycDocumentReasonText,
+  saveKycStatus,
+} = require("./relianceKycSubmit");
+// The same page's UPLOAD DOCUMENT option and its Identity / Address Verification upload areas, by the page's own markup
+// (the old code clicked the FIRST selectDoc option — PAN — and put the two documents into the wrong handlers).
+const {
+  SLOT_LABEL,
+  findUploadOptionInPage,
+  chooseUploadDocument,
+  uploadKycDocument,
+} = require("./relianceKycUpload");
+// When the KYC does not work, whatever the reason: the screenshot of the error, the payment page, the links on the policy
+// — and the run ends as a failed KYC instead of carrying on (or just stopping on the KYC page).
+const {
+  KycIncompleteError,
+  createKycShotKeeper,
+  rescueAfterKycFailure,
+  clearStaleProcessLinks,
+  saveCurrentPageLink,
+  findProposalCheckboxInPage,
+} = require("./relianceKycFallback");
+// Pending Quotes is a Kendo grid, 10 rows to a page: the proposal is looked for on every page (the pager's next link), and
+// a proposal that is nowhere in the list stops the policy — the old "first checkbox" fallback ticked ANOTHER customer's.
+const {
+  isQuotesPagingEnabled,
+  findProposalAcrossPages,
+  describeScan,
+} = require("./relianceQuotesPaging");
 require("../breaker"); // defines the global `Breaker` for a standalone run of this file
 
 // Configure AWS S3 for presigned URL generation (fallback)
@@ -61,6 +147,10 @@ const getPresignedUrl = async (key) => {
     return null;
   }
 };
+
+// A downloaded policy PDF into the bucket's Policy folder, with the same client the merged PDF goes through
+// (relianceWalletIssue.js createPolicyPdfUploader).
+const uploadPolicyPdfToS3 = createPolicyPdfUploader(s3);
 
 async function waitForLoaderToDisappear(
   driver,
@@ -281,11 +371,31 @@ async function captureErrorScreenshot(
         }
         return null;
       `);
+      if (onPageError && isPortalSuccessMessage(onPageError)) {
+        // "Proposal Saved Successfully ..." is the portal's good news, not the reason this run failed. Taking it
+        // as the error hid the real one (the run was recorded as failing with a success message).
+        console.log("ℹ️ #containerMain shows a success message, not an error — keeping the real error:", onPageError);
+        onPageError = null;
+      }
       if (onPageError) {
         console.log("🚩 Extracted on-page error message:", onPageError);
       }
     } catch (e) {
       console.log("⚠️ Could not check for on-page error message:", e.message);
+    }
+
+    // Reliance refuses "Get Coverage Details" with a sentence in #DivCoverDetails, not in #containerMain
+    // ("No Discount available for mentioned Details ..."). Whatever failed next, that sentence is the cause.
+    if (!onPageError) {
+      try {
+        const coverRefusal = await readCoverDetailsRejection(driver, data);
+        if (coverRefusal) {
+          onPageError = coverRefusal.message;
+          console.log("🚩 Reliance refused the cover details:", coverRefusal.text);
+        }
+      } catch (e) {
+        console.log("⚠️ Could not check the cover details for a portal message:", e.message);
+      }
     }
 
     const screenshot = await driver.takeScreenshot();
@@ -751,7 +861,11 @@ async function saveKycUrls(urls, data, jobId = "") {
       .collection("onlinePolicy")
       .updateOne(
         { _id: policyIdForUpdate },
-        { $set: { kycUrls, updatedAt: new Date() } }
+        {
+          $set: { kycUrls, updatedAt: new Date() },
+          // a new attempt's KYC step starts with a clean note — see relianceKycSubmit.js saveKycStatus
+          ...(isKycSubmitWaitEnabled() ? { $unset: { kycStatus: "" } } : {}),
+        }
       );
     console.log(
       `[${jobId}] 📝 onlinePolicy.kycUrls updated (matched ${result.matchedCount})`
@@ -819,6 +933,9 @@ async function mergePDFsAndUpload(reliancePdfPath, briskPdfPath, data) {
       'http://192.168.1.7:3010/api/merge-pdf',
       formData,
       {
+        // a merge service that does not answer must not hold the job (it hung a finished policy for minutes, and a
+        // shutdown then re-queued it); failing here is non-fatal for the callers
+        timeout: Number(process.env.MERGE_PDF_TIMEOUT_MS) || 30000,
         headers: {
           ...formData.getHeaders(),
           'clientid': data.userId?.$oid || data.userId || '65a343220a6016a8f93424e7',
@@ -1080,6 +1197,15 @@ async function fillRelianceForm(
   // saved onto the policy so they can be reopened from the Online Policy view.
   let kycOvdUrl = null;
   let kycUploadUrl = null;
+  // KYC fallback (relianceKycFallback.js). `kycStarted` = the run reached DO KYC; `kycAccepted` = Reliance accepted a
+  // document (SUBMIT) — a run that is started and not accepted when something ends it is a KYC that did not work.
+  let kycStarted = false;
+  let kycAccepted = false;
+  let kycWindowHandle = null; // the KYC tab (the DO KYC click opens one)
+  let kycProposalPageUrl = null; // the View Policy page DO KYC was clicked on — the "Proposal Page" link
+  let kycProblem = null; // the last thing in the KYC step that went wrong and was only logged
+  let kycShots = null; // the screenshots of the KYC step's errors, kept until we know the KYC failed
+  const noteKycError = (text) => (kycShots ? kycShots.noteError(text) : null);
   let driver = null;
   let postSubmissionFailed = false;
   let postSubmissionError = null;
@@ -1088,6 +1214,9 @@ async function fillRelianceForm(
   let thisScreenshotUrl = null;
   let thisScreenshotKey = null;
   let documentUploadError = null; // Aadhaar upload to portal failed (non-fatal warning)
+  // The issued policy's PDF is already stored on the policy (relianceWalletIssue.js): with no Brisk certificate there is
+  // nothing to merge, so the run completes right after it instead of calling the merge service.
+  let policyPdfOnPolicy = false;
 
   try {
     // === STEP 0: Open this job's own browser window ===
@@ -1096,6 +1225,36 @@ async function fillRelianceForm(
     // Extract clientId from data (handle both string and MongoDB ObjectId format)
     const clientId = data.clientId?.$oid || data.clientId || null;
     console.log(`📋 [${jobId}] Job clientId: ${clientId || 'not specified'}`);
+
+    // A CDT payment that was already submitted for this policy is never run again by itself — checked before any browser
+    // opens or any proposal is created at Reliance (relianceWalletIssue.js). The write right before Submit Details is the
+    // real guard; this saves a whole run (and a second proposal) when the answer is already known.
+    // ISSUED is the exception: its payment is done and only the PDF is left — such a policy is finished (below), nothing
+    // is paid again. Every other blocking note refuses.
+    let issuedRecovery = null;
+    if (isWalletSubmitEnabled()) {
+      const gate = await checkSubmitGate(data, jobId);
+      const decision = decideAfterGate(gate, {
+        recoverEnabled: isWalletRecoverEnabled(),
+        proposalNumber: data.proposalNumber || data.proposal_number,
+      });
+      if (decision.action === "recover") {
+        issuedRecovery = decision;
+        console.log(
+          `♻️ [${jobId}] Policy ${decision.number} was already issued at Reliance (note state issued) — nothing is paid again; only its PDF is fetched, then the run completes.`
+        );
+      } else if (decision.action === "refuse") {
+        console.error(`[${jobId}] ⛔ ${decision.message}`);
+        return {
+          success: false,
+          error: decision.message,
+          postSubmissionFailed: true,
+          stage: "post-submission",
+          retryable: false,
+          timestamp: new Date(),
+        };
+      }
+    }
 
     // Straight to a FRESH window — no master session, no profile cloning, no
     // "is the session still alive?" probing.
@@ -1187,6 +1346,45 @@ async function fillRelianceForm(
       30000
     );
     console.log("Motors menu detected!");
+
+    // === Policy already issued: only its PDF is left ===
+    // The payment was made by an earlier run (its note says issued). No form, no Pay, no Submit Details — the PDF is fetched
+    // from View Policy by the policy number, stored and set on the policy; the steps below the form (Brisk certificate,
+    // merge) then run exactly as after a normal payment and the policy completes.
+    if (issuedRecovery) {
+      try {
+        const recovered = await recoverIssuedPolicyPdf({
+          driver,
+          data,
+          jobId,
+          proposalNumber: data.proposalNumber || data.proposal_number,
+          policyNumber: issuedRecovery.number,
+          log: (line) => console.log(`[${jobId}] ↳ ${line}`),
+          downloadDir:
+            jobBrowser?.profileInfo?.downloadDir ||
+            path.join(ROOT_DIR, "reliance_pdf", `job_${jobId}`),
+          uploadPolicyPdf: uploadPolicyPdfToS3,
+        });
+        if (recovered.warning && !documentUploadError) documentUploadError = recovered.warning;
+        policyPdfOnPolicy = true; // the policy has its PDF (stored now, or already there)
+      } catch (recoveryErr) {
+        if (isAutomationStop(recoveryErr)) throw recoveryErr;
+        // the payment was made earlier: a failure here is a post-submission one, never retried by itself
+        hadError = true;
+        const info = await captureErrorScreenshot(driver, recoveryErr, data, "recovery-error");
+        return {
+          success: false,
+          error: recoveryErr.keepMessage ? recoveryErr.message : info.onPageError || recoveryErr.message,
+          postSubmissionFailed: true,
+          stage: "post-submission",
+          screenshotUrl: info.screenshotUrl,
+          screenshotKey: info.screenshotKey,
+        };
+      }
+    }
+
+    // === The form (STEP 3 to the end of the modal / payment steps) — skipped for a policy that was already issued ===
+    if (!issuedRecovery) {
 
     // === STEP 3: hover Motors and click Two Wheeler ===
     // Retried with a real visibility wait — on a slow portal the submenu can
@@ -1943,7 +2141,30 @@ async function fillRelianceForm(
         );
         // Wait for the coverage API call: loader-based instead of a blind 5s
         await waitForLoaderToDisappear(driver);
-        await driver.sleep(1500);
+        if (isCoverSettleEnabled()) {
+          // The four Get Coverage Details requests answer 1-7 s apart and EVERY answer redraws the cover table and
+          // re-ticks PA to Owner Driver. Wait until none is in flight (replaces the blind 1.5 s sleep: a quick
+          // portal costs the same), or the opt-out / Helmet / TPPD / Zero Depreciation clicks below get undone.
+          const idle = await waitForPortalIdle(driver);
+          console.log(
+            idle.state === "idle"
+              ? `Reliance has finished answering Get Coverage Details (${idle.waitedMs} ms).`
+              : `⚠️ Reliance was still busy after ${idle.waitedMs} ms — carrying on.`
+          );
+        } else {
+          await driver.sleep(1500);
+        }
+
+        // Reliance answers in #DivCoverDetails with the cover table — or, when it refuses, with ONLY a sentence
+        // ("No Discount available for mentioned Details ..."). ChkBox24 can never appear then, so waiting for it
+        // below would just burn 10 s and report the wrong thing. Fail here, with the portal's own words.
+        if (isCoverDetailsCheckEnabled()) {
+          const coverOutcome = await waitForCoverDetails(driver);
+          if (coverOutcome.state === "rejected") {
+            console.log(`🚩 Reliance refused the cover details: ${coverOutcome.text}`);
+            throw new Error(coverDetailsFailureMessage(coverOutcome.text, sentDetails(data)));
+          }
+        }
 
         // PA to Owner Driver Handling
         const isCompanyPA = data.paCover === true && (String(data.paCoverCompany).toLowerCase() === "company" || String(data.paCoverCompany).toLowerCase() === "reliance");
@@ -2004,7 +2225,14 @@ async function fillRelianceForm(
           }
         }
 
-
+        // No PA cover with Reliance: do not take the opt-out above on trust — a late answer from Reliance re-ticks
+        // PA. Read the box; if it is ticked again, do the portal's opt-out again. Stop here rather than go on to buy
+        // a policy with PA cover (and be refused for a missing nominee).
+        if (!isCompanyPA && isCoverSettleEnabled()) {
+          const paOff = await ensureOwnerDriverPaOff(driver);
+          if (!paOff.ok) throw new Error(ownerDriverPaStillOnMessage(paOff));
+          if (paOff.redone > 0) console.log(`PA to Owner Driver had to be switched off again (${paOff.redone}x).`);
+        }
 
         // Uncheck Helmet Cover checkbox
         console.log("Unchecking Helmet Cover checkbox...");
@@ -2809,6 +3037,14 @@ async function fillRelianceForm(
           }
         }
 
+        // Last look before the premium is calculated: everything above (Helmet, TPPD, Zero Depreciation, financier,
+        // address) can make Reliance redraw the cover table, and a redraw re-ticks PA to Owner Driver.
+        if (!isCompanyPA && isCoverSettleEnabled()) {
+          const paOff = await ensureOwnerDriverPaOff(driver);
+          if (!paOff.ok) throw new Error(ownerDriverPaStillOnMessage(paOff));
+          if (paOff.redone > 0) console.log(`PA to Owner Driver had to be switched off again (${paOff.redone}x).`);
+        }
+
         console.log("Clicking 'Calculate Premium' button...");
         const calculatePremiumButton = await driver.wait(
           until.elementLocated(By.id("btnCalculate")),
@@ -3222,8 +3458,24 @@ async function fillRelianceForm(
           }
 
           // === NEW FLOW: Click DO KYC Link (Opens New Tab) ===
+          // From here on a KYC that does not work is handled by relianceKycFallback.js (the flags are declared at the top).
+          kycStarted = true;
+          if (isKycFallbackEnabled()) {
+            kycShots = createKycShotKeeper({
+              takeScreenshot: () => driver.takeScreenshot(),
+              upload: uploadScreenshotToS3,
+              makeKey: (label) =>
+                generateScreenshotKey(data._jobIdentifier || `job_${Date.now()}`, data._attemptNumber || 1, `kyc/${label}`),
+              log: (line) => console.log(line),
+            });
+          }
+          if (isKycFallbackEnabled() || isProcessLinksEnabled()) {
+            kycProposalPageUrl = await driver.getCurrentUrl().catch(() => null);
+            // a new attempt is a new proposal: an earlier attempt's saved pages (on this portal) are stale now
+            await clearStaleProcessLinks({ portalUrl: kycProposalPageUrl }, data, jobId);
+          }
           console.log("Clicking DO KYC link...");
-          let kycWindowHandle = null;
+          kycWindowHandle = null;
           try {
             // Get current window handles before clicking
             const windowsBeforeKyc = await driver.getAllWindowHandles();
@@ -3451,7 +3703,21 @@ async function fillRelianceForm(
           try {
             // Check if we have Aadhar card document from database
             // Use presignedUrl (generated by backend) for downloading, not location
-            let aadharDownloadUrl = data.aadharCard?.presignedUrl;
+            let aadharDownloadUrl = null;
+            // The link stored on the job is minted by the backend when the job is built or edited and lives 5
+            // MINUTES; the KYC step runs minutes later, and an expired link makes S3 answer with a small XML error
+            // that used to be uploaded to Reliance as the Aadhaar. Mint a fresh one from the S3 key, now.
+            let aadharLinkIsFresh = false;
+            if (isKycSubmitWaitEnabled() && data.aadharCard?.key) {
+              try {
+                aadharDownloadUrl = await getPresignedUrl(data.aadharCard.key);
+                aadharLinkIsFresh = !!aadharDownloadUrl;
+                if (aadharLinkIsFresh) console.log("🔗 Using a fresh download link for the Aadhaar (the one stored on the job lives only 5 minutes)");
+              } catch (freshErr) {
+                console.log(`⚠️ Could not mint a fresh Aadhaar link (${freshErr.message}) — falling back to the stored one`);
+              }
+            }
+            if (!aadharDownloadUrl) aadharDownloadUrl = data.aadharCard?.presignedUrl;
 
             // If presignedUrl is not available, generate it using the S3 key
             if (!aadharDownloadUrl && data.aadharCard?.key) {
@@ -3472,6 +3738,11 @@ async function fillRelianceForm(
               console.log(`📍 Document location: ${data.aadharCard.location}`);
               console.log(`📥 Using URL: ${aadharDownloadUrl.substring(0, 100)}...`);
 
+              // From here until Reliance accepts SUBMIT the View page says "KYC was started but did not finish" — so a
+              // run that dies, times out or is stopped anywhere in this step leaves the note, not only the failures
+              // detected below.
+              if (isKycSubmitWaitEnabled()) await saveKycStatus(KYC_UNFINISHED, data, jobId);
+
               // === STEP 1: Click "UPLOAD DOCUMENT" div ===
               console.log("Finding UPLOAD DOCUMENT div with ng-click='selectDoc(upload)'...");
               let uploadDocDiv = null;
@@ -3488,20 +3759,24 @@ async function fillRelianceForm(
               }
               await driver.sleep(1000);
 
-              // Case-insensitive search across any element type, run in page context
+              // The page has FIVE options (PAN, AADHAAR, CKYC, UPLOAD DOCUMENT, AA), every one with ng-click="selectDoc(..)".
+              // The exact one is searched for (relianceKycUpload.js); the old "first selectDoc" search found PAN.
+              // Old: case-insensitive search across any element type, run in page context.
               const findUploadEl = () =>
-                driver.executeScript(`
-                  var byNgClick = document.querySelector("[ng-click*='selectDoc']");
-                  if (byNgClick) return byNgClick;
-                  var all = document.querySelectorAll('div, button, li, span, a, label');
-                  for (var i = 0; i < all.length; i++) {
-                    var t = (all[i].textContent || '').trim().toUpperCase();
-                    if (t.length < 40 && t.indexOf('UPLOAD') !== -1 && t.indexOf('DOCUMENT') !== -1) {
-                      return all[i];
-                    }
-                  }
-                  return null;
-                `);
+                isKycSubmitWaitEnabled()
+                  ? driver.executeScript(findUploadOptionInPage)
+                  : driver.executeScript(`
+                      var byNgClick = document.querySelector("[ng-click*='selectDoc']");
+                      if (byNgClick) return byNgClick;
+                      var all = document.querySelectorAll('div, button, li, span, a, label');
+                      for (var i = 0; i < all.length; i++) {
+                        var t = (all[i].textContent || '').trim().toUpperCase();
+                        if (t.length < 40 && t.indexOf('UPLOAD') !== -1 && t.indexOf('DOCUMENT') !== -1) {
+                          return all[i];
+                        }
+                      }
+                      return null;
+                    `);
 
               // Poll the main document, then inside each iframe (KYC widgets
               // often render in one). If found in a frame, STAY in that frame so
@@ -3552,21 +3827,54 @@ async function fillRelianceForm(
               }
 
               if (uploadDocDiv) {
-                // Make sure div is visible and clickable
-                await driver.wait(until.elementIsVisible(uploadDocDiv), 5000);
-                await driver.executeScript(
-                  "arguments[0].scrollIntoView({block: 'center'});",
-                  uploadDocDiv
-                );
-                await driver.sleep(500);
+                if (isKycSubmitWaitEnabled()) {
+                  // Click UPLOAD DOCUMENT, then check the page took it (its wrapper #upload-radio gets "active-r").
+                  // The two upload areas below only mean something once this option is the chosen one.
+                  const chosen = await chooseUploadDocument(driver);
+                  if (!chosen.ok) {
+                    let pageSaid = "";
+                    try {
+                      pageSaid = (await readKycPage(driver)).errors.join(" | ");
+                      if (pageSaid) await noteKycError(pageSaid);
+                      const pageTitle = await driver.getTitle();
+                      const bodySnippet = await driver.executeScript(
+                        "return (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').substring(0, 300);"
+                      );
+                      console.log(`🔎 KYC page diagnostics — title: "${pageTitle}"`);
+                      console.log(`🔎 Page text starts: ${bodySnippet}`);
+                    } catch (diagErr) {
+                      // best-effort only
+                    }
+                    console.log(
+                      `❌ UPLOAD DOCUMENT could not be selected (on the page: ${chosen.found}, on screen: ${chosen.shown})` +
+                        (pageSaid ? ` — page says: ${pageSaid}` : "")
+                    );
+                    await saveKycStatus(kycReasonText({ step: "option" }), data, jobId);
+                    throw new PortalRejectedError(
+                      kycStuckMessage({ step: "option", text: pageSaid, proposalNumber, brief: isKycFallbackEnabled() }),
+                      { stage: "kyc-option", portalText: pageSaid }
+                    );
+                  }
+                  console.log(
+                    `✅ Clicked UPLOAD DOCUMENT — it is the selected option${chosen.attempts > 1 ? ` (attempt ${chosen.attempts})` : ""}`
+                  );
+                } else {
+                  // Make sure div is visible and clickable
+                  await driver.wait(until.elementIsVisible(uploadDocDiv), 5000);
+                  await driver.executeScript(
+                    "arguments[0].scrollIntoView({block: 'center'});",
+                    uploadDocDiv
+                  );
+                  await driver.sleep(500);
 
-                // Click the div
-                try {
-                  await uploadDocDiv.click();
-                  console.log("✅ Clicked UPLOAD DOCUMENT div");
-                } catch {
-                  await driver.executeScript("arguments[0].click();", uploadDocDiv);
-                  console.log("✅ Clicked UPLOAD DOCUMENT div (via JavaScript)");
+                  // Click the div
+                  try {
+                    await uploadDocDiv.click();
+                    console.log("✅ Clicked UPLOAD DOCUMENT div");
+                  } catch {
+                    await driver.executeScript("arguments[0].click();", uploadDocDiv);
+                    console.log("✅ Clicked UPLOAD DOCUMENT div (via JavaScript)");
+                  }
                 }
 
                 await driver.sleep(2000);
@@ -3668,301 +3976,397 @@ async function fillRelianceForm(
                   // Download Aadhar from S3 using presignedUrl (has temporary access)
                   console.log(`📥 Downloading Aadhar from S3...`);
                   console.log(`📥 URL: ${aadharDownloadUrl.substring(0, 100)}...`);
-                  const tempFilePath = await downloadFileFromS3(aadharDownloadUrl, data.aadharCard.fileName);
+                  let tempFilePath = await downloadFileFromS3(aadharDownloadUrl, data.aadharCard.fileName);
 
                   // Verify file exists and get absolute path
                   if (!fs.existsSync(tempFilePath)) {
                     throw new Error(`Downloaded file not found at: ${tempFilePath}`);
+                  }
+
+                  // "Downloaded" is not "is a document": a link that expired (or a key that is gone) makes S3 answer
+                  // with a small XML error body, which the download above saved under a .jpg name and which used to be
+                  // uploaded to Reliance as the customer's Aadhaar ("Please upload valid OVD file only."). Look at the
+                  // first bytes; stop here, before anything reaches the portal, if it is not a picture or a PDF.
+                  if (isKycSubmitWaitEnabled()) {
+                    const inspected = inspectDocumentFile(tempFilePath);
+                    console.log(`🔎 Downloaded Aadhaar: ${inspected.kind}, ${inspected.size} bytes`);
+                    if (!inspected.ok) {
+                      console.log(
+                        `❌ What was downloaded is not a document` +
+                          (inspected.s3 ? ` — S3 said ${inspected.s3.code}: ${inspected.s3.message}` : "")
+                      );
+                      await saveKycStatus(kycDocumentReasonText(inspected), data, jobId);
+                      throw new KycDocumentError(
+                        kycDocumentMessage({
+                          inspected,
+                          fileName: data.aadharCard.fileName,
+                          freshLink: aadharLinkIsFresh,
+                          brief: isKycFallbackEnabled(),
+                        }),
+                        { portalText: inspected.s3 ? `${inspected.s3.code} ${inspected.s3.message}` : "" }
+                      );
+                    }
+                    // A PDF saved as .jpg (the download names the file from the Content-Type, and a missing one means
+                    // .jpg) is a mismatch the portal can refuse: give the file the extension it really has.
+                    if (inspected.extension && path.extname(tempFilePath).toLowerCase() !== inspected.extension) {
+                      const renamed = tempFilePath.replace(/\.[^./\\]+$/, "") + inspected.extension;
+                      fs.renameSync(tempFilePath, renamed);
+                      console.log(`📝 Renamed the download to match what it is (${inspected.kind}): ${path.basename(renamed)}`);
+                      tempFilePath = renamed;
+                    }
                   }
                   const absoluteFilePath = path.resolve(tempFilePath);
                   console.log(`📁 Absolute file path: ${absoluteFilePath}`);
 
                   // === Upload to BOTH Identity Verification (file1) AND Address Verification (file2) ===
 
-                  // === UPLOAD TO IDENTITY VERIFICATION (file1) ===
-                  console.log("📤 === UPLOADING TO IDENTITY VERIFICATION (file1) ===");
+                  // What the page already shows BEFORE anything is uploaded (a permanent red hint, say) is not the
+                  // portal refusing the document.
+                  const kycBaseline = isKycSubmitWaitEnabled() ? (await readKycPage(driver)).errors : [];
+                  let kycSeenAfterUpload = ""; // what the page said while the documents went in (see the upload step)
 
-                  // Find Identity Verification upload div by looking for the label text
-                  let file1Div = null;
-                  try {
-                    // Method 1: Find by ngf-select containing 'file1'
-                    file1Div = await driver.findElement(By.css("div[ngf-select*=\"'file1'\"]"));
-                    console.log("✅ Found file1 div via ngf-select attribute");
-                  } catch (e) {
+                  if (isKycSubmitWaitEnabled()) {
+                    // Each document goes into the upload area whose handler is EXACTLY its slot's —
+                    //   Identity Verification  uploadFile($file,'file1', true, 'pan')
+                    //   Address Verification   uploadFile($file,'file2')
+                    // — and is waited for until the page has taken it, or has said why not (relianceKycUpload.js).
+                    // The old code tried the file inputs in page order, which put the two documents in with the
+                    // handlers swapped, and never looked at whether the page took them.
+                    const kycFile = describeUploadedFile({
+                      fileName: data.aadharCard.fileName,
+                      filePath: absoluteFilePath,
+                    });
+                    let kycSeen = ""; // a refusal toast met while a document went in (it is gone in ~5 s)
+                    for (const slot of ["identity", "address"]) {
+                      const slotLabel = SLOT_LABEL[slot];
+                      console.log(`📤 === UPLOADING TO ${slotLabel.toUpperCase()} ===`);
+                      const put = await uploadKycDocument(driver, slot, absoluteFilePath, {
+                        fileName: data.aadharCard.fileName,
+                        ignoreErrors: kycBaseline,
+                        seenText: kycSeen,
+                        onNewError: noteKycError,
+                        log: (line) => console.log(line),
+                        onProgress: ({ waitedMs, text }) =>
+                          console.log(
+                            `⏳ Still waiting for ${slotLabel} to take the document (${Math.round(waitedMs / 1000)} s)${text ? ` — page says: ${text}` : ""}`
+                          ),
+                      });
+                      if (put.seen) kycSeen = put.seen;
+                      if (put.state === "accepted" || put.state === "already") {
+                        console.log(
+                          put.state === "already"
+                            ? `✅ ${slotLabel} already holds a document`
+                            : `✅ ${slotLabel} document taken by the page (${put.waitedMs} ms, via ${put.via})`
+                        );
+                        continue;
+                      }
+                      console.log(`❌ ${slotLabel} upload did not go through (${put.state})${put.text ? ` — ${put.text}` : ""}`);
+                      await saveKycStatus(
+                        kycReasonText({ step: "upload", slot, state: put.state, text: put.text, waitedMs: put.waitedMs }),
+                        data,
+                        jobId
+                      );
+                      throw new PortalRejectedError(
+                        kycStuckMessage({
+                          step: "upload",
+                          slot,
+                          state: put.state,
+                          text: put.text,
+                          waitedMs: put.waitedMs,
+                          proposalNumber,
+                          file: kycFile,
+                          brief: isKycFallbackEnabled(),
+                        }),
+                        { stage: "kyc-upload", portalText: put.text }
+                      );
+                    }
+                    kycSeenAfterUpload = kycSeen;
+                  } else {
+                    // === UPLOAD TO IDENTITY VERIFICATION (file1) ===
+                    console.log("📤 === UPLOADING TO IDENTITY VERIFICATION (file1) ===");
+
+                    // Find Identity Verification upload div by looking for the label text
+                    let file1Div = null;
                     try {
-                      // Method 2: Find by ngf-drop containing 'file1'
-                      file1Div = await driver.findElement(By.css("div[ngf-drop*=\"'file1'\"]"));
-                      console.log("✅ Found file1 div via ngf-drop attribute");
-                    } catch (e2) {
+                      // Method 1: Find by ngf-select containing 'file1'
+                      file1Div = await driver.findElement(By.css("div[ngf-select*=\"'file1'\"]"));
+                      console.log("✅ Found file1 div via ngf-select attribute");
+                    } catch (e) {
                       try {
-                        // Method 3: Find by XPath - look for Identity Verification label and get the upload div
-                        file1Div = await driver.findElement(By.xpath(
-                          "//p[contains(text(),'Identity Verification')]/ancestor::div[contains(@class,'col-lg-6')]//div[contains(@class,'inner-upload')]"
-                        ));
-                        console.log("✅ Found file1 div via Identity Verification label");
-                      } catch (e3) {
-                        // Method 4: Get first inner-upload div
-                        const allDivs = await driver.findElements(By.css("div.inner-upload"));
-                        if (allDivs.length >= 1) {
-                          file1Div = allDivs[0];
-                          console.log("✅ Found file1 div (first inner-upload)");
+                        // Method 2: Find by ngf-drop containing 'file1'
+                        file1Div = await driver.findElement(By.css("div[ngf-drop*=\"'file1'\"]"));
+                        console.log("✅ Found file1 div via ngf-drop attribute");
+                      } catch (e2) {
+                        try {
+                          // Method 3: Find by XPath - look for Identity Verification label and get the upload div
+                          file1Div = await driver.findElement(By.xpath(
+                            "//p[contains(text(),'Identity Verification')]/ancestor::div[contains(@class,'col-lg-6')]//div[contains(@class,'inner-upload')]"
+                          ));
+                          console.log("✅ Found file1 div via Identity Verification label");
+                        } catch (e3) {
+                          // Method 4: Get first inner-upload div
+                          const allDivs = await driver.findElements(By.css("div.inner-upload"));
+                          if (allDivs.length >= 1) {
+                            file1Div = allDivs[0];
+                            console.log("✅ Found file1 div (first inner-upload)");
+                          }
                         }
                       }
                     }
-                  }
 
-                  if (file1Div) {
-                    // Scroll to file1 div
-                    await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", file1Div);
-                    await driver.sleep(500);
-
-                    // Click to trigger file input creation
-                    console.log("Clicking Identity Verification upload area...");
-                    await driver.executeScript("arguments[0].click();", file1Div);
-                    await driver.sleep(1500);
-
-                    // Find all file inputs on page
-                    let fileInputs = await driver.findElements(By.css("input[type='file']"));
-                    console.log(`Found ${fileInputs.length} file input(s) after clicking file1 div`);
-
-                    // If no inputs found, create one via JavaScript
-                    if (fileInputs.length === 0) {
-                      console.log("No file inputs found, trying to create one...");
-                      await driver.executeScript(`
-                        var input = document.createElement('input');
-                        input.type = 'file';
-                        input.id = 'tempFileInput1';
-                        input.style.position = 'absolute';
-                        input.style.top = '0';
-                        input.style.left = '0';
-                        input.style.zIndex = '99999';
-                        document.body.appendChild(input);
-                      `);
+                    if (file1Div) {
+                      // Scroll to file1 div
+                      await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", file1Div);
                       await driver.sleep(500);
-                      fileInputs = await driver.findElements(By.css("input[type='file']"));
-                    }
 
-                    let file1Uploaded = false;
+                      // Click to trigger file input creation
+                      console.log("Clicking Identity Verification upload area...");
+                      await driver.executeScript("arguments[0].click();", file1Div);
+                      await driver.sleep(1500);
 
-                    // Try each file input until one works
-                    for (let i = 0; i < fileInputs.length && !file1Uploaded; i++) {
-                      const fileInput = fileInputs[i];
-                      console.log(`Trying file input ${i}...`);
+                      // Find all file inputs on page
+                      let fileInputs = await driver.findElements(By.css("input[type='file']"));
+                      console.log(`Found ${fileInputs.length} file input(s) after clicking file1 div`);
 
-                      try {
-                        // Make input visible and interactable
+                      // If no inputs found, create one via JavaScript
+                      if (fileInputs.length === 0) {
+                        console.log("No file inputs found, trying to create one...");
                         await driver.executeScript(`
-                          var input = arguments[0];
-                          input.style.display = 'block';
-                          input.style.visibility = 'visible';
-                          input.style.opacity = '1';
+                          var input = document.createElement('input');
+                          input.type = 'file';
+                          input.id = 'tempFileInput1';
                           input.style.position = 'absolute';
                           input.style.top = '0';
                           input.style.left = '0';
-                          input.style.height = '50px';
-                          input.style.width = '200px';
                           input.style.zIndex = '99999';
-                        `, fileInput);
-                        await driver.sleep(300);
-
-                        // Try sendKeys
-                        await fileInput.sendKeys(absoluteFilePath);
-                        console.log(`✅ IDENTITY VERIFICATION (file1) uploaded via input[${i}]: ${data.aadharCard.fileName}`);
-                        file1Uploaded = true;
-
-                        // Dispatch change event to trigger Angular
-                        await driver.executeScript(`
-                          var event = new Event('change', { bubbles: true });
-                          arguments[0].dispatchEvent(event);
-                        `, fileInput);
-
-                      } catch (sendErr) {
-                        console.log(`Input[${i}] sendKeys failed: ${sendErr.message}`);
+                          document.body.appendChild(input);
+                        `);
+                        await driver.sleep(500);
+                        fileInputs = await driver.findElements(By.css("input[type='file']"));
                       }
-                    }
 
-                    if (!file1Uploaded) {
-                      console.log("⚠️  Could not upload to file1 via any input, trying Angular scope method...");
+                      let file1Uploaded = false;
 
-                      // Try Angular scope method as last resort
-                      try {
-                        const fileContent = fs.readFileSync(absoluteFilePath);
-                        const base64Content = fileContent.toString('base64');
-                        const mimeType = absoluteFilePath.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg';
+                      // Try each file input until one works
+                      for (let i = 0; i < fileInputs.length && !file1Uploaded; i++) {
+                        const fileInput = fileInputs[i];
+                        console.log(`Trying file input ${i}...`);
 
-                        await driver.executeScript(`
-                          var uploadDiv = arguments[0];
-                          var byteString = atob('${base64Content}');
-                          var ab = new ArrayBuffer(byteString.length);
-                          var ia = new Uint8Array(ab);
-                          for (var i = 0; i < byteString.length; i++) {
-                            ia[i] = byteString.charCodeAt(i);
-                          }
-                          var blob = new Blob([ab], {type: '${mimeType}'});
-                          var file = new File([blob], '${data.aadharCard.fileName}', {type: '${mimeType}', lastModified: Date.now()});
+                        try {
+                          // Make input visible and interactable
+                          await driver.executeScript(`
+                            var input = arguments[0];
+                            input.style.display = 'block';
+                            input.style.visibility = 'visible';
+                            input.style.opacity = '1';
+                            input.style.position = 'absolute';
+                            input.style.top = '0';
+                            input.style.left = '0';
+                            input.style.height = '50px';
+                            input.style.width = '200px';
+                            input.style.zIndex = '99999';
+                          `, fileInput);
+                          await driver.sleep(300);
+
+                          // Try sendKeys
+                          await fileInput.sendKeys(absoluteFilePath);
+                          console.log(`✅ IDENTITY VERIFICATION (file1) uploaded via input[${i}]: ${data.aadharCard.fileName}`);
+                          file1Uploaded = true;
+
+                          // Dispatch change event to trigger Angular
+                          await driver.executeScript(`
+                            var event = new Event('change', { bubbles: true });
+                            arguments[0].dispatchEvent(event);
+                          `, fileInput);
+
+                        } catch (sendErr) {
+                          console.log(`Input[${i}] sendKeys failed: ${sendErr.message}`);
+                        }
+                      }
+
+                      if (!file1Uploaded) {
+                        console.log("⚠️  Could not upload to file1 via any input, trying Angular scope method...");
+
+                        // Try Angular scope method as last resort
+                        try {
+                          const fileContent = fs.readFileSync(absoluteFilePath);
+                          const base64Content = fileContent.toString('base64');
+                          const mimeType = absoluteFilePath.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg';
+
+                          await driver.executeScript(`
+                            var uploadDiv = arguments[0];
+                            var byteString = atob('${base64Content}');
+                            var ab = new ArrayBuffer(byteString.length);
+                            var ia = new Uint8Array(ab);
+                            for (var i = 0; i < byteString.length; i++) {
+                              ia[i] = byteString.charCodeAt(i);
+                            }
+                            var blob = new Blob([ab], {type: '${mimeType}'});
+                            var file = new File([blob], '${data.aadharCard.fileName}', {type: '${mimeType}', lastModified: Date.now()});
                           
-                          if (window.angular) {
-                            var scope = angular.element(uploadDiv).scope();
-                            if (scope) {
-                              if (scope.uploadFile) {
-                                scope.uploadFile(file, 'file1', true, 'pan');
-                                scope.$apply();
-                                console.log('Called uploadFile for file1');
-                              } else {
-                                scope.file1 = file;
-                                scope.$apply();
-                                console.log('Set file1 on scope');
+                            if (window.angular) {
+                              var scope = angular.element(uploadDiv).scope();
+                              if (scope) {
+                                if (scope.uploadFile) {
+                                  scope.uploadFile(file, 'file1', true, 'pan');
+                                  scope.$apply();
+                                  console.log('Called uploadFile for file1');
+                                } else {
+                                  scope.file1 = file;
+                                  scope.$apply();
+                                  console.log('Set file1 on scope');
+                                }
                               }
                             }
-                          }
-                        `, file1Div);
-                        console.log("✅ file1 set via Angular scope method");
-                        file1Uploaded = true;
-                      } catch (angularErr) {
-                        console.log(`⚠️  Angular scope method failed: ${angularErr.message}`);
+                          `, file1Div);
+                          console.log("✅ file1 set via Angular scope method");
+                          file1Uploaded = true;
+                        } catch (angularErr) {
+                          console.log(`⚠️  Angular scope method failed: ${angularErr.message}`);
+                        }
                       }
+
+                      // Wait for Angular to process file1
+                      await driver.sleep(3000);
+                      console.log("✅ File1 upload attempt complete");
+                    } else {
+                      console.log("⚠️  Could not find Identity Verification upload div");
                     }
 
-                    // Wait for Angular to process file1
-                    await driver.sleep(3000);
-                    console.log("✅ File1 upload attempt complete");
-                  } else {
-                    console.log("⚠️  Could not find Identity Verification upload div");
-                  }
+                    // ========== 2 SECOND GAP BETWEEN UPLOADS ==========
+                    console.log("⏳ Waiting 2 seconds before uploading to Address Verification...");
+                    await driver.sleep(2000);
+                    // ==================================================
 
-                  // ========== 2 SECOND GAP BETWEEN UPLOADS ==========
-                  console.log("⏳ Waiting 2 seconds before uploading to Address Verification...");
-                  await driver.sleep(2000);
-                  // ==================================================
+                    // === UPLOAD TO ADDRESS VERIFICATION (file2) ===
+                    console.log("📤 === UPLOADING TO ADDRESS VERIFICATION (file2) ===");
 
-                  // === UPLOAD TO ADDRESS VERIFICATION (file2) ===
-                  console.log("📤 === UPLOADING TO ADDRESS VERIFICATION (file2) ===");
-
-                  // Find Address Verification upload div
-                  let file2Div = null;
-                  try {
-                    // Method 1: Find by ngf-select containing 'file2'
-                    file2Div = await driver.findElement(By.css("div[ngf-select*=\"'file2'\"]"));
-                    console.log("✅ Found file2 div via ngf-select attribute");
-                  } catch (e) {
+                    // Find Address Verification upload div
+                    let file2Div = null;
                     try {
-                      // Method 2: Find by ngf-drop containing 'file2'
-                      file2Div = await driver.findElement(By.css("div[ngf-drop*=\"'file2'\"]"));
-                      console.log("✅ Found file2 div via ngf-drop attribute");
-                    } catch (e2) {
+                      // Method 1: Find by ngf-select containing 'file2'
+                      file2Div = await driver.findElement(By.css("div[ngf-select*=\"'file2'\"]"));
+                      console.log("✅ Found file2 div via ngf-select attribute");
+                    } catch (e) {
                       try {
-                        // Method 3: Find by XPath - look for Address Verification label
-                        file2Div = await driver.findElement(By.xpath(
-                          "//p[contains(text(),'Address Verification')]/ancestor::div[contains(@class,'col-lg-6')]//div[contains(@class,'inner-upload')]"
-                        ));
-                        console.log("✅ Found file2 div via Address Verification label");
-                      } catch (e3) {
-                        // Method 4: Get remaining inner-upload divs
-                        const remainingDivs = await driver.findElements(By.css("div.inner-upload"));
-                        console.log(`Found ${remainingDivs.length} inner-upload divs remaining`);
-                        if (remainingDivs.length >= 1) {
-                          // If only 1 div, use it. If 2+, use the second one
-                          file2Div = remainingDivs.length >= 2 ? remainingDivs[1] : remainingDivs[0];
-                          console.log("✅ Found file2 div from remaining inner-upload divs");
+                        // Method 2: Find by ngf-drop containing 'file2'
+                        file2Div = await driver.findElement(By.css("div[ngf-drop*=\"'file2'\"]"));
+                        console.log("✅ Found file2 div via ngf-drop attribute");
+                      } catch (e2) {
+                        try {
+                          // Method 3: Find by XPath - look for Address Verification label
+                          file2Div = await driver.findElement(By.xpath(
+                            "//p[contains(text(),'Address Verification')]/ancestor::div[contains(@class,'col-lg-6')]//div[contains(@class,'inner-upload')]"
+                          ));
+                          console.log("✅ Found file2 div via Address Verification label");
+                        } catch (e3) {
+                          // Method 4: Get remaining inner-upload divs
+                          const remainingDivs = await driver.findElements(By.css("div.inner-upload"));
+                          console.log(`Found ${remainingDivs.length} inner-upload divs remaining`);
+                          if (remainingDivs.length >= 1) {
+                            // If only 1 div, use it. If 2+, use the second one
+                            file2Div = remainingDivs.length >= 2 ? remainingDivs[1] : remainingDivs[0];
+                            console.log("✅ Found file2 div from remaining inner-upload divs");
+                          }
                         }
                       }
                     }
-                  }
 
-                  if (file2Div) {
-                    // Scroll to file2 div
-                    await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", file2Div);
-                    await driver.sleep(500);
+                    if (file2Div) {
+                      // Scroll to file2 div
+                      await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", file2Div);
+                      await driver.sleep(500);
 
-                    // Click to trigger file input
-                    console.log("Clicking Address Verification upload area...");
-                    await driver.executeScript("arguments[0].click();", file2Div);
-                    await driver.sleep(1500);
+                      // Click to trigger file input
+                      console.log("Clicking Address Verification upload area...");
+                      await driver.executeScript("arguments[0].click();", file2Div);
+                      await driver.sleep(1500);
 
-                    // Find file inputs
-                    let fileInputs = await driver.findElements(By.css("input[type='file']"));
-                    console.log(`Found ${fileInputs.length} file input(s) after clicking file2 div`);
+                      // Find file inputs
+                      let fileInputs = await driver.findElements(By.css("input[type='file']"));
+                      console.log(`Found ${fileInputs.length} file input(s) after clicking file2 div`);
 
-                    let file2Uploaded = false;
+                      let file2Uploaded = false;
 
-                    // Try each file input (prefer the last one as it's likely the newest)
-                    for (let i = fileInputs.length - 1; i >= 0 && !file2Uploaded; i--) {
-                      const fileInput = fileInputs[i];
-                      console.log(`Trying file input ${i} for file2...`);
+                      // Try each file input (prefer the last one as it's likely the newest)
+                      for (let i = fileInputs.length - 1; i >= 0 && !file2Uploaded; i--) {
+                        const fileInput = fileInputs[i];
+                        console.log(`Trying file input ${i} for file2...`);
 
-                      try {
-                        await driver.executeScript(`
-                          var input = arguments[0];
-                          input.style.display = 'block';
-                          input.style.visibility = 'visible';
-                          input.style.opacity = '1';
-                          input.style.position = 'absolute';
-                          input.style.top = '100px';
-                          input.style.left = '0';
-                          input.style.height = '50px';
-                          input.style.width = '200px';
-                          input.style.zIndex = '99999';
-                        `, fileInput);
-                        await driver.sleep(300);
+                        try {
+                          await driver.executeScript(`
+                            var input = arguments[0];
+                            input.style.display = 'block';
+                            input.style.visibility = 'visible';
+                            input.style.opacity = '1';
+                            input.style.position = 'absolute';
+                            input.style.top = '100px';
+                            input.style.left = '0';
+                            input.style.height = '50px';
+                            input.style.width = '200px';
+                            input.style.zIndex = '99999';
+                          `, fileInput);
+                          await driver.sleep(300);
 
-                        await fileInput.sendKeys(absoluteFilePath);
-                        console.log(`✅ ADDRESS VERIFICATION (file2) uploaded via input[${i}]: ${data.aadharCard.fileName}`);
-                        file2Uploaded = true;
+                          await fileInput.sendKeys(absoluteFilePath);
+                          console.log(`✅ ADDRESS VERIFICATION (file2) uploaded via input[${i}]: ${data.aadharCard.fileName}`);
+                          file2Uploaded = true;
 
-                        // Dispatch change event
-                        await driver.executeScript(`
-                          var event = new Event('change', { bubbles: true });
-                          arguments[0].dispatchEvent(event);
-                        `, fileInput);
+                          // Dispatch change event
+                          await driver.executeScript(`
+                            var event = new Event('change', { bubbles: true });
+                            arguments[0].dispatchEvent(event);
+                          `, fileInput);
 
-                      } catch (sendErr) {
-                        console.log(`Input[${i}] sendKeys failed for file2: ${sendErr.message}`);
+                        } catch (sendErr) {
+                          console.log(`Input[${i}] sendKeys failed for file2: ${sendErr.message}`);
+                        }
                       }
-                    }
 
-                    if (!file2Uploaded) {
-                      console.log("⚠️  Could not upload to file2 via any input, trying Angular scope method...");
+                      if (!file2Uploaded) {
+                        console.log("⚠️  Could not upload to file2 via any input, trying Angular scope method...");
 
-                      try {
-                        const fileContent = fs.readFileSync(absoluteFilePath);
-                        const base64Content = fileContent.toString('base64');
-                        const mimeType = absoluteFilePath.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg';
+                        try {
+                          const fileContent = fs.readFileSync(absoluteFilePath);
+                          const base64Content = fileContent.toString('base64');
+                          const mimeType = absoluteFilePath.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg';
 
-                        await driver.executeScript(`
-                          var uploadDiv = arguments[0];
-                          var byteString = atob('${base64Content}');
-                          var ab = new ArrayBuffer(byteString.length);
-                          var ia = new Uint8Array(ab);
-                          for (var i = 0; i < byteString.length; i++) {
-                            ia[i] = byteString.charCodeAt(i);
-                          }
-                          var blob = new Blob([ab], {type: '${mimeType}'});
-                          var file = new File([blob], '${data.aadharCard.fileName}', {type: '${mimeType}', lastModified: Date.now()});
+                          await driver.executeScript(`
+                            var uploadDiv = arguments[0];
+                            var byteString = atob('${base64Content}');
+                            var ab = new ArrayBuffer(byteString.length);
+                            var ia = new Uint8Array(ab);
+                            for (var i = 0; i < byteString.length; i++) {
+                              ia[i] = byteString.charCodeAt(i);
+                            }
+                            var blob = new Blob([ab], {type: '${mimeType}'});
+                            var file = new File([blob], '${data.aadharCard.fileName}', {type: '${mimeType}', lastModified: Date.now()});
                           
-                          if (window.angular) {
-                            var scope = angular.element(uploadDiv).scope();
-                            if (scope) {
-                              if (scope.uploadFile) {
-                                scope.uploadFile(file, 'file2');
-                                scope.$apply();
-                              } else {
-                                scope.file2 = file;
-                                scope.$apply();
+                            if (window.angular) {
+                              var scope = angular.element(uploadDiv).scope();
+                              if (scope) {
+                                if (scope.uploadFile) {
+                                  scope.uploadFile(file, 'file2');
+                                  scope.$apply();
+                                } else {
+                                  scope.file2 = file;
+                                  scope.$apply();
+                                }
                               }
                             }
-                          }
-                        `, file2Div);
-                        console.log("✅ file2 set via Angular scope method");
-                        file2Uploaded = true;
-                      } catch (angularErr) {
-                        console.log(`⚠️  Angular scope method failed for file2: ${angularErr.message}`);
+                          `, file2Div);
+                          console.log("✅ file2 set via Angular scope method");
+                          file2Uploaded = true;
+                        } catch (angularErr) {
+                          console.log(`⚠️  Angular scope method failed for file2: ${angularErr.message}`);
+                        }
                       }
-                    }
 
-                    await driver.sleep(3000);
-                    console.log("✅ File2 upload attempt complete");
-                  } else {
-                    console.log("⚠️  Could not find Address Verification upload div");
+                      await driver.sleep(3000);
+                      console.log("✅ File2 upload attempt complete");
+                    } else {
+                      console.log("⚠️  Could not find Address Verification upload div");
+                    }
                   }
 
                   console.log("✅ Both document uploads attempted");
@@ -4011,11 +4415,54 @@ async function fillRelianceForm(
                     }
 
                     if (submitButton) {
-                      // Check if button is visible (ng-show condition)
-                      const isDisplayed = await submitButton.isDisplayed().catch(() => false);
-                      if (!isDisplayed) {
-                        console.log("⚠️  SUBMIT button exists but is not visible yet, waiting...");
-                        await driver.sleep(3000);
+                      if (isKycSubmitWaitEnabled()) {
+                        // Reliance builds the SUBMIT button only once it has accepted the uploaded document(s). Waiting
+                        // 3 s and pressing the hidden button with a JavaScript click (the old way) just gets "Please
+                        // upload valid OVD file only." Wait until the button is really on screen — or the portal says why not.
+                        console.log("⏳ Waiting for Reliance to accept the uploaded document(s) — SUBMIT button...");
+                        const ready = await waitForKycSubmitReady(driver, {
+                          ignoreErrors: kycBaseline,
+                          seenText: kycSeenAfterUpload,
+                          onNewError: noteKycError,
+                          onProgress: ({ waitedMs, text }) =>
+                            console.log(
+                              `⏳ Still waiting for the SUBMIT button (${Math.round(waitedMs / 1000)} s)${text ? ` — page says: ${text}` : ""}`
+                            ),
+                        });
+                        if (ready.state !== "ready") {
+                          console.log(
+                            `❌ SUBMIT never became available (${ready.state}, ${ready.waitedMs} ms): ${ready.text || "the portal showed no message"}`
+                          );
+                          await saveKycStatus(
+                            kycReasonText({ step: "submit", state: ready.state, text: ready.text, waitedMs: ready.waitedMs }),
+                            data,
+                            jobId
+                          );
+                          throw new PortalRejectedError(
+                            kycStuckMessage({
+                              step: "submit",
+                              state: ready.state,
+                              text: ready.text,
+                              waitedMs: ready.waitedMs,
+                              proposalNumber,
+                              file: describeUploadedFile({ fileName: data.aadharCard.fileName, filePath: absoluteFilePath }),
+                              brief: isKycFallbackEnabled(),
+                            }),
+                            { stage: "kyc-submit", portalText: ready.text }
+                          );
+                        }
+                        console.log(`✅ SUBMIT is available (${ready.waitedMs} ms)`);
+                        // Angular may have redrawn the button while the upload was processed, and the page carries several
+                        // buttons with this ng-click (one per tab / document type): use the live one that is on screen
+                        const liveSubmit = await findKycButton(driver, "submit");
+                        if (liveSubmit) submitButton = liveSubmit;
+                      } else {
+                        // Check if button is visible (ng-show condition)
+                        const isDisplayed = await submitButton.isDisplayed().catch(() => false);
+                        if (!isDisplayed) {
+                          console.log("⚠️  SUBMIT button exists but is not visible yet, waiting...");
+                          await driver.sleep(3000);
+                        }
                       }
 
                       try {
@@ -4037,43 +4484,84 @@ async function fillRelianceForm(
 
                       // Wait for API response
                       console.log("⏳ Waiting for API response after SUBMIT...");
-                      await driver.sleep(5000);
-
-                      // Check for success message or next step
-                      try {
-                        // Look for success indicators
-                        const successIndicators = await driver.findElements(
-                          By.xpath("//*[contains(text(), 'success') or contains(text(), 'Success') or contains(text(), 'uploaded') or contains(text(), 'Uploaded')]")
-                        );
-                        if (successIndicators.length > 0) {
-                          console.log("✅ Upload success indicator found!");
+                      if (isKycSubmitWaitEnabled()) {
+                        // Wait for the page that opens after a good SUBMIT — its PROCEED button ON SCREEN. Not a fixed
+                        // 15 s, and not "found in the page source": the button is there, hidden, even when Reliance
+                        // refused, and the old flow clicked it with a JavaScript click and went on as if KYC was done.
+                        const opened = await waitForKycProceed(driver, {
+                          ignoreErrors: kycBaseline,
+                          onNewError: noteKycError,
+                          onProgress: ({ waitedMs, text }) =>
+                            console.log(
+                              `⏳ Still waiting for the page after SUBMIT (${Math.round(waitedMs / 1000)} s)${text ? ` — page says: ${text}` : ""}`
+                            ),
+                        });
+                        if (opened.state !== "ready") {
+                          console.log(
+                            `❌ The page after SUBMIT never opened (${opened.state}, ${opened.waitedMs} ms): ${opened.text || "the portal showed no message"}`
+                          );
+                          await saveKycStatus(
+                            kycReasonText({ step: "proceed", state: opened.state, text: opened.text, waitedMs: opened.waitedMs }),
+                            data,
+                            jobId
+                          );
+                          throw new PortalRejectedError(
+                            kycStuckMessage({
+                              step: "proceed",
+                              state: opened.state,
+                              text: opened.text,
+                              waitedMs: opened.waitedMs,
+                              proposalNumber,
+                              file: describeUploadedFile({ fileName: data.aadharCard.fileName, filePath: absoluteFilePath }),
+                              brief: isKycFallbackEnabled(),
+                            }),
+                            { stage: "kyc-proceed", portalText: opened.text }
+                          );
                         }
+                        console.log(`✅ SUBMIT accepted — the next page is open (${opened.waitedMs} ms)`);
+                        kycAccepted = true; // the KYC is done: from here on nothing below is a KYC failure
+                        await saveKycStatus(null, data, jobId); // KYC is done: nothing for the View page to say
+                      } else {
+                        await driver.sleep(5000);
 
-                        // Also check for any error messages
-                        const errorIndicators = await driver.findElements(
-                          By.xpath("//*[contains(@class, 'error') or contains(@class, 'alert-danger')]")
-                        );
-                        if (errorIndicators.length > 0) {
-                          for (const errEl of errorIndicators) {
-                            const errText = await errEl.getText().catch(() => '');
-                            if (errText) {
-                              console.log(`⚠️  Error message found: ${errText}`);
+                        // Check for success message or next step
+                        try {
+                          // Look for success indicators
+                          const successIndicators = await driver.findElements(
+                            By.xpath("//*[contains(text(), 'success') or contains(text(), 'Success') or contains(text(), 'uploaded') or contains(text(), 'Uploaded')]")
+                          );
+                          if (successIndicators.length > 0) {
+                            console.log("✅ Upload success indicator found!");
+                          }
+
+                          // Also check for any error messages
+                          const errorIndicators = await driver.findElements(
+                            By.xpath("//*[contains(@class, 'error') or contains(@class, 'alert-danger')]")
+                          );
+                          if (errorIndicators.length > 0) {
+                            for (const errEl of errorIndicators) {
+                              const errText = await errEl.getText().catch(() => '');
+                              if (errText) {
+                                console.log(`⚠️  Error message found: ${errText}`);
+                              }
                             }
                           }
+                        } catch (checkErr) {
+                          // Ignore check errors
                         }
-                      } catch (checkErr) {
-                        // Ignore check errors
+
+                        console.log("✅ SUBMIT completed successfully");
+                        kycAccepted = true; // (switch-off path: SUBMIT was pressed and nothing was checked)
+
+                        // Wait for API response - increased wait time
+                        console.log("⏳ Waiting for API response after SUBMIT (10 seconds)...");
+                        await driver.sleep(10000);
                       }
-
-                      console.log("✅ SUBMIT completed successfully");
-
-                      // Wait for API response - increased wait time
-                      console.log("⏳ Waiting for API response after SUBMIT (10 seconds)...");
-                      await driver.sleep(10000);
 
                       // === STEP 4: Wait for and Click PROCEED button ===
                       console.log("Looking for PROCEED button...");
-                      let proceedButton = null;
+                      // (new flow: the PROCEED that is on screen — the page carries several with this ng-click)
+                      let proceedButton = isKycSubmitWaitEnabled() ? await findKycButton(driver, "proceed") : null;
                       let proceedAttempts = 0;
                       const maxProceedAttempts = 10;
 
@@ -4247,6 +4735,16 @@ async function fillRelianceForm(
 
                           console.log("✅ On Pending Quotes page");
 
+                          // Pending Quotes is where this proposal is listed and paid from: its address goes on the policy now
+                          // (the "Proposal Page" card of the View page) — before the steps below, any of which can still fail.
+                          let pendingQuotesPageUrl = null;
+                          if (isProcessLinksEnabled()) {
+                            const proposalPage = await saveCurrentPageLink(driver, "proposalLink", data, jobId, {
+                              reject: /\/(Login|Logout)\b/i,
+                            });
+                            pendingQuotesPageUrl = proposalPage.url;
+                          }
+
                           await driver.sleep(5000);
 
                           // === STEP 8: Find and click the proposal checkbox ===
@@ -4257,10 +4755,44 @@ async function fillRelianceForm(
                           console.log(`Searching for proposal: ${proposalNumber}`);
 
                           try {
+                            // A WALLET policy (CDT payment) is paid with real money: its checkbox is found by the exact proposal
+                            // number only — never "the first checkbox", never a longer number that merely contains this one.
+                            const walletStrict = isWalletCdtEnabled() && isWalletPayment(data.Paymentmethod);
+                            let walletSelectionVerified = false;
+
                             // Try to find checkbox by proposal number in onclick attribute
                             let proposalCheckbox = null;
 
-                            if (proposalNumber) {
+                            if (isQuotesPagingEnabled()) {
+                              // Every page of the list, the exact number — for a link policy as well as a wallet one. Not found
+                              // anywhere = an error: ticking "the first checkbox" would pay / send another customer's proposal.
+                              const search = proposalNumber
+                                ? await findProposalAcrossPages(driver, proposalNumber, { log: (line) => console.log(`[${jobId}] ↳ ${line}`) })
+                                : { found: false, reason: "the policy has no proposal number to look for", scanned: [] };
+                              if (!search.found) {
+                                throw new PaymentStepError(
+                                  `Proposal ${proposalNumber || "(no number on the policy)"} is not listed in Reliance's Pending Quotes (${describeScan(search)}), so the ${walletStrict ? "wallet payment was not started" : "payment link was not sent"}. Nothing was ticked, paid or sent.`,
+                                  { code: "PROPOSAL_NOT_LISTED" }
+                                );
+                              }
+                              proposalCheckbox = search.checkbox;
+                              console.log(
+                                `✅ Found proposal checkbox for: ${proposalNumber} (exact match, page ${search.page} of ${search.pages})`
+                              );
+                            } else if (walletStrict) {
+                              proposalCheckbox = proposalNumber
+                                ? await waitForProposalCheckbox(driver, proposalNumber, { findInPage: findProposalCheckboxInPage })
+                                : null;
+                              if (!proposalCheckbox) {
+                                throw new PaymentStepError(
+                                  `Proposal ${proposalNumber || "(no number on the policy)"} is not listed in Reliance's Pending Quotes, so the wallet payment was not started. Nothing was ticked or paid.`,
+                                  { code: "PROPOSAL_NOT_LISTED" }
+                                );
+                              }
+                              console.log(`✅ Found proposal checkbox for: ${proposalNumber} (exact match)`);
+                            }
+
+                            if (proposalNumber && !proposalCheckbox) {
                               try {
                                 proposalCheckbox = await driver.wait(
                                   until.elementLocated(By.xpath(`//input[@type='checkbox' and contains(@onclick, '${proposalNumber}')]`)),
@@ -4273,7 +4805,7 @@ async function fillRelianceForm(
                             }
 
                             // If not found by proposal number, try to find by ID pattern
-                            if (!proposalCheckbox) {
+                            if (!proposalCheckbox && !walletStrict) {
                               const checkboxes = await driver.findElements(
                                 By.xpath("//input[@type='checkbox' and starts-with(@id, 'chkR')]")
                               );
@@ -4294,6 +4826,18 @@ async function fillRelianceForm(
                               console.log("✅ Clicked proposal checkbox");
 
                               await driver.sleep(2000);
+
+                              if (walletStrict) {
+                                // exactly one proposal ticked, and it is this one — before Pay, before any amount
+                                const selection = await readSelection(driver, proposalNumber);
+                                if (!selection.onlyOurs) {
+                                  throw new PaymentStepError(
+                                    `Reliance's Pending Quotes does not have only proposal ${proposalNumber} ticked (ticked now ${selection.ticked.length}), so the wallet payment was not started. Nothing was paid.`,
+                                    { code: "WRONG_PROPOSAL" }
+                                  );
+                                }
+                                walletSelectionVerified = true;
+                              }
 
                               // === STEP 9: Check TP Declaration checkbox ===
                               console.log("Looking for TP Declaration checkbox...");
@@ -4332,6 +4876,15 @@ async function fillRelianceForm(
                                   console.log("✅ Clicked Pay button");
 
                                   await driver.sleep(3000);
+
+                                  // The page Pay opened — the "Make Payment Page" card of the View page. Saved before the payment
+                                  // link / wallet steps below (a wallet policy stops right after this, on that page).
+                                  if (isProcessLinksEnabled()) {
+                                    await saveCurrentPageLink(driver, "paymentLink", data, jobId, {
+                                      notSameAs: pendingQuotesPageUrl,
+                                      reject: /\/(Login|Logout)\b/i,
+                                    });
+                                  }
 
                                   // === Payment Link Flow (Conditional) ===
                                   console.log(`Debug Paymentmethod: '${data.Paymentmethod}'`);
@@ -4404,6 +4957,49 @@ async function fillRelianceForm(
 
                                     } catch (linkFlowErr) {
                                       console.log("❌ Error in Payment Link flow: " + linkFlowErr.message);
+                                    }
+                                  } else if (isWalletCdtEnabled() && isWalletPayment(data.Paymentmethod)) {
+                                    // WALLET with the CDT option (relianceWalletCdt.js): is the option there, choose it, enter
+                                    // the payable amount, Add — then WAIT. Ends in an error (with a screenshot) or a stop.
+                                    // RELIANCE_WALLET_CDT_ENABLED=false brings back the plain hold below.
+                                    console.log(`👉 Payment Method is '${data.Paymentmethod || 'wallet'}' — paying with the CDT option.`);
+                                    const walletArgs = {
+                                      driver,
+                                      proposalNumber,
+                                      selectionVerified: walletSelectionVerified,
+                                      checkpoint: (name) => Breaker.checkpoint(`Reliance/${name}`),
+                                      log: (line) => console.log(`[${jobId}] ↳ ${line}`),
+                                      stop: (message, details) => stopper(message, details),
+                                      shot: async (label) => {
+                                        const base64 = await driver.takeScreenshot();
+                                        const key = generateScreenshotKey(
+                                          data._jobIdentifier || `job_${Date.now()}`,
+                                          data._attemptNumber || 1,
+                                          `wallet/${label}`
+                                        );
+                                        const url = await uploadScreenshotToS3(base64, key);
+                                        return { url, key };
+                                      },
+                                    };
+                                    if (isWalletSubmitEnabled()) {
+                                      // After Add: Submit Details (once, behind a note on the policy), the policy number, the policy PDF —
+                                      // saved on the policy. Returns for an issued policy whose PDF is stored (the run goes on to the
+                                      // Brisk / merge steps below and the policy completes); every other end is an error or a stop.
+                                      // RELIANCE_WALLET_SUBMIT_ENABLED=false = the wait after Add, exactly as before.
+                                      const issued = await payWithCdtAndIssue({
+                                        ...walletArgs,
+                                        data,
+                                        jobId,
+                                        downloadDir:
+                                          jobBrowser?.profileInfo?.downloadDir ||
+                                          path.join(ROOT_DIR, "reliance_pdf", `job_${jobId}`),
+                                        // the same bucket and client the merged PDF goes to (uploadPolicyPdfToS3)
+                                        uploadPolicyPdf: uploadPolicyPdfToS3,
+                                      });
+                                      if (issued.warning && !documentUploadError) documentUploadError = issued.warning;
+      policyPdfOnPolicy = true; // issued, and its PDF is stored (an error was thrown otherwise)
+                                    } else {
+                                      await payWithCdtOrStop(walletArgs);
                                     }
                                   } else if (shouldHoldForWallet(data.Paymentmethod)) {
                                     // WALLET: hold right here, on the page Pay opened, browser left open.
@@ -4506,12 +5102,12 @@ async function fillRelianceForm(
 
 
                                 } catch (payBtnErr) {
-                                  if (isAutomationStop(payBtnErr)) throw payBtnErr;
+                                  if (isAutomationStop(payBtnErr) || payBtnErr.portalRejected) throw payBtnErr;
                                   console.log(`⚠️  Pay button error: ${payBtnErr.message}`);
                                 }
 
                               } catch (tpErr) {
-                                if (isAutomationStop(tpErr)) throw tpErr;
+                                if (isAutomationStop(tpErr) || tpErr.portalRejected) throw tpErr;
                                 console.log(`⚠️  TP Declaration error: ${tpErr.message}`);
                               }
                             } else {
@@ -4519,12 +5115,12 @@ async function fillRelianceForm(
                             }
 
                           } catch (proposalErr) {
-                            if (isAutomationStop(proposalErr)) throw proposalErr;
+                            if (isAutomationStop(proposalErr) || proposalErr.portalRejected) throw proposalErr;
                             console.log(`⚠️  Proposal checkbox error: ${proposalErr.message}`);
                           }
 
                         } catch (paymentMenuErr) {
-                          if (isAutomationStop(paymentMenuErr)) throw paymentMenuErr;
+                          if (isAutomationStop(paymentMenuErr) || paymentMenuErr.portalRejected) throw paymentMenuErr;
                           console.log(`⚠️  Payment menu error: ${paymentMenuErr.message}`);
                         }
 
@@ -4545,33 +5141,50 @@ async function fillRelianceForm(
                       await driver.sleep(2000);
                     } else {
                       console.log("❌ SUBMIT button could not be located");
+                      kycProblem = "the SUBMIT button could not be located on the KYC page";
                     }
 
                   } catch (submitErr) {
-                    if (isAutomationStop(submitErr)) throw submitErr;
+                    if (isAutomationStop(submitErr) || submitErr.portalRejected) throw submitErr;
                     console.log(`⚠️  Submit button error: ${submitErr.message}`);
+                    kycProblem = `the SUBMIT step failed (${submitErr.message})`;
                   }
 
                 } catch (uploadErr) {
-                  if (isAutomationStop(uploadErr)) throw uploadErr;
+                  if (isAutomationStop(uploadErr) || uploadErr.portalRejected) throw uploadErr;
                   console.log(`⚠️ Upload error: ${uploadErr.message}`);
+                  kycProblem = `the document upload failed (${uploadErr.message})`;
                 }
               } else {
                 console.log("❌ UPLOAD DOCUMENT div not found");
+                kycProblem = "the UPLOAD DOCUMENT option was not found on the KYC page";
               }
             } else {
               console.log("⚠️ No Aadhar card found in database");
+              if (isKycSubmitWaitEnabled()) await saveKycStatus(KYC_NO_DOCUMENT, data, jobId);
+              kycProblem = KYC_NO_DOCUMENT;
             }
           } catch (err) {
-            if (isAutomationStop(err)) throw err;
+            // a refusal by the portal ends the policy here (see relianceKycSubmit.js); everything else in this
+            // step stays a non-fatal warning, as before
+            if (isAutomationStop(err) || err.portalRejected) throw err;
             console.log("Error uploading document:", err.message);
             documentUploadError = `Aadhaar document upload to portal failed: ${err.message}`;
+            kycProblem = err.message;
           }
 
           if (documentUploadError) {
             console.log("⚠️ New flow steps completed WITH WARNINGS (document upload failed)");
           } else {
             console.log("✅ All new flow steps completed successfully!");
+          }
+
+          // The KYC step is over and Reliance never accepted a document, yet nothing was thrown for it (a warning that was
+          // only logged, no Aadhaar on the policy ...). That is a KYC that did not work: the catch below hands it to
+          // relianceKycFallback.js — screenshot, payment page, links — instead of the run going on to buy the Brisk PA.
+          if (isKycFallbackEnabled() && kycStarted && !kycAccepted) {
+            const why = kycProblem || "Reliance did not accept a document";
+            throw new KycIncompleteError(`KYC did not complete - ${why}`, { reason: why });
           }
 
 
@@ -4816,26 +5429,46 @@ async function fillRelianceForm(
           if (isAutomationStop(err)) throw err;
           console.log("Error handling post-calculation elements:", err.message);
 
-          // Mark post-calculation as failed
-          postCalculationFailed = true;
-          postCalculationError = err.message;
+          if (isKycFallbackEnabled() && kycStarted && !kycAccepted) {
+            // The KYC did not work (this error, or the step that ended without a document): the screenshot of the error,
+            // the payment page, the links on the policy — then the run ends as a failed KYC. Nothing is paid or sent.
+            const rescued = await rescueAfterKycFailure({
+              driver,
+              data,
+              jobId,
+              error: err,
+              proposalNumber: data.proposalNumber || data.proposal_number,
+              proposalPageUrl: kycProposalPageUrl,
+              kycWindowHandle,
+              shots: kycShots,
+              log: (line) => console.log(line),
+            });
+            postCalculationFailed = true;
+            postCalculationError = rescued.message;
+            thisScreenshotUrl = rescued.screenshotUrl;
+            thisScreenshotKey = rescued.screenshotKey;
+          } else {
+            // Mark post-calculation as failed
+            postCalculationFailed = true;
+            postCalculationError = err.message;
 
-          // Capture error screenshot using centralized handler
-          const errorInfo = await captureErrorScreenshot(
-            driver,
-            err,
-            data,
-            "post-calculation-error"
-          );
+            // Capture error screenshot using centralized handler
+            const errorInfo = await captureErrorScreenshot(
+              driver,
+              err,
+              data,
+              "post-calculation-error"
+            );
 
-          // Store onPageError if found
-          if (errorInfo.onPageError) {
-            postCalculationError = errorInfo.onPageError;
+            // Store onPageError if found (a payment-step failure keeps its own, exact sentence)
+            if (errorInfo.onPageError && !err.keepMessage) {
+              postCalculationError = errorInfo.onPageError;
+            }
+
+            // Store screenshot details for the caller
+            thisScreenshotUrl = errorInfo.screenshotUrl;
+            thisScreenshotKey = errorInfo.screenshotKey;
           }
-
-          // Store screenshot details for the caller
-          thisScreenshotUrl = errorInfo.screenshotUrl;
-          thisScreenshotKey = errorInfo.screenshotKey;
         }
 
         console.log("All vehicle details filled successfully!");
@@ -4871,6 +5504,7 @@ async function fillRelianceForm(
       await captureErrorScreenshot(driver, err, data, "modal-error");
       throw err;
     }
+    } // end of: if (!issuedRecovery) — the form
 
     await driver.sleep(2000);
 
@@ -4944,7 +5578,10 @@ async function fillRelianceForm(
       // certificate (and therefore the merge) is skipped.
       try {
         reliancePdfPath = findReliancePdf();
-        if (reliancePdfPath) {
+        if (policyPdfOnPolicy) {
+          // nothing to merge with, and the PDF is on the policy already — no call to the merge service, the run completes
+          console.log(`[${jobId}] ✅ The policy PDF is already stored on the policy — nothing to merge, completing.`);
+        } else if (reliancePdfPath) {
           console.log("🔄 Uploading Reliance policy PDF (no merge needed)...");
           mergedPdfInfo = await mergePDFsAndUpload(reliancePdfPath, null, data);
           console.log("✅ Reliance PDF uploaded:", mergedPdfInfo);
@@ -5077,6 +5714,11 @@ async function fillRelianceForm(
       console.log(`[${jobId}] ⏸️  ${e.message}`);
       const stopped = stoppedResult(e);
       stopped.pageUrl = driver ? await driver.getCurrentUrl().catch(() => null) : null;
+      // a stop that took a picture of where it stopped (the CDT payment after Add) hands it to the error log
+      if (e.details && e.details.screenshotUrl) {
+        stopped.screenshotUrl = e.details.screenshotUrl;
+        stopped.screenshotKey = e.details.screenshotKey || null;
+      }
       return stopped;
     }
 

@@ -33,12 +33,44 @@ function isWalletPayment(paymentMethod) {
   return String(paymentMethod == null ? "" : paymentMethod).trim().toLowerCase() !== "link";
 }
 
+/**
+ * RELIANCE_WALLET_CDT_ENABLED — ON unless explicitly false / 0 / no / off. A wallet policy no longer just holds on the
+ * payment page: it checks the login has the CDT option, chooses it, enters the payable amount and presses Add, then waits
+ * (relianceWalletCdt.js). Off = the hold above, exactly as before. Read at call time.
+ */
+function isWalletCdtEnabled() {
+  return !isOff(process.env.RELIANCE_WALLET_CDT_ENABLED);
+}
+
+/**
+ * RELIANCE_WALLET_SUBMIT_ENABLED — ON unless explicitly false / 0 / no / off. After the CDT row is added the run goes on:
+ * Submit Details, the policy number, the policy PDF — saved on the policy — and the policy is completed
+ * (relianceWalletIssue.js). Off = the wait after Add exactly as before (the run stops, nothing is submitted). Only
+ * meaningful together with isWalletCdtEnabled(). Read at call time.
+ */
+function isWalletSubmitEnabled() {
+  return !isOff(process.env.RELIANCE_WALLET_SUBMIT_ENABLED);
+}
+
+/**
+ * RELIANCE_WALLET_RECOVER_ENABLED — ON unless explicitly false / 0 / no / off. A re-run of a policy whose note says
+ * `issued` (Submit Details was pressed, Reliance issued the policy) no longer refuses: it logs in, fetches the PDF from
+ * View Policy by the policy number, stores it and completes — nothing is paid again (relianceWalletIssue.js). Off = that
+ * policy is refused like every other blocking note. Read at call time.
+ */
+function isWalletRecoverEnabled() {
+  return !isOff(process.env.RELIANCE_WALLET_RECOVER_ENABLED);
+}
+
 /** Should this policy stop on the payment page? (switch on AND paid from the wallet) */
 function shouldHoldForWallet(paymentMethod) {
   return isRelianceWalletHoldEnabled() && isWalletPayment(paymentMethod);
 }
 
 module.exports = {
+  isWalletCdtEnabled,
+  isWalletSubmitEnabled,
+  isWalletRecoverEnabled,
   isRelianceWalletHoldEnabled,
   isWalletPayment,
   shouldHoldForWallet,

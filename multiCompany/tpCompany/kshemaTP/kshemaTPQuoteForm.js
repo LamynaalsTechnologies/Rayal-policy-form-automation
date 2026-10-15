@@ -10,6 +10,9 @@
  *   [TP] 4  no IDV, no OD discount, no add-ons / Nil Depreciation (all own-damage things).
  *   [TP] 5  a TP quote may have no add-ons page: the next screen can be the proposal page. UNVERIFIED on the portal.
  *   [TP] 8  Breaker checkpoint "KSHEMA TP/product".
+ *   [TP] 9  the nominee entry follows the SAME rule as the PA checkbox (isCompanyPaCover): the original tested
+ *           "PA on and not Brisk" there and a whitelist for the checkbox, so an insurer name they did not both know
+ *           left PA unchecked but still added a nominee. Only the nominee test changed.
  */
 require("../../../breaker"); // [TP] 8 defines the global `Breaker`
 const { stopBeforeProduct } = require("./stopBeforeProduct"); // [TP] 3
@@ -675,6 +678,13 @@ async function fillVehicleDetails(driver, data, capture = null) {
   return result;
 }
 
+// [TP] 9: "PA Cover is bought from KSHEMA" — the one rule the checkbox, the year and the nominee all read.
+const isCompanyPaCover = (data) => { // [TP] 9
+  const on = String(data.paCover).toLowerCase() === "true" || data.paCover === true; // [TP] 9
+  const company = String(data.paCoverCompany || "").toLowerCase(); // [TP] 9
+  return on && (company === "" || company === "company" || company === "kshema" || company === "kshema general insurance"); // [TP] 9
+}; // [TP] 9
+
 const PA_COVER_FIELDS = [
   {
     key: "paCover",
@@ -1235,9 +1245,7 @@ async function fillNomineeDetails(driver, data, capture = null) {
   }
 
   // Determine if we need to add Nominee
-  const paCoverOn = String(data.paCover).toLowerCase() === "true" || data.paCover === true;
-  const isBrisk = String(data.paCoverCompany || "").toLowerCase() === "brisk";
-  const needsNominee = paCoverOn && !isBrisk;
+  const needsNominee = isCompanyPaCover(data); // [TP] 9 the same rule as the PA checkbox
 
   if (needsNominee) {
     log("📝 PA Cover is ON (Kshema) — clicking Add Entry for nominee details...");
@@ -2050,6 +2058,7 @@ module.exports = {
   CUSTOMER_FIELDS,
   VEHICLE_FIELDS,
   PA_COVER_FIELDS,
+  isCompanyPaCover, // [TP] 9
   PREMIUM_FIELDS,
   ADDON_FIELDS,
 };

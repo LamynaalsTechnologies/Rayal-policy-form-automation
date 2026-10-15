@@ -126,6 +126,10 @@ multiCompany/
     adapters/kendoAdapter.js      Kendo autocomplete
     reliance/vehicleIdentityFields.js   make & model fields (OD and TP share them; unused while Reliance OD is login-only)
     reliance/fullCompanyLogin.js        the Reliance login: a COPY of the full-company one (OD and TP share it)
+    reliance/relianceMultiForm.js       DUPLICATE of fullPolicycompany/relianceForm.js + tagged [MC] changes — Reliance OD AND TP, see §15
+    reliance/relianceMultiFormSpec.js   the [MC] changes as data; regenerates / checks the duplicate (--write)
+    reliance/multiConfig.js             RELIANCE_MULTI_FORM_ENABLED, RELIANCE_OD_PRODUCT, RELIANCE_TP_PRODUCT
+    reliance/stopBeforeProduct.js       the stop taken while the part's product text is not set (lists the options)
     errors.js                     MultiCompanyError(code, message, opts) + failureResult()
     loader.js                     waitForLoader(driver, company) — one loading wait, [E302] on timeout
     elements.js                   firstVisible, clickWithFallback, typeWithReadback
@@ -338,17 +342,18 @@ feature gate and the `NATIONAL_TP_FORM_ENABLED` switch (on unless set to false),
   `TpPlanError` returned as a non-retryable failure (stage `tp-plan`, code `E306`), and three `Breaker.checkpoint`s
   (`National TP/plan`, `National TP/quote`, `National TP/payment`). `test/nationalTP.test.js` fails if anything else differs, so a
   portal fix made in `national.js` has to be ported into the copy — or delete that test if the two should part ways;
-- *the portal's Compulsory PA for Owner Driver* (`tpPa.js` `portalPaTerm`, `[TP] 8`) is the policy's year — 1 or 5, `paCoverYears` — whatever
-  the PA Cover box says; the one exception is PA Cover bought from **Brisk** (`settings.PACompany`), which keeps the portal on **No** so the
-  customer is not covered and charged twice. Before, the year was used only when PA Cover = National, and a policy with PA Cover off and
-  "1 Year" in the TP panel went to the portal as "No";
+- *the portal's Compulsory PA for Owner Driver* (`tpPa.js` `portalPaTerm`, `[TP] 8`) is **No** when PA Cover is off, and **No** when it is
+  bought from **Brisk** (`settings.PACompany`; Brisk's certificate is the cover, so the customer is not covered and charged twice); it is
+  the policy's year — 1 or 5, `paCoverYears` — **only when PA Cover is ticked and bought from National**. (Changed 2026-10-14: a saved
+  year used to go to the portal even with PA Cover off, so the quote carried PA the policy's premium did not.) "PA Cover on" is the
+  part's own `paCover`, which `lib/partRunner.js buildPartFormData` sets only for the part that `carriesPa`;
 - *left exactly as the full flow:* the model-not-found tick, the PA radio / "No of Years" mechanics (only which term they get changed),
   nominee, financier, Vahan, the payment link. TPPD Restrict is not applied on the portal (neither is it in the full flow);
 - *prepared before the browser opens* (`prepareNationalTp`, what `server.js dispatchBundled` does for bundled National only): the
   saved default nominee fills what the policy left blank and `[E101]` when there is none at all (National demands one on every quote);
-  the PA term must be exactly 1 or 5 unless PA Cover is Brisk's (`[E101]`) — the original silently fell back to "1 Year". The Online
-  Policy form asks that term once for every National TP policy ("No of Year *", no default): in the TP panel while PA Cover is not
-  ticked, inside PA Cover Details (the field that was always there) once it is;
+  the PA term must be exactly 1 or 5 when PA Cover is bought from National (`[E101]`) — the original silently fell back to "1 Year". The
+  Online Policy form asks that term ("No of Year *", no default) **only when PA Cover is ticked and National is the PA company**, in PA
+  Cover Details (the field that was always there); with PA Cover off or from Brisk nothing is asked;
 - *behaviour you will notice against the shared loop:* a wrong password is **retried** (the full-company flow's behaviour) instead
   of ending as a non-retried `[E203]`.
 
@@ -465,17 +470,19 @@ The CLI sets `MULTI_COMPANY_AUTOMATION_ENABLED=true` for its own process only (i
 
 ## 10. Not built yet
 
-- **Form filling** for every handler except National TP and KSHEMA TP (next bullets): Reliance TP, National OD and KSHEMA OD log in and
-  then stop with "form not built yet". Reliance OD also opens Motors → Two Wheeler (`odCompany/relianceOD/motorsMenu.js`, copied from
-  `relianceForm.js` STEP 2–3) and stops there; choosing the product in the dropdown is the next step. (Reliance logs in
-  through the copy of the full-company login.) A multi-company policy therefore shows its
-  `od` / `tp` parts as "not automated yet" (`failed_login_form`, `stopped`) for now — the job's per-part status and the
-  retry rules are in place, the portal handlers are not.
+- **Form filling** for National OD and KSHEMA OD: they log in and then stop with "form not built yet". National TP, KSHEMA TP and
+  **Reliance OD / TP** have a form (next bullets, §15). A multi-company policy with a National or KSHEMA OD shows that part as
+  "not automated yet" (`failed_login_form`, `stopped`) — the job's per-part status and the retry rules are in place, that portal
+  handler is not.
+- **Reliance OD / TP** are built (`common/reliance/relianceMultiForm.js`, §15) but **start held at the Sub Product dropdown**: the
+  OD-only / TP-only product text is not known, so until `RELIANCE_OD_PRODUCT` / `RELIANCE_TP_PRODUCT` is set a run lists the
+  portal's products and stops. Everything after the product is the full-company Reliance flow, unchanged — what an OD-only /
+  TP-only portal does differently (IDV, a previous-policy step, a renewal) is found one stop at a time.
 - **National TP** is built (`tpCompany/nationalTP/`, §5) and **on by default**: it selects "5 Year Long Term Liability Only" and goes on to
   buy a third-party-only policy and send the payment link. `NATIONAL_TP_FORM_ENABLED=false` holds it at "Your Plan" (the plan list in the message).
   Not proven against the live portal yet: how the TP plan page differs (a field that appears or disappears), whether the portal
   asks the Manufacturer's Selling Price in the model-not-found mode without an IDV. Use the Breaker checkpoints for the first real run. While Reliance OD is
-  still login-only a two-company policy buys only its TP half.
+  held at its product (§15) a two-company policy buys only its TP half.
 - **KSHEMA TP** is built (`tpCompany/kshemaTP/`, §13) but **starts held at the Product Type**: the liability-only option's text is
   not known, so until `KSHEMA_TP_PRODUCT_TYPE` is set a run lists the portal's options and stops. What the TP quote page hides
   (IDV, the add-ons page) is learnt from the Breaker runs (`KSHEMA TP/product`, `/quote`, `/payment`) — nothing here is proven on
@@ -483,7 +490,7 @@ The CLI sets `MULTI_COMPANY_AUTOMATION_ENABLED=true` for its own process only (i
 - **TP → OD hand-off** (the TP policy's number and dates reaching the OD form) — **not built**, see §12.2. Ordering is (§4.0); the data
   is not passed yet, and National's flow reads no number or date from the portal at all.
 - **Multi-company Brisk PA waits for the OD part** to succeed (same as the bundled flows, which buy Brisk only after the
-  portal part). Until the OD handler is built, that PA stays "waiting for OD".
+  portal part). Until the OD handler can finish (Reliance OD is held at its product, §15; National OD and KSHEMA OD are login-only), that PA stays "waiting for OD".
 - **Single-company policies** (OD insurer = TP insurer) are one `motor` part and go through the **live bundled flows**,
   which buy for real. With `POLICY_JOB_PARTS_ENABLED` on they no longer fan out to login-only stubs.
 - The live bundled flows (`relianceForm.js`, `national.js`, `kshemaForm.js`) still use their own login. Moving them
@@ -582,8 +589,8 @@ exist yet at that moment. The OD therefore starts as soon as the link is out —
   `[TP]` changes listed in its header: **1** require depth · **2** failure screenshots under `screenshots/multiCompany/` · **3** the plan
   "5 Year Long Term Liability Only" (exact match, read back, never retried when missing) · **4** no IDV, no Manufacturer's Selling
   Price, no discount % · **5** plan re-checked before the quote + Breaker checkpoints `National TP/plan`, `/quote`, `/payment` ·
-  **6** no inline Brisk certificate · **7** a plan error is a non-retryable failure · **8** the portal's Compulsory PA is the policy's
-  year (1 or 5), "No" only when PA Cover is bought from Brisk. `tpPlan.js` (plan select, reads `textContent`, waits for the list),
+  **6** no inline Brisk certificate · **7** a plan error is a non-retryable failure · **8** the portal's Compulsory PA is "No" when PA Cover is
+  off or bought from Brisk, and the policy's year (1 or 5) only when it is bought from National. `tpPlan.js` (plan select, reads `textContent`, waits for the list),
   `tpPa.js` (`portalPaTerm`), `tpConfig.js` (the switch), `stopBeforePlan.js` (the stop while the switch is `false`),
   `nationalTP.js` (feature gate, switch, `prepareNationalTp`: nominee fallback, `[E101]` for an unusable PA term or no nominee).
 - `lib/jobSequence.js` + `server.js processRelianceQueue` — an OD job (old two-job shape) is held until the TP job of the same policy
@@ -597,8 +604,9 @@ exist yet at that moment. The OD therefore starts as soon as the link is out —
   TP is refused (a missing one keeps the model default 1). Tests: `test/jobParts.test.js`, `test/policySettings.nationalTpYears.test.js`.
 
 **Frontend (`OnlinePolicy/`)**
-- `BasicPolicyDetailsStep.js` — **one** "No of Year *" field for a National TP: in the TP panel while PA Cover is not ticked, inside PA
-  Cover Details (the field that was always there) once it is; no default, must be picked. `validationSchemas.js` (`paCoverYears`),
+- `BasicPolicyDetailsStep.js` — **one** "No of Year *" field for a National TP, inside PA Cover Details (the field that was always
+  there) and only when PA Cover is ticked and National is the PA company; no default, must be picked. (It used to be asked in the TP
+  panel on every National TP policy; removed 2026-10-14 — PA off is "No" on the portal.) `validationSchemas.js` (`paCoverYears`),
   `constants/initialValues.js` (`_paYearsChosen`, UI-only), `OnlinePolicy.js` (a saved policy counts as chosen), `utils/partChanges.js`
   (a year edit flags a National TP part), `utils/policyParts.js` + `AutomationStatusCard.js` ("Waiting for TP to finish", never "Blocked").
 
@@ -615,9 +623,8 @@ exist yet at that moment. The OD therefore starts as soon as the link is out —
 ### 12.6 Behaviour worth knowing
 
 - **The payment link goes to the customer.** A National TP runs to "Send Payment Link" unless the Breaker or the switch holds it.
-- **PA:** the portal's Compulsory PA = the policy's year. PA Cover with Brisk keeps it on "No" (Brisk's certificate is the cover).
-  With PA Cover off and a year picked, the portal quote includes PA but the policy's premium does not — tick PA Cover → National to
-  put the amount in.
+- **PA:** the portal's Compulsory PA is "No" with PA Cover off or from Brisk (Brisk's certificate is the cover), and the policy's year
+  (1 or 5) only with PA Cover bought from National — so the portal quote and the policy's premium agree.
 - **A TP that stops never lets its OD run** (switch `false`, or a TP handler that is still login-only).
 - **Operator messages** go through `beautifyError`, which keeps only the text after the last colon: one colon, no driver text (§7).
 
@@ -666,3 +673,213 @@ the original fails the test until it is ported.
 3. A KSHEMA TP's **PA**: a portal part has PA only when it `carriesPa`; the PA year handling is the full-company one, untouched.
 4. Same open decisions as §12.7 (when the OD starts: link sent vs policy issued; `completed_with_errors` releasing the OD).
 5. Frontend/backend: nothing changed. Possible follow-ups: `partChanges.js` `isNationalPart` nominee group for a KSHEMA TP, and whether a KSHEMA TP should force a "No of Year" pick as National's does.
+
+## 14. OD only / TP only from one insurer, and PA Company / Brisk on a TP-only policy
+
+A policy can now be sold as **only OD** or **only TP** by ONE insurer (backend `POLICY_COVER_CHOICE_ENABLED`, backend README §8).
+For the automation that is simply a job with one portal part — `od` or `tp` — and no dependency:
+
+| What | How it runs |
+|---|---|
+| The job | one `tp` (or `od`) portal part at the policy's insurer; `routingConflict` already allowed a lone portal part. A job whose `formData.coverage` is `od`/`tp` **refuses a bundled `motor` part** (it would buy the whole comprehensive policy) — new in `lib/partRunner.js`. |
+| Handlers | National TP, KSHEMA TP and Reliance OD / TP run for real (Reliance's starts held at the product, §15). National OD and KSHEMA OD are login-only stubs: that part stops "not automated yet" (`failed_login_form`, stopped, not retried). |
+| PA — Company | the part `carriesPa` and PA is bought with it: National gets the year (1/5), KSHEMA ticks PA, picks the year and adds the nominee. |
+| PA — Brisk | the part does not carry PA; Brisk is its own `pa` part with `dependsOn` = that part (waits for it, never runs if it failed). National's portal stays "No"; KSHEMA's PA is off with the reason. |
+| PA — off | National: the year as picked; KSHEMA: unchecked + reason, no nominee. |
+
+`test/standaloneCover.test.js` walks the whole chain for National and KSHEMA × {off, Company, Brisk}: backend part shape →
+`buildPartFormData` → the handler's own PA rules. **One change in the KSHEMA TP copy** (`[TP] 9`): the nominee entry now uses the
+same `isCompanyPaCover` rule as the PA checkbox (the original tested "PA on and not Brisk" there, a whitelist for the checkbox, so
+an insurer name only one of them knew left PA unchecked but still added a nominee). The full-company original is untouched.
+
+**Not changed, flagged.** KSHEMA's `paCoverYears` is fuzzy-matched against the portal's text without a 1–5 check and defaults to
+"1" when missing (the form's default is 1 too). National's `settings.PACompany` is what turns Brisk's PA into "No": a job with
+no `settings` would send the year (every current job carries it).
+
+## 15. Reliance OD and TP — the duplicate of the full-company Reliance flow
+
+Same idea as National TP (§12) and KSHEMA TP (§13), with one difference: Reliance OD and Reliance TP share **one** duplicate,
+`common/reliance/relianceMultiForm.js`, because they are the same portal flow with a different product. The handlers
+(`odCompany/relianceOD/relianceOD.js`, `tpCompany/relianceTP/relianceTP.js`) check the feature gate (`[E110]`) and call
+`fillRelianceMultiForm({ ...data, policyType: "od" | "tp" })`. The form has its own browser, login, error mapping and cleanup,
+exactly like `relianceForm.js`, so it does **not** go through `runHandler`. It is loaded when a part runs, not at server start.
+
+### 15.1 What differs from `fullPolicycompany/relianceForm.js` (untouched) — each line tagged `[MC]`
+
+| Tag | Change |
+|---|---|
+| `[MC] 1` | require paths three folders deeper; the browser / session manager, S3, captcha, error catalogue, Brisk helpers and the cover / KYC modules (`relianceCoverDetails`, `relianceCoverSettle`, `relianceKycSubmit`, `relianceKycUpload`) are **shared**, not copied — so the 2026-10-14 fixes (cover refusal, PA re-tick, KYC upload / SUBMIT / toast) are in both flows by construction |
+| `[MC] 2` | failure screenshots under `screenshots/multiCompany/reliance/` (10-day S3 lifecycle prefix) |
+| `[MC] 3` | the **product** is `RELIANCE_OD_PRODUCT` / `RELIANCE_TP_PRODUCT` (exact match, `multiConfig.js`) instead of "Two Wheeler Package Bundled (Only New Veh.)". Not set → the run opens the dropdown, **lists the portal's products and stops** (`stopBeforeProduct.js`, stage `od-product` / `tp-product`, E100, not retried) |
+| `[MC] 4` | no inline Brisk certificate — PA through Brisk is its own `pa` part |
+| `[MC] 5` | an unexpected error is stage `od-form` / `tp-form`; Breaker checkpoints `Reliance OD/product`, `/quote` (before Calculate Premium), `/payment` (before Pay) — and `Reliance TP/…` |
+| `[MC] 6` | the function is `fillRelianceMultiForm`; OD / TP comes from `data.policyType` (set by `buildPartFormData`) |
+
+Deliberately **not** changed: IDV, discount, Get Coverage Details, PA / helmet / TPPD, financier, address, Calculate Premium, Save,
+KYC, Pending Quotes, Pay, the wallet hold. A difference of an OD-only / TP-only portal therefore shows up as a clear stop (or a
+portal message) at the first step that differs, and gets its own tagged line when the HTML of that step is known.
+
+**The copy is generated.** `common/reliance/relianceMultiForm.js` is `relianceForm.js` plus the `[MC]` changes listed in
+`common/reliance/relianceMultiFormSpec.js`, applied by that file — do not edit the copy by hand. After a fix in `relianceForm.js`:
+
+```
+node multiCompany/common/reliance/relianceMultiFormSpec.js --write   # regenerate the copy
+node multiCompany/common/reliance/relianceMultiFormSpec.js           # check only
+```
+
+`test/relianceMultiForm.test.js` is the drift guard: it fails unless the copy is **exactly** what the spec makes of the original
+(not just "differs only on `[MC]` lines" — an edit right next to a tagged block would hide there), and it fails with a clear message
+when the original changed inside the text one of the `[MC]` changes is anchored on (re-state that change in the spec). It also
+runs the real copy down its failure path, the handlers' gating and the product stop. The test file stubs the browser, S3 and the
+recorder for the whole file (see its SAFETY block), and `npm test` preloads `test/support/noRealWorld.js`, which makes any real
+browser start or S3 call from a unit test throw — the copy is the real flow.
+
+### 15.2 Settings (automation `.env`)
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `RELIANCE_MULTI_FORM_ENABLED` | on | off → the parts behave as before the form existed (OD: login, Motors → Two Wheeler, stop; TP: login, stop) |
+| `RELIANCE_OD_PRODUCT` / `RELIANCE_TP_PRODUCT` | empty | the exact option text; empty → list the products and stop |
+
+`MULTI_COMPANY_AUTOMATION_ENABLED` still comes first. First real run: set the product text from the stop message, then
+`BREAKER_ENABLED=true` + `BREAKER_STOP_AT=Reliance OD/quote` to look at the filled form before anything is saved.
+
+### 15.3 Retry rule
+
+A Reliance OD / TP part saves a proposal at Reliance like the bundled part does, so the "never run again after the proposal is
+saved" rule of `lib/partRunner.js` covers it (`savesProposalPart`): a job timeout after `proposalNumber` changed becomes
+`failed_post_submission` (E401), not an automatic re-run. National and KSHEMA portal parts keep the plain retry.
+
+### 15.4 Not proven / open
+
+1. The OD-only / TP-only **product text**, and every step that differs for those products — unknown until run with the Breaker.
+2. `kycStatus`, `kycUrls` and `proposalNumber` are single fields on the policy: with OD at Reliance and TP at another insurer both
+   write them. Per-part notes are a later step (same caveat as §13.2).
+3. The real KYC page after a **good** SUBMIT is known from its markup, not from a successful run.
+
+### 15.5 When the KYC does not work (shared with the full-company flow)
+
+`fullPolicycompany/relianceKycFallback.js` (switch `RELIANCE_KYC_FALLBACK_ENABLED`, default on) — used by `relianceForm.js` and, being
+shared, by this copy. Any way the KYC step can fail (a refusal toast, an upload problem, no answer / timeout, the DO KYC link
+missing, no Aadhaar on the policy):
+
+1. the screenshot of the error is taken the moment the toast is first seen (~5 s lifetime), kept in memory, uploaded only if the KYC
+   failed (S3 `screenshots/kyc/`, `KYC_SCREENSHOT_RETENTION_DAYS`, default 30) and becomes the failure's `screenshotUrl`;
+2. the KYC tab is closed and the run goes to Pending Quotes → ticks **this** proposal (exact number, never "the first one") → the
+   TP declaration → Pay, and **stops there**: nothing is paid, no payment link is sent, no wallet step, no Brisk PA certificate;
+3. `proposalLink` (the View Policy page DO KYC was clicked on) and `paymentLink` (the page after Pay) are saved on the policy — the
+   "Proposal Page" / "Make Payment Page" cards of the View page. A link on another website (a KSHEMA TP's customer link) is never
+   replaced; a new attempt clears the old Reliance-hosted ones when its KYC step starts;
+4. the job ends `failed_post_submission` (stage `post-calculation`, never auto-retried) with one sentence: what Reliance said, what
+   was done, what to do next.
+
+Not proven: whether Reliance lets a KYC-pending proposal reach its payment page (then its own words are in the sentence and only the
+proposal page is saved), and whether the saved payment URL can be reopened later in a fresh session.
+
+### 15.6 The Proposal Page / Make Payment Page links on every run (also when the KYC worked)
+
+`RELIANCE_PROCESS_LINKS_ENABLED` (default on). The Reliance flow — and this copy — saves on the policy, the moment the run is on
+them (so a later failure cannot lose them):
+
+- `proposalLink` ("Proposal Page" on the View page) = the address of **Pending Quotes**, where the proposal is listed and paid from;
+- `paymentLink` ("Make Payment Page") = the page Pay opens, only when it is a different page from Pending Quotes (a wallet policy
+  stops on it — the link is saved before the stop).
+
+Rules: a link on another website (a KSHEMA TP's customer link) is never replaced; a login page is never saved; a new attempt clears
+the old Reliance-hosted ones when its KYC step starts. On a failed KYC the fallback (§15.5) saves the same pair.
+Not proven: the Pending Quotes address is the same for every policy of an agent login (it carries a fixed page token), so the card
+opens the list and the operator picks the proposal named on the card; whether the Pay page address can be reopened later.
+
+### 15.7 Wallet payment with the CDT option (shared with the full-company flow)
+
+`fullPolicycompany/relianceWalletCdt.js` (switch `RELIANCE_WALLET_CDT_ENABLED`, default on) — a wallet policy no longer only holds on
+the payment page after Pay. In order, on the panel Pay opens:
+
+1. the login's payment options are read; **no CDT option** (`#rdbtnPaymentOptionCDT`: missing, hidden or disabled) is an **error**
+   — "this Reliance login does not have the CDT option", the other options named, a screenshot — job `failed_post_submission`,
+   never auto-retried;
+2. exactly one proposal ticked and it is this one (a wallet policy finds its checkbox by the exact number only — no "first
+   checkbox", no longer number that merely contains it);
+3. CDT clicked, the **payable amount** (`#txbPayableamountCurrency`) read, the **same amount** typed into `#txtcdtReducedCurrency`
+   (real keystrokes + Tab, script fallback) and read back **equal to the paisa**; a refusal dialog / alert (for example an
+   insufficient CDT balance) is an error with Reliance's words, nothing added;
+4. **Add** (`#btnAddRowToGrid`) pressed once — only after the read-back;
+5. then the run **waits**: stop `reliance-wallet-cdt-added` with the amount, what the page showed (dialog text and button labels)
+   and a screenshot. Nothing is submitted or paid.
+
+Amounts are whole paise (`parseRupees` / `formatPaise`); the amount is Reliance's own and is not compared with the premium on the
+policy (an agent's payable amount may differ). First look: `BREAKER_STOP_AT=Reliance/wallet-cdt-add` (or `Reliance OD/…` in the
+copy). Not proven: how Reliance's currency widget takes the typed value, what Add validates, what comes after Add.
+
+### 15.8 Pending Quotes has pages (shared with the full-company flow)
+
+`fullPolicycompany/relianceQuotesPaging.js` (switch `RELIANCE_QUOTES_PAGING_ENABLED`, default on). Pending Quotes is a Kendo grid,
+10 rows to a page, so with more than 10 pending proposals the one being paid can be on page 2. Every lookup used to read only the page
+that was open (2026-10-14: R141026119597 on page 2 of "11 - 14 of 14 items" → "not listed"); the link path then ticked the **first
+checkbox** — another customer's proposal.
+
+`findProposalAcrossPages()`: wait for the proposals grid (the `.k-grid` holding the proposal checkboxes — the payment-details grid's own
+pager is never read), go to page 1, look at each page for the **exact** number (a whole token), click the pager's next link and wait for
+the page, the mask and the rows, stop on the page it is on. Used by STEP 8 for wallet **and** link policies, and by the KYC fallback.
+
+- A proposal that is nowhere in the list is an **error for both** ("looked at page 1 (10 rows), page 2 (4 rows), 14 items in the list"):
+  nothing ticked, paid or sent. The first-checkbox fallback only exists with the switch off.
+- After Pay the grid may show another page, so the CDT step accepts "no ticked box in view" when the selection was verified before Pay;
+  another proposal ticked in view is still refused.
+- Not proven: the real grid's DOM is known from the pager markup only; a page that does not change after the click ends the search with
+  that reason.
+
+### 15.9 Submit Details, the policy number and the policy PDF (shared with the full-company flow)
+
+`fullPolicycompany/relianceWalletIssue.js` (switch `RELIANCE_WALLET_SUBMIT_ENABLED`, default on; off = the wait after Add of §15.7).
+After the CDT row is added the run issues the policy. It really pays, so every step refuses rather than guesses:
+
+1. **Gate** (start of the run, before any browser or proposal): `onlinePolicy.walletPayment.state` of `submit-pressed`, `issued` or
+   `unconfirmed` refuses the run — job `failed_post_submission`, never retried — "a CDT payment was already submitted … not started so
+   the customer is not charged twice". `failed` (a refusal that stayed on the payment page) and no note run as normal. One note per
+   policy, and one per part of a multi-company policy (`walletPayment_od`, `walletPayment_tp`).
+2. **Before the press**: the new row of the payment-details table shows the amount to the paisa (the word CDT preferred; a single new row
+   with the exact amount and no CDT word is accepted and logged); the same row twice is refused; `#btnPaymentSubmit` shown and enabled;
+   no message of Reliance's open (a harmless one is given 4 s to close; it is read, never clicked away). Breaker checkpoint
+   `…/wallet-cdt-submit`.
+3. **The note, then the press**: `walletPayment = {state: "submit-pressed", proposalNumber, amountPaise, jobId, at …}` is written with a
+   **guarded** update (matches only when no blocking note is there — two runs of one policy cannot both pass); if it cannot be written
+   Submit Details is not pressed. Submit Details is pressed **once**: a real click; a script click only when the real one was refused
+   before it happened; a click that errored any other way (renderer timeout) is treated as pressed and never repeated.
+4. **The answer** (up to 120 s): the schedule link `a[href*="GenerateMotorSchedule"]` with one plausible `policyNo=` (cross-checked with
+   "Your Policy No …"; a contradiction is *unconfirmed*, nothing saved) → `issued`; a refusal (alert / dialog) that is still there 5 s
+   later on the payment page, with no success words → `failed`; no answer / the login page / "successful" without a number →
+   `unconfirmed`, and an unconfirmed payment blocks re-runs exactly like an issued one.
+5. **The number**, at once: `onlinePolicy.policyNumber` and the `policy` record — found by `isOnlinePolicy` + the client + the OP…
+   placeholder id (exactly one; none or several is reported, never guessed). First writer wins: a different number already there is
+   reported. A unique-index refusal is reported and the PDF is still fetched.
+6. **The PDF**: the number's link, a 20 s look (**live finding, 2026-10-14: on the real portal this link takes the tab to the
+   portal's own `/Motor/GenerateMotorSchedule?policyNo=…` HTML page — Chrome recorded no download**); then **View Policy by address**:
+   the menu link's own `href` read from the page (the submenu need not open — on that page its scripts had failed and the hover
+   opened nothing, "the View Policy item was not found under Utilities"), then `/Policy/ViewPolicySearch` (the page the KYC step
+   reaches), the Utilities hover + click only last. Then the search option exactly "Policy Number" (read back; the Kendo API if the
+   list click does not take) → the number typed (read back) → Search (once more through the page's own `GetPolicySearchDetails()` if
+   the click did nothing) → the row whose link text **is** the number (never "the first") → a new, finished (no `.crdownload`, size
+   stable) file whose first bytes are `%PDF` in the job's own download folder. Neither way = an **error**; the number stays saved and
+   the note stays `issued`.
+7. **Stored**: `Policy/<d><m><yyyy>-<9 random>-Policy.pdf` (the backend's own naming) in `AWS_BUCKET_NAME`, set as `policy.policyFile`
+   (when empty) and `onlinePolicy.mergedPolicyPdf` (when empty — the merge step replaces it). Then the run **continues** to the Brisk /
+   merge steps and the policy completes. A problem saving on the policy collection (no record, two records, duplicate number, a file
+   already there) is a **completion warning** ("completed with errors"), not a failure — the policy is issued and the PDF is stored.
+
+**An issued policy is finished, not refused** (`RELIANCE_WALLET_RECOVER_ENABLED`, default on): a re-run whose note says `issued` with a
+plausible number logs in and skips the form body completely (no proposal, no KYC, no Pay, no Submit Details) — `recoverIssuedPolicyPdf`:
+the number is saved again (first writer wins), the PDF comes from View Policy by the number, is stored (not a second time if the policy
+already has its file) and set on the policy; then the normal Brisk / merge steps run and the policy **completes**. No PDF and none
+stored = the same error as above, "Nothing was paid again", `failed_post_submission`, never retried by itself. `submit-pressed` and
+`unconfirmed` are still refused (a payment may or may not exist).
+
+To clear a blocked (`submit-pressed` / `unconfirmed`) policy after checking Reliance: unset `walletPayment` (or `walletPayment_od` / `_tp`)
+on its `onlinePolicy` document.
+
+Not proven (first live run): whether Submit Details asks for a confirmation, how long it takes, the Payment Success page's exact
+markup beyond the schedule link, the View Policy search option dropdown's DOM beyond `.k-input` / `.k-i-arrow-s` and the
+`#txtSearchText` / `#btnViewPolicySearch` the KYC step already uses. Anything unexpected stops with Reliance's words and a screenshot.
+Found on the way, not touched: `briskCertificate.js` filters `policy` documents by `onlinePolicyId` / `policyId`, fields that do not
+exist on `policy` records, so its policyFile update never matches.
+

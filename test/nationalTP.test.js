@@ -656,15 +656,18 @@ test("handler: with the feature on it runs the duplicated form once, with the sa
   assert.equal(calls[0], data, "the payload is handed over untouched");
 });
 
-test("registry: national / tp is the National TP handler; the other four are still login-only stubs (kshema / tp has its own test)", () => {
+test("registry: national / tp is the National TP handler; National OD and KSHEMA OD are still login-only stubs (kshema / tp and reliance have their own tests)", () => {
   const { registry, resolveMultiCompanyHandler } = require("../multiCompany/registry");
   const { fillNationalTP } = require("../multiCompany/tpCompany/nationalTP/nationalTP");
   assert.equal(registry.national.tp, fillNationalTP);
   assert.equal(resolveMultiCompanyHandler("National", "TP"), fillNationalTP);
   assert.notEqual(registry.national.tp.name, "loginOnlyHandler");
-  for (const [company, type] of [["national", "od"], ["reliance", "tp"], ["kshema", "od"]]) {
+  for (const [company, type] of [["national", "od"], ["kshema", "od"]]) {
     assert.equal(registry[company][type].name, "loginOnlyHandler", `${company} ${type} changed`);
   }
+  // Reliance OD / TP run the duplicated Reliance form now (test/relianceMultiForm.test.js)
+  assert.notEqual(registry.reliance.od.name, "loginOnlyHandler");
+  assert.notEqual(registry.reliance.tp.name, "loginOnlyHandler");
 });
 
 /* ----- the switch, and what a TP run is prepared with ----- */
@@ -724,30 +727,26 @@ test("prepare: PA bought with National keeps the policy's own nominee and the 1 
   }
 });
 
-test("prepare: the term is not exactly 1 or 5 -> [E101] before any browser — PA Cover off or National alike", async () => {
-  for (const settings of [
-    { PACompany: "National" },
-    { PACompany: "" }, // PA Cover off
-  ]) {
-    for (const years of [undefined, null, "", 0, 2, 3, 4, "five", NaN]) {
-      await assert.rejects(
-        () =>
-          prepareNationalTp(paNational({ paCover: !!settings.PACompany, settings: { ODCompany: "Reliance", TPCompany: "National", ...settings }, paCoverYears: years }), {
-            resolveNominee: noLookup,
-            log: quietLog,
-          }),
-        /\[E101\] National TP: the policy has no PA term of 1 or 5 years/,
-        `${JSON.stringify(settings)} paCoverYears ${JSON.stringify(years)} must be refused`
-      );
-    }
+test("prepare: PA bought from National with a term that is not exactly 1 or 5 -> [E101] before any browser", async () => {
+  for (const years of [undefined, null, "", 0, 2, 3, 4, "five", NaN]) {
+    await assert.rejects(
+      () =>
+        prepareNationalTp(paNational({ paCover: true, settings: { ODCompany: "Reliance", TPCompany: "National", PACompany: "National" }, paCoverYears: years }), {
+          resolveNominee: noLookup,
+          log: quietLog,
+        }),
+      /\[E101\] National TP: the policy has no PA term of 1 or 5 years/,
+      `paCoverYears ${JSON.stringify(years)} must be refused`
+    );
   }
 });
 
-test("prepare: PA Cover OFF with a year picked is fine — the year is what the portal gets (this was a 'No')", async () => {
-  const data = paNational({ paCover: false, paCoverCompany: "", paCoverYears: 1, settings: { ODCompany: "Reliance", TPCompany: "National", PACompany: "" } });
-  const out = await prepareNationalTp(data, { resolveNominee: noLookup, log: quietLog });
-  assert.equal(out.paCoverYears, 1);
-  assert.equal(portalPaTerm(out), 1);
+test("prepare: PA Cover OFF asks for no year at all — the portal's Compulsory PA is 'No', whatever year is saved", async () => {
+  for (const years of [undefined, null, "", 0, 1, 3, 5]) {
+    const data = paNational({ paCover: false, paCoverCompany: "", paCoverYears: years, settings: { ODCompany: "Reliance", TPCompany: "National", PACompany: "" } });
+    const out = await prepareNationalTp(data, { resolveNominee: noLookup, log: quietLog });
+    assert.equal(portalPaTerm(out), 0, `year ${JSON.stringify(years)}: PA Cover is off, so the portal says No`);
+  }
 });
 
 test("prepare: PA from Brisk needs no year (the portal stays 'No')", async () => {
@@ -797,24 +796,25 @@ test("prepare: no nominee anywhere -> [E101], whatever the PA — National deman
   }
 });
 
-test("portalPaTerm: the policy's year, 'No' only for Brisk's PA — the portal's Compulsory PA", () => {
-  const withPa = (PACompany, paCoverYears, extra = {}) => ({ settings: { PACompany }, paCoverYears, ...extra });
-  // PA Cover off or National: the year
-  assert.equal(portalPaTerm(withPa("", 1)), 1);
-  assert.equal(portalPaTerm(withPa("", 5)), 5);
+test("portalPaTerm: 'No' when PA Cover is off or Brisk's; the policy's year only when PA is bought from National", () => {
+  const withPa = (PACompany, paCoverYears, extra = {}) => ({ paCover: true, settings: { PACompany }, paCoverYears, ...extra });
+  // PA Cover on, bought from National: the year
   assert.equal(portalPaTerm(withPa("National", "1")), 1);
   assert.equal(portalPaTerm(withPa("national", 5)), 5);
+  assert.equal(portalPaTerm(withPa("National", 5, { paCover: "true" })), 5, "paCover as the string a form sends");
   // PA Cover with Brisk: No — whatever year is saved
   assert.equal(portalPaTerm(withPa("Brisk", 1)), 0);
   assert.equal(portalPaTerm(withPa("BRISK", undefined)), 0);
-  // the old trigger fields no longer decide: paCover false / "Company" does not turn the year off or on
-  assert.equal(portalPaTerm(withPa("", 1, { paCover: false, paCoverCompany: "Brisk" })), 1, "paCoverCompany alone is not Brisk's PA");
-  assert.equal(portalPaTerm(withPa("National", 5, { paCover: false })), 5);
-  // anything else is unusable, and says so (null) instead of guessing
+  // PA Cover OFF: No — a saved year is not asked and not sent (this used to go to the portal as that year)
+  assert.equal(portalPaTerm(withPa("", 1, { paCover: false })), 0);
+  assert.equal(portalPaTerm(withPa("", 5, { paCover: false })), 0);
+  assert.equal(portalPaTerm(withPa("National", 5, { paCover: false })), 0);
+  assert.equal(portalPaTerm({ settings: { PACompany: "National" }, paCoverYears: 5 }), 0, "no paCover at all is off");
+  // bought from National but the year is unusable: says so (null) instead of guessing
   for (const bad of [undefined, null, "", 0, 2, 3, 10, "five", NaN]) {
-    assert.equal(portalPaTerm(withPa("", bad)), null, JSON.stringify(bad));
+    assert.equal(portalPaTerm(withPa("National", bad)), null, JSON.stringify(bad));
   }
-  assert.equal(portalPaTerm(undefined), null);
+  assert.equal(portalPaTerm(undefined), 0, "no data: PA Cover is not on");
   assert.equal(paViaBrisk({ settings: { PACompany: "Brisk" } }), true);
   assert.equal(paViaBrisk({ settings: { PACompany: "National" } }), false);
   assert.equal(paViaBrisk({}), false);
@@ -847,7 +847,7 @@ test("the form itself refuses an unusable term before it opens a browser (direct
   try {
     const { fillNationalForm } = await quiet(() => require(COPY));
     const result = await quiet(() =>
-      fillNationalForm({ settings: { PACompany: "" }, paCoverYears: 3, username: "u", password: "p", _jobIdentifier: "Asha_job1_tp" })
+      fillNationalForm({ paCover: true, settings: { PACompany: "National" }, paCoverYears: 3, username: "u", password: "p", _jobIdentifier: "Asha_job1_tp" })
     );
     assert.equal(opened, 0, "no browser was opened");
     assert.equal(result.success, false);

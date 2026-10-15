@@ -319,6 +319,40 @@ function ensureMultiCompanyScreenshotLifecycleRule() {
   });
 }
 
+// ─── Reliance KYC failure screenshots ────────────────────────────────────────
+// The picture of the toast / error the KYC step met (relianceKycFallback.js) — kept only when the KYC failed. Their own
+// prefix, so one lifecycle rule expires them (an operator looks at them within days of the failure).
+const KYC_SCREENSHOT_PREFIX = "screenshots/kyc/";
+const KYC_SCREENSHOT_RULE_ID = "auto-delete-kyc-screenshots";
+const KYC_SCREENSHOT_RETENTION_DAYS =
+  parseInt(process.env.KYC_SCREENSHOT_RETENTION_DAYS, 10) || 30;
+
+function ensureKycScreenshotLifecycleRule() {
+  return ensureLifecycleRule({
+    id: KYC_SCREENSHOT_RULE_ID,
+    prefix: KYC_SCREENSHOT_PREFIX,
+    days: KYC_SCREENSHOT_RETENTION_DAYS,
+    label: "KYC failure screenshots",
+  });
+}
+
+// ─── Reliance wallet (CDT) payment screenshots ───────────────────────────────
+// The picture of the payment panel after Add (relianceWalletCdt.js) — one per wallet run that got that far. Their own
+// prefix, so one lifecycle rule expires them.
+const WALLET_SCREENSHOT_PREFIX = "screenshots/wallet/";
+const WALLET_SCREENSHOT_RULE_ID = "auto-delete-wallet-screenshots";
+const WALLET_SCREENSHOT_RETENTION_DAYS =
+  parseInt(process.env.WALLET_SCREENSHOT_RETENTION_DAYS, 10) || 30;
+
+function ensureWalletScreenshotLifecycleRule() {
+  return ensureLifecycleRule({
+    id: WALLET_SCREENSHOT_RULE_ID,
+    prefix: WALLET_SCREENSHOT_PREFIX,
+    days: WALLET_SCREENSHOT_RETENTION_DAYS,
+    label: "wallet payment screenshots",
+  });
+}
+
 /**
  * Keep the local-fallback folder from growing without bound.
  *
@@ -424,5 +458,9 @@ module.exports = {
   ensureRecordingLifecycleRule,
   ensureLifecycleRule,
   ensureMultiCompanyScreenshotLifecycleRule,
+  ensureKycScreenshotLifecycleRule,
+  KYC_SCREENSHOT_PREFIX,
+  ensureWalletScreenshotLifecycleRule,
+  WALLET_SCREENSHOT_PREFIX,
   purgeOldLocalRecordings,
 };

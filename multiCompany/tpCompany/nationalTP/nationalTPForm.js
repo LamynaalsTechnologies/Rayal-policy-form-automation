@@ -21,8 +21,9 @@
  *           "National TP/quote" and "National TP/payment" (no-ops unless .env switches the Breaker on).
  *   [TP] 6  no inline Brisk certificate: PA through Brisk is its own `pa` part in a multi-company policy.
  *   [TP] 7  a TpPlanError is returned as a non-retryable failure (stage "tp-plan").
- *   [TP] 8  the portal's Compulsory PA is the policy's year (1 or 5), "No" only when PA Cover is bought from Brisk
- *           (./tpPa.js) — it used to be the year only when PA Cover = National, and "No" otherwise.
+ *   [TP] 8  the portal's Compulsory PA is "No" when PA Cover is off or bought from Brisk, and the policy's year
+ *           (1 or 5) only when PA Cover is bought from National (./tpPa.js) — it used to be the year whenever one was
+ *           saved, even with PA Cover off.
  * Left exactly as the full flow, on purpose: the non-GIC tick, the PA radio / "No of Years" mechanics (only WHICH term
  * they get changed, [TP] 8), nominee, financier, Vahan, payment link — and the helpers TP no longer calls (IDV override, discount ...) and the
  * standalone `node` block at the bottom, so the two files stay diffable.
@@ -1680,9 +1681,10 @@ async function fillNationalForm(
   let postCalculationError = null;
 
   try {
-    // [TP] 8: the portal's "Compulsory PA for Owner Driver" is the policy's PA term (1 or 5 years), or "No" when PA Cover
-    // is bought from Brisk (./tpPa.js). Decided HERE, before a browser is opened: the PA steps below swallow their own
-    // errors, so a term that is neither would otherwise end as a silent "No" on a policy sold with PA.
+    // [TP] 8: the portal's "Compulsory PA for Owner Driver" is "No" when PA Cover is off or bought from Brisk, and the
+    // policy's PA term (1 or 5 years) when it is bought from National (./tpPa.js). Decided HERE, before a browser is
+    // opened: the PA steps below swallow their own errors, so a term that is neither would otherwise end as a silent
+    // "No" on a policy sold with PA.
     const tpPaTerm = portalPaTerm(data);
     if (tpPaTerm === null) {
       throw Object.assign(
@@ -2443,9 +2445,9 @@ async function fillNationalForm(
 
     // Compulsory PA for Owner Driver (Initial Setup - Quick Quote Stage)
     try {
-      // [TP] 8: not "PA Cover = National" any more — the policy's year (tpPaTerm), "No" only when PA is Brisk's
+      // [TP] 8: the policy's year (tpPaTerm) only when PA Cover is bought from National; "No" when it is off or Brisk's
       const isCompanyPA = tpPaTerm === 1 || tpPaTerm === 5;
-      console.log(`[${data._jobId || 'National'}] Handling Compulsory PA (Initial Setup). isCompanyPA: ${isCompanyPA} (term: ${tpPaTerm === 0 ? "No — PA is Brisk's" : tpPaTerm})`);
+      console.log(`[${data._jobId || 'National'}] Handling Compulsory PA (Initial Setup). isCompanyPA: ${isCompanyPA} (term: ${tpPaTerm === 0 ? "No — PA Cover is off or Brisk's" : tpPaTerm})`);
 
       let targetValue = "0"; // Default: No
       if (isCompanyPA) {
@@ -3866,7 +3868,7 @@ async function fillNationalForm(
 
       // 2. Handle the selection based on data
       try {
-        // [TP] 8: the policy's year (tpPaTerm), "No" only when PA is Brisk's — see the quick-quote step above
+        // [TP] 8: the policy's year (tpPaTerm) only when PA is bought from National, else "No" — see the quick-quote step above
         const isCompanyPA = tpPaTerm === 1 || tpPaTerm === 5;
 
         console.log(`[${jobId}] PA Logic Check: paCover=${data.paCover}, company=${data.paCoverCompany}, PA company=${data.settings && data.settings.PACompany}, year=${data.paCoverYears} -> isCompanyPA=${isCompanyPA}`);

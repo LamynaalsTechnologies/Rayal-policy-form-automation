@@ -38,9 +38,9 @@ const defaultResolveNominee = (args) => require("../../../lib/nomineeResolver").
  * What National needs before a browser is worth opening — the part of server.js dispatchBundled that only the bundled
  * path runs (the parts path hands a portal handler its data as it is):
  *
- *  - The PA term (tpPa.js): the policy's year, 1 or 5, goes to the portal's Compulsory PA; "No" only when PA Cover is
- *    bought from Brisk. A year that is neither is refused here — national.js would silently fall back to "1 Year",
- *    which sells the wrong term.
+ *  - The PA term (tpPa.js): "No" when PA Cover is off or bought from Brisk; the policy's year, 1 or 5, only when PA
+ *    Cover is bought from National. A year that is neither is refused here — national.js would silently fall back to
+ *    "1 Year", which sells the wrong term.
  *  - A nominee: National demands one on EVERY quote. The policy's own nominee wins; the operator's saved default fills
  *    only what the policy left blank. With none at all, refuse now rather than after the login, the Vahan check and
  *    half the form.
@@ -53,7 +53,7 @@ async function prepareNationalTp(data, { resolveNominee = defaultResolveNominee,
     throw new Error(
       `[E101] National TP: the policy has no PA term of 1 or 5 years ` +
         `(No of Year is "${data.paCoverYears === undefined ? "" : data.paCoverYears}"). Open the policy, pick the year ` +
-        `(in the TP panel, or in PA Cover Details when PA Cover is ticked), save it, then re-run this policy.`
+        `in PA Cover Details (it is asked when PA Cover is bought from National), save it, then re-run this policy.`
     );
   }
 

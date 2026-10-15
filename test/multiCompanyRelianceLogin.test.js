@@ -14,6 +14,12 @@ const { By } = require("selenium-webdriver");
 
 const ROOT = path.join(__dirname, "..");
 
+// The Reliance OD / TP handler tests below are about the LOGIN-ONLY behaviour: login, (OD: Motors -> Two Wheeler,) stop.
+// That is what the two handlers do with RELIANCE_MULTI_FORM_ENABLED=false. With the switch at its default (on) they run
+// the duplicated Reliance form (test/relianceMultiForm.test.js), which opens a REAL browser through sessionManager —
+// something these fake drivers never reach and a unit test must never do. Set before any handler is called.
+process.env.RELIANCE_MULTI_FORM_ENABLED = "false";
+
 // The GPT-4o captcha reader is shared by every Reliance flow: stub it, never call OpenAI.
 let captchaReply = { text: "AB12", success: true };
 // The temp captcha PNG exists only while the reader runs (written before it, deleted after): note its name here.
@@ -381,7 +387,7 @@ test("a Reliance handler run with a wrong password comes back E203, not retryabl
   assert.deepEqual(closed, [{ company: "reliance", hadError: true }]);
 });
 
-test("Reliance TP is login only: it stops on the logged-in dashboard and tries no form step", async () => {
+test("Reliance TP (form switched off) is login only: it stops on the logged-in dashboard and tries no form step", async () => {
   for (const type of ["tp"]) {
     const driver = fakeReliance();
     const closed = [];
@@ -411,7 +417,7 @@ test("Reliance TP is login only: it stops on the logged-in dashboard and tries n
   }
 });
 
-test("Reliance OD: login, then Motors -> Two Wheeler, then it stops there and goes no further", async () => {
+test("Reliance OD (form switched off): login, then Motors -> Two Wheeler, then it stops there and goes no further", async () => {
   const driver = fakeReliance();
   const closed = [];
   loadRunHandler(driver, closed);
@@ -427,14 +433,14 @@ test("Reliance OD: login, then Motors -> Two Wheeler, then it stops there and go
 
   assert.equal(result.inProgress, true);
   assert.equal(result.stage, "motors-two-wheeler");
-  assert.match(result.error, /Motors → Two Wheeler opened — the next step is not built yet/);
+  assert.match(result.error, /Motors → Two Wheeler opened — the form is switched off \(RELIANCE_MULTI_FORM_ENABLED\)/);
   assert.equal(driver.state.page, "twoWheeler", "it is on the Two Wheeler page");
   assert.ok(driver.state.clicks.includes("TwoWheelerLink"));
   assert.equal(looked.some((v) => /ddlMotorProducts|VehicleDetailsMakeModel/.test(v)), false, "the product dropdown is the NEXT step, not this one");
   assert.deepEqual(closed, [{ company: "reliance", hadError: true }]);
 });
 
-test("Reliance OD: a Motors submenu that never opens fails after 4 attempts as a retryable E302", async () => {
+test("Reliance OD (form switched off): a Motors submenu that never opens fails after 4 attempts as a retryable E302", async () => {
   const driver = fakeReliance({ submenuNeverOpens: true });
   loadRunHandler(driver, []);
   const { resolveMultiCompanyHandler } = require("../multiCompany/registry");
@@ -447,7 +453,7 @@ test("Reliance OD: a Motors submenu that never opens fails after 4 attempts as a
   assert.match(result.error, /never became clickable after 4 attempts/);
 });
 
-test("Reliance TP is still login only (no Motors menu step)", async () => {
+test("Reliance TP (form switched off) is still login only (no Motors menu step)", async () => {
   const driver = fakeReliance();
   loadRunHandler(driver, []);
   const { resolveMultiCompanyHandler } = require("../multiCompany/registry");

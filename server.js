@@ -1,6 +1,12 @@
 // Load environment variables FIRST before any other configuration
 require("dotenv").config();
 
+// Every console line of a Reliance job starts with its flow ("Reliance TP+OD | ...", lib/flowLogPrefix.js,
+// .env FLOW_LOG_PREFIX_ENABLED). Installed HERE, before anything else loads: breaker.js captures console.log when
+// it is created, and has to capture the wrapped one.
+const flowLog = require("./lib/flowLogPrefix");
+flowLog.install();
+
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -126,6 +132,20 @@ if (require("./multiCompany/common/featureGate").MULTI_COMPANY_AUTOMATION_ENABLE
   require("./s3Uploader")
     .ensureMultiCompanyScreenshotLifecycleRule()
     .catch((e) => console.error("multiCompany screenshot lifecycle setup error:", e.message));
+}
+// Reliance KYC failure screenshots (fullPolicycompany/relianceKycFallback.js): only when that feature is on, so nothing
+// touches S3 otherwise. Expiry is enforced by S3 itself (a lifecycle rule on screenshots/kyc/), not by a cron.
+if (require("./fullPolicycompany/relianceKycSubmit").isKycFallbackEnabled()) {
+  require("./s3Uploader")
+    .ensureKycScreenshotLifecycleRule()
+    .catch((e) => console.error("KYC screenshot lifecycle setup error:", e.message));
+}
+// Reliance wallet (CDT) payment screenshots (fullPolicycompany/relianceWalletCdt.js): same rule — only when that feature
+// is on, expiry enforced by S3 itself on screenshots/wallet/.
+if (require("./fullPolicycompany/relianceWalletHold").isWalletCdtEnabled()) {
+  require("./s3Uploader")
+    .ensureWalletScreenshotLifecycleRule()
+    .catch((e) => console.error("wallet screenshot lifecycle setup error:", e.message));
 }
 if (isRecordingEnabled()) {
   const {
@@ -351,7 +371,12 @@ console.log(
     : "(none configured)"
   } | default for any other company: ${DEFAULT_MAX_PARALLEL_JOBS}`
 );
-const JOB_TIMEOUT = 300000; // 5 minutes max per job run
+// How long ONE run of a job may take before it is declared timed out (E302). The run is not stopped when this fires
+// (see ORPHAN_PROFILE_MAX_AGE_MS below) and the job is queued for a full re-run, so this must sit well above what a
+// healthy run needs: a Reliance policy is ~5 minutes of form filling PLUS the KYC step, where Reliance itself can
+// take minutes to accept the document and answer SUBMIT. 5 minutes made a slow-but-working run time out and start
+// again from scratch while the first browser was still going. Override with JOB_TIMEOUT_MS in .env (milliseconds).
+const JOB_TIMEOUT = parsePositiveInt(process.env.JOB_TIMEOUT_MS, 15 * 60 * 1000);
 
 // How often to sweep for pending jobs. Override with QUEUE_POLL_INTERVAL_MS in
 // .env (value in milliseconds).
@@ -381,11 +406,11 @@ const PROFILE_DIRS = [
   // age-based sweep would have deleted the profile out from under one.
   "cloned_profiles_kshema",
 ];
-// 1 hour. Deliberately far beyond JOB_TIMEOUT (5 min): when a job times out,
+// At least 1 hour, and never less than 4x JOB_TIMEOUT: when a job times out,
 // the Promise.race only rejects the outer promise — the automation keeps
 // running detached with its browser open. A tighter cutoff could delete a
 // profile directory out from under a live Chrome.
-const ORPHAN_PROFILE_MAX_AGE_MS = 60 * 60 * 1000;
+const ORPHAN_PROFILE_MAX_AGE_MS = Math.max(60 * 60 * 1000, JOB_TIMEOUT * 4);
 
 const sweepOrphanedProfiles = () => {
   let removed = 0;
@@ -931,7 +956,11 @@ let lastLoggedCapacityState = null;
 let lastLoggedBackoffAt = null;
 let lastLoggedSequenceState = null;
 
-const processRelianceQueue = async () => {
+// A queue pass belongs to no job, yet it can be kicked off from inside one (a setTimeout or a .finally created in a
+// job's context). It always runs OUTSIDE any flow tag, or "Found N pending jobs" would print under that job's.
+const processRelianceQueue = () => flowLog.outside(runQueuePass);
+
+const runQueuePass = async () => {
   if (!jobQueueCollection) {
     console.log("[Reliance Queue] ⚠️ jobQueueCollection not initialized yet. Skipping.");
     return;
@@ -1136,24 +1165,38 @@ const processRelianceQueue = async () => {
       if (part) job = claimed; // the document as it is now: the part is "processing"
 
       activeRelianceJobs++;
-      console.log(
-        part
-          ? `[${companyLabel(part.company)} Queue] Starting ${part.key.toUpperCase()} part for ${job.formData.firstName} (ID: ${job._id}); active=${activeRelianceJobs}`
-          : `[${companyOfJob(job) === "national" ? "National" : "Reliance"} Queue] Starting job for ${job.formData.firstName} (ID: ${job._id}); active=${activeRelianceJobs}`
+      // The tag every console line of this job starts with: "Reliance TP+OD" (the bundled full-policy part, or a
+      // legacy job), "Reliance TP", "Reliance OD". null for a flow that is not tagged (National, KSHEMA, Brisk PA).
+      const flow = flowLog.flowLabel({
+        company: part ? part.company : companyOfJob(job),
+        partKey: part ? part.key : null,
+        policyType: job.formData && job.formData.policyType,
+        companyLabel,
+      });
+      const inFlow = (fn) => flowLog.run(flow, fn);
+
+      inFlow(() =>
+        console.log(
+          part
+            ? `[${companyLabel(part.company)} Queue] Starting ${part.key.toUpperCase()} part for ${job.formData.firstName} (ID: ${job._id}); active=${activeRelianceJobs}`
+            : `[${companyOfJob(job) === "national" ? "National" : "Reliance"} Queue] Starting job for ${job.formData.firstName} (ID: ${job._id}); active=${activeRelianceJobs}`
+        )
       );
 
       // Keep proving this job is alive for as long as it runs.
       const heartbeat = startJobHeartbeat(job._id);
 
-      // Run job in parallel (don't await)
-      (part ? partRunner.runPartJob(partRunnerDeps, job) : runPolicyJob(job))
+      // Run job in parallel (don't await). Everything it prints — and everything it awaits prints — carries `flow`.
+      inFlow(() => (part ? partRunner.runPartJob(partRunnerDeps, job) : runPolicyJob(job)))
         .catch((unexpectedError) => {
           // Safety net: Catch any unhandled errors
-          console.error(
-            `[Reliance Queue] 💥 UNEXPECTED ERROR for ${job.formData.firstName}:`,
-            unexpectedError.message
-          );
-          console.error("Stack trace:", unexpectedError.stack);
+          inFlow(() => {
+            console.error(
+              `[Reliance Queue] 💥 UNEXPECTED ERROR for ${job.formData.firstName}:`,
+              unexpectedError.message
+            );
+            console.error("Stack trace:", unexpectedError.stack);
+          });
 
           if (part) {
             // Same safety net for a part: record the failure against it so the

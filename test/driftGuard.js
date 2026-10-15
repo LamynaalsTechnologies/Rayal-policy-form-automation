@@ -1,7 +1,8 @@
-// Shared by the drift-guard tests (test/nationalTP.test.js, test/kshemaTP.test.js). Not a test file (no .test.js suffix).
+// Shared by the drift-guard tests (test/nationalTP.test.js, test/kshemaTP.test.js, test/relianceMultiForm.test.js).
+// Not a test file (no .test.js suffix).
 //
-// A TP handler is a DUPLICATE of a full-company flow plus lines tagged "[TP]". These helpers say where the copy and the
-// original differ, and which of those places carry no "[TP]" tag.
+// A TP / OD handler is a DUPLICATE of a full-company flow plus lines tagged "[TP]" (or "[MC]" for the Reliance OD / TP
+// copy). These helpers say where the copy and the original differ, and which of those places carry no tag.
 
 /**
  * Line diff of `a` (original) against `b` (copy) as a list of hunks { removed, added }. Both files are nearly
@@ -43,7 +44,7 @@ function diffHunks(a, b, { lookahead = 3, window = 400 } = {}) {
   return hunks;
 }
 
-/** The hunks in which no added line is tagged "[TP]" — the changes nobody owned up to. */
-const untagged = (hunks) => hunks.filter((h) => !h.added.some((line) => line.includes("[TP]")));
+/** The hunks in which no added line carries `tag` ("[TP]" unless told otherwise) — the changes nobody owned up to. */
+const untagged = (hunks, tag = "[TP]") => hunks.filter((h) => !h.added.some((line) => line.includes(tag)));
 
 module.exports = { diffHunks, untagged };
