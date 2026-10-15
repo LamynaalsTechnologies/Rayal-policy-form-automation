@@ -170,6 +170,29 @@ function pickBestMatch(optionTexts, wantedText, minScore = 45, noise = null) {
   return best && best.score >= minScore ? best : null;
 }
 
+/**
+ * The index of an option that is NOT `avoidText`, or -1 when there is none.
+ *
+ * Used to flip a dropdown away from a value and back (the slow-portal recovery
+ * in kshemaSlowFields.js). Anything the field's own fuzzy pick would take for
+ * `avoidText` is skipped, and so is a "-- Select --" placeholder. A liability
+ * option is preferred — that is the one a person flips to — and otherwise the
+ * first remaining option is used.
+ */
+function pickOtherOption(optionTexts, avoidText) {
+  const candidates = [];
+  optionTexts.forEach((text, index) => {
+    const t = norm(text);
+    if (!t) return;
+    if (/^[-\s]*(select|choose|please select)\b/.test(t)) return;
+    if (avoidText && scoreTextMatch(text, avoidText) >= 80) return;
+    candidates.push({ index, t });
+  });
+  if (!candidates.length) return -1;
+  const liability = candidates.find((c) => c.t.includes("liab"));
+  return (liability || candidates[0]).index;
+}
+
 /** Click, falling back to a JS click when Material's ripple eats the event. */
 async function clickElement(driver, element, label) {
   await driver.executeScript("arguments[0].scrollIntoView({block:'center'});", element);
@@ -229,6 +252,63 @@ async function findVisible(driver, selectors, root = null, timeoutMs = FIELD_WAI
     found = await findVisibleOnce(driver, selectors, root);
   }
   return found;
+}
+
+/**
+ * A field is still missing after its normal wait: give its recovery the tries
+ * it declares, looking for the field again after each one.
+ *
+ * The portal is slow to render a field that depends on an earlier answer (the
+ * Insured Declared Value after the Product Type, the year dropdown after the PA
+ * checkbox). Waiting longer does not always help — switching the earlier answer
+ * away and back does — so a field can carry a `recover` object, built in
+ * kshemaSlowFields.js:
+ *
+ *   { tries, waitMs, run({driver, n, tries, fieldLabel}) -> {recovered, note?},
+ *     explain({tried, waitMs, outcomes}) -> sentence }
+ *
+ * `tries` is 0 while the recovery is switched off, so nothing here runs then.
+ * The recovery object holds NO per-job state: two jobs run in one process.
+ *
+ * @returns {Promise<{found, explain: string, tried: number}>} `explain` is a
+ *   sentence for the end of the operator's message (no colon in it — the
+ *   message formatter keeps only the text after the last one), "" when no
+ *   recovery was tried.
+ */
+async function findAfterRecovery(driver, selectors, label, recover) {
+  const out = { found: { element: null, selector: null }, explain: "", tried: 0 };
+  if (!recover || typeof recover.run !== "function") return out;
+  const tries = Math.max(0, Number(recover.tries) || 0);
+  if (!tries) return out;
+  const waitMs = Number(recover.waitMs) > 0 ? Number(recover.waitMs) : FIELD_WAIT_MS;
+  const outcomes = [];
+
+  for (let n = 1; n <= tries; n++) {
+    let outcome;
+    try {
+      outcome = await recover.run({ driver, n, tries, fieldLabel: label });
+    } catch (e) {
+      const firstLine = String((e && e.message) || e).split("\n")[0].replace(/:/g, " -");
+      outcome = { recovered: false, note: `the recovery stopped (${firstLine})` };
+    }
+    outcome = outcome || { recovered: false };
+    outcomes.push(outcome);
+    out.tried = n;
+    if (!outcome.recovered) break;
+
+    out.found = await findVisible(driver, selectors, null, waitMs);
+    if (out.found.element) {
+      log(`   ✓ "${label}" showed up after the recovery (try ${n}/${tries})`);
+      return out;
+    }
+  }
+
+  if (typeof recover.explain === "function") {
+    try {
+      out.explain = String(recover.explain({ tried: out.tried, waitMs, outcomes }) || "");
+    } catch (e) { }
+  }
+  return out;
 }
 
 /**
@@ -412,6 +492,7 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
     searchTerm = null,
     noise = null,
     beforeClose = null,
+    recover = null,
   } = opts;
 
   // Give the caller its one chance to photograph the open panel, then dismiss
@@ -430,13 +511,22 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
   };
   const want = norm(Array.isArray(optionText) ? optionText[0] : optionText);
 
-  const found = await findVisible(driver, selectSelectors);
+  let found = await findVisible(driver, selectSelectors);
+  let recoveryNote = "";
+  // Slow portal: a field that depends on an earlier answer can be missing after
+  // the normal wait. Its recovery (kshemaSlowFields.js) acts and it is looked
+  // for again — only when the field declares one and the switch is on.
+  if (!found.element && recover) {
+    const again = await findAfterRecovery(driver, selectSelectors, label, recover);
+    found = again.found;
+    recoveryNote = again.explain;
+  }
   if (!found.element) {
     await dumpAvailableControls(driver, label);
     return {
       ok: false,
       value: null,
-      reason: `the "${label}" dropdown was not on the page`,
+      reason: `the "${label}" dropdown was not on the page${recoveryNote ? ` ${recoveryNote}` : ""}`,
     };
   }
 
@@ -658,6 +748,96 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
 }
 
 /**
+ * Switch a dropdown to an option that is NOT `avoid` — the first half of the
+ * "switch away and back" recovery for a field the portal is slow to reveal.
+ *
+ * Opens the panel, reads every option, clicks the one pickOtherOption chooses
+ * and reads the value back. Nothing is typed, nothing is searched: it is for
+ * the short fixed lists (Product Type) where every option is rendered at once.
+ *
+ * @param {string[]} selectSelectors
+ * @param {Object} opts
+ * @param {string} opts.avoid - the value to move away from
+ * @param {string} [opts.label]
+ * @returns {Promise<{ok, value, reason, chose?}>}
+ */
+async function selectOtherMatOption(driver, selectSelectors, opts = {}) {
+  const { avoid = "", label = "dropdown" } = opts;
+
+  const found = await findVisible(driver, selectSelectors);
+  if (!found.element) {
+    return { ok: false, value: null, reason: `the "${label}" dropdown was not on the page` };
+  }
+  const current = await readMatSelectValue(driver, found.element);
+
+  try {
+    await clickElement(driver, found.element, `the "${label}" dropdown`);
+  } catch (e) {
+    return { ok: false, value: current || null, reason: `the "${label}" dropdown could not be opened` };
+  }
+
+  const { options, panelOpened } = await collectOptions(driver, FIELD_WAIT_MS);
+  if (!options.length) {
+    await closeOverlay(driver);
+    return {
+      ok: false,
+      value: current || null,
+      reason: panelOpened
+        ? `the "${label}" dropdown had no choices to offer`
+        : `the "${label}" dropdown did not open its list of choices`,
+    };
+  }
+
+  const texts = [];
+  for (const option of options) {
+    try {
+      texts.push((await option.getText()).trim());
+    } catch (e) {
+      texts.push("");
+    }
+  }
+
+  const index = pickOtherOption(texts, avoid);
+  if (index < 0) {
+    await closeOverlay(driver);
+    return {
+      ok: false,
+      value: current || null,
+      reason:
+        `the "${label}" dropdown offered nothing other than "${avoid}" ` +
+        `(it offered: ${texts.filter(Boolean).join(", ") || "nothing"})`,
+    };
+  }
+
+  try {
+    await clickElement(driver, options[index], `the "${texts[index]}" option`);
+  } catch (e) {
+    await closeOverlay(driver);
+    return {
+      ok: false,
+      value: current || null,
+      reason: `the "${texts[index]}" choice for "${label}" could not be clicked`,
+    };
+  }
+
+  await driver.sleep(400);
+  const verifyAgainst =
+    (await findVisible(driver, selectSelectors, null, 3000)).element || found.element;
+  const after = await readMatSelectValue(driver, verifyAgainst);
+  const expected = norm(texts[index]);
+  if (norm(after) !== expected && !norm(after).includes(expected)) {
+    return {
+      ok: false,
+      value: after || null,
+      reason: `"${label}" still shows "${after || "nothing"}" after choosing "${texts[index]}"`,
+    };
+  }
+
+  log(`   ✓ ${label} switched to "${after}"`);
+  return { ok: true, value: after, reason: null, chose: texts[index] };
+}
+
+/**
  * Type into a Material text input and CONFIRM the value landed.
  *
  * The read-back is not optional. A matinput sits behind a form-field wrapper
@@ -676,7 +856,7 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
  * @returns {Promise<{ok: boolean, value: string|null, reason: string|null}>}
  */
 async function typeIntoField(driver, selectors, value, label, opts = {}) {
-  const { stripSpaces = false, maxLength = null } = opts;
+  const { stripSpaces = false, maxLength = null, recover = null } = opts;
 
   let text = value === null || value === undefined ? "" : String(value);
   if (stripSpaces) text = text.replace(/\s+/g, "");
@@ -697,12 +877,24 @@ async function typeIntoField(driver, selectors, value, label, opts = {}) {
   // anything; retrying against the same stale handle would fail identically.
   let landed = null;
   let lastError = null;
+  let recoveryNote = "";
 
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const found = await findVisible(driver, selectors);
+    let found = await findVisible(driver, selectors);
+    // Slow portal: see selectMatOption — the box can be missing only because
+    // the portal has not rendered it yet.
+    if (!found.element && attempt === 1 && recover) {
+      const again = await findAfterRecovery(driver, selectors, label, recover);
+      found = again.found;
+      recoveryNote = again.explain;
+    }
     if (!found.element) {
       if (attempt === 1) await dumpAvailableControls(driver, label);
-      return { ok: false, value: null, reason: `the "${label}" box was not on the page` };
+      return {
+        ok: false,
+        value: null,
+        reason: `the "${label}" box was not on the page${recoveryNote ? ` ${recoveryNote}` : ""}`,
+      };
     }
 
     try {
@@ -1099,10 +1291,13 @@ async function typeIntoDateField(driver, selectors, value, label) {
 
 module.exports = {
   selectMatOption,
+  selectOtherMatOption,
   selectMatRadio,
   typeIntoDateField,
   scoreTextMatch,
   pickBestMatch,
+  pickOtherOption,
+  findAfterRecovery,
   LOCATION_NOISE,
   typeIntoField,
   readMatSelectValue,

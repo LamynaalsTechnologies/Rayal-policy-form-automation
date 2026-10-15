@@ -228,7 +228,6 @@ const { extractCaptchaText } = require("./Captcha");
 const express = require("express");
 const multer = require("multer");
 const mongoose = require("mongoose");
-const moment = require("moment");
 
 // 🛡️ Import Enhanced Error Handler (CRITICAL: Money involved)
 const {
@@ -249,6 +248,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const { ProviderCredential } = require("./models");
 const { resolvePortalCredentials } = require("./lib/credentialResolver");
 const { resolveNationalNominee } = require("./lib/nomineeResolver");
+const { formatPolicyDate } = require("./lib/policyDates");
 // One job per policy with a separate status per part (OD / TP / OD+TP / PA).
 // Only jobs that carry `parts` go through these; every other job keeps the
 // original path below unchanged.
@@ -565,11 +565,9 @@ const buildFormDataFromPolicy = async (data) => {
       firstName: data?.fullName || data?.firstName,
       middleName: data?.middleName || "",
       lastName: data?.surname || data?.lastName,
-      dob: data?.dateOfBirth?.$date
-        ? moment(data.dateOfBirth.$date).format("DD-MM-YYYY")
-        : data?.dateOfBirth
-          ? moment(data.dateOfBirth).format("DD-MM-YYYY")
-          : "",
+      // Policy dates are read in INDIA time, whatever timezone this server runs
+      // in (lib/policyDates.js) — the picker's 16 Oct is stored as 15 Oct 18:30Z.
+      dob: formatPolicyDate(data?.dateOfBirth),
       gender: data?.gender,
       // Father details
       fatherTitle: data?.fatherTitle || "Mr.",
@@ -624,16 +622,8 @@ const buildFormDataFromPolicy = async (data) => {
       manufacturingMonth: data?.manufacturingMonth,
       engineNumber: data?.engineNumber,
       chassisNumber: data?.chassisNumber,
-      purchaseDate: data?.purchaseDate?.$date
-        ? moment(data.purchaseDate.$date).format("DD-MM-YYYY")
-        : data?.purchaseDate
-          ? moment(data.purchaseDate).format("DD-MM-YYYY")
-          : "",
-      registrationDate: data?.registrationDate?.$date
-        ? moment(data.registrationDate.$date).format("DD-MM-YYYY")
-        : data?.registrationDate
-          ? moment(data.registrationDate).format("DD-MM-YYYY")
-          : "",
+      purchaseDate: formatPolicyDate(data?.purchaseDate),
+      registrationDate: formatPolicyDate(data?.registrationDate),
       // Coverage options
       zeroDepreciation: data?.zeroDepreciation,
       zeroDepreciationPercentage: data?.zeroDepreciationPercentage,
@@ -651,11 +641,7 @@ const buildFormDataFromPolicy = async (data) => {
       paCoverYears: data?.paCoverYears,
       otherRelationName: data?.otherRelationName,
       appointeeName: data?.appointeeName,
-      nomineeDob: data?.nomineeDob?.$date
-        ? moment(data.nomineeDob.$date).format("DD-MM-YYYY")
-        : data?.nomineeDob
-          ? moment(data.nomineeDob).format("DD-MM-YYYY")
-          : "",
+      nomineeDob: formatPolicyDate(data?.nomineeDob),
       // Financier details
       hasFinancier: data?.hasFinancier,
       financierType: data?.financierType,

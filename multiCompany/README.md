@@ -110,6 +110,8 @@ duplicated amount.
 | `RELIANCE_WALLET_HOLD_ENABLED` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | The **bundled Reliance full-company** flow (`fullPolicycompany/relianceForm.js`, not the OD/TP handlers). On: after **Pay** is clicked, a policy whose `Paymentmethod` is wallet (or blank — the backend default) stops on the payment page: browser left open, nothing paid at Reliance, no Brisk certificate, no PDF merge; the job is recorded as stopped on purpose (`E100`, stage `reliance-wallet-hold`, no retry). `link` policies are not affected. `false`: the old behaviour — skip the link flow and carry on to the Brisk call. The wallet payment steps themselves are **not built yet**; this is where they go (`relianceForm.js`, the `shouldHoldForWallet` branch). Not related to the Breaker, which is a dev switch and must stay off on a real server. |
 | `KSHEMA_TP_FORM_ENABLED` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | On (and `KSHEMA_TP_PRODUCT_TYPE` set): a KSHEMA TP part runs the duplicated KSHEMA form for a third-party-only policy (§13) up to the Razorpay QR and the payment link, then releases the OD of the same policy. `false`: it logs in, fills the quote as far as the Product Type, lists the portal's Product Type options in the stop message (stage `tp-product`) and stops — nothing is chosen or bought. Needs `MULTI_COMPANY_AUTOMATION_ENABLED` too. |
 | `KSHEMA_TP_PRODUCT_TYPE` | automation `.env` | *(empty)* | The exact text of the liability-only option in KSHEMA's Product Type dropdown (matched exactly, spaces/case ignored, then read back). **Empty = the same stop as the switch-off one**, which is how the right text is found on the first run. |
+| `KSHEMA_SLOW_FIELD_RECOVERY_ENABLED` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | The **full-company KSHEMA flow and the TP copy** (§16). On: (1) when the Insured Declared Value box (after the Product Type) or the PA year / reason dropdown (after the PA Cover checkbox) is still missing after its normal 10 s wait, the Product Type is switched to the liability option and back to Bundled, or PA Cover is unticked and ticked again, and the field is looked for again; (2) when the portal answers a PA Cover change with a gateway / server error ("Http failure response … 504") PA Cover is unticked and ticked again and the section is filled again (§16.4). Two tries at most each. `false`: both are reported straight away, as before. |
+| `KSHEMA_SLOW_FIELD_WAIT_MS` | automation `.env` | `10000` | How long to look again after each try (kept within 3000–30000). |
 
 `MULTI_COMPANY_AUTOMATION_ENABLED` gates the OD/TP **portal** handlers (both the old OD-job / TP-job shape and `od` / `tp`
 parts). It does not gate the bundled flows or the Brisk PA part.
@@ -883,3 +885,131 @@ markup beyond the schedule link, the View Policy search option dropdown's DOM be
 Found on the way, not touched: `briskCertificate.js` filters `policy` documents by `onlinePolicyId` / `policyId`, fields that do not
 exist on `policy` records, so its policyFile update never matches.
 
+
+## 16. KSHEMA slow portal — the IDV box and the PA year dropdown
+
+Two fields on the KSHEMA quote form only exist once an earlier answer has been processed, and the portal is sometimes slow to
+render them (or never does): the **Insured Declared Value** box after the Product Type, and the **year** dropdown after the PA
+Cover checkbox (ticked by default). Before this the run waited 10 s, reported `the "…" box was not on the page`, and the job ended
+`failed_login_form` / `quote-pa-cover-details`, not retried (2026-10-15, job 6ad050380df69f7829bff368).
+
+### 16.1 What it does
+
+A field can carry `recover` (`fullPolicycompany/kshema/kshemaQuoteForm.js`; built by `fullPolicycompany/kshema/kshemaSlowFields.js`).
+When the field is still not found after its normal wait, `kshemaFields.js findAfterRecovery` runs the recovery, then looks for the
+field again for `KSHEMA_SLOW_FIELD_WAIT_MS` (10 s), up to **2 tries**. A field that shows up first time never reaches this code.
+
+| Field | Recovery | Ends in |
+|---|---|---|
+| Insured Declared Value | the Product Type is switched to another option (the liability one: "Two Wheeler-Long term Liability only", chosen from the live list by `pickOtherOption`, nothing hard-coded), wait for the spinner + 1.5 s, then "Two Wheeler-Bundled" again (the field's own select, read back), spinner + 1.5 s | **Bundled** — the re-select always runs once a switch was attempted; a failure says the product was left on X |
+| PA Cover Year (PA on) | PA Cover is unticked, spinner + 1 s, ticked again (read back), spinner + 1.5 s | **ticked** |
+| Reason for unselecting PA Cover (PA off) | PA Cover is ticked, then unticked again | **unticked** |
+
+If it still fails, the message names what was tried — `… box was not on the page even after switching the Product Type to "…" and
+back to "Two Wheeler-Bundled" 2 times (waited 10 s each time)` — and the stage is non-retryable as before. There is no colon inside
+the added text (`beautifyError` keeps only the text after the last colon).
+
+### 16.2 Where the code is
+
+- `fullPolicycompany/kshema/kshemaSlowFields.js` — new, **shared** (the TP copy requires it from there, it is not duplicated):
+  the two switches, `idvRecovery`, `paToggleRecovery`, its own spinner wait (`kshemaForm.js` is replaced by `kshemaTPForm.js` in the TP
+  flow, so it cannot be required from here). A recovery object holds no per-job state — two jobs run in one process.
+- `fullPolicycompany/kshema/kshemaFields.js` — `findAfterRecovery`, `opts.recover` in `typeIntoField` and `selectMatOption`,
+  `selectOtherMatOption`, `pickOtherOption`.
+- `kshemaQuoteForm.js` **and** `kshemaTPQuoteForm.js` — the same `fillSection` hook and PA hooks, line for line (the drift guard in
+  `test/kshemaTP.test.js` requires it). The copy's IDV is the `[TP] 4` empty one, so it has no IDV hook.
+- Tests: `test/kshemaSlowFields.test.js` (a fake portal + a virtual clock; the real field tables and helpers run against it).
+
+### 16.3 Not proven / open
+
+1. Whether KSHEMA keeps Make / Model / Variant / RTO when the Product Type is switched away and back. The manual workaround it
+   automates suggests it does; if it does not, the run fails at Save with the portal's own message and a re-fill step is needed.
+2. The "switch away" option is whatever the live list offers (liability preferred). If the portal pops a confirmation when the product
+   changes, the recovery stops with a `could not be switched` / `was left on` note — nothing is clicked blindly.
+3. Vehicle / PA failures are still non-retryable. If the field never shows after two tries a re-run is the operator's call.
+4. The `paCoverYear` last-resort selector (`first mat-select after any checkbox`) is unchanged.
+
+## 17. Policy dates are India time (nominee DOB 16 → 15, fixed 2026-10-15)
+
+A date picked on the Online Policy form (customer DOB, purchase / registration date, nominee DOB) is stored as local midnight in
+India — 16 Oct 2000 is `2000-10-15T18:30:00.000Z`. The job payload used to turn it into text with
+`moment(value).format("DD-MM-YYYY")`, which formats in the **timezone of the machine running it**: an IST laptop gave `16-10-2000`,
+a server on UTC gave `15-10-2000`. KSHEMA typed `Nominee DOB set to "15/10/2000"` for a DOB picked as 16/10/2000; the same shift hit
+`dob`, `purchaseDate` and `registrationDate` (and the DOB on a Brisk PA certificate, which re-parses `dob`) on that host.
+
+- **Fix:** `formatPolicyDate(value, format = "DD-MM-YYYY")` in `lib/policyDates.js` (a byte-identical copy lives in the backend as
+  `shared/policyDates.js`, checked by `test/sharedCore.test.js`; no requires). It reads the instant on the **India calendar** with
+  `Intl` and zone `Asia/Kolkata` — the same IANA data the browser used, so wartime (+06:30) DOBs round-trip too — and falls back to
+  a fixed +05:30 only when the runtime has no zone data. A bare `"YYYY-MM-DD"` is a calendar day and is kept; a day that does not
+  exist (`2000-02-31`) is `"Invalid date"`, never a rolled-over neighbour; nothing there is `""`.
+- **Used in:** the backend's `buildFullJobFormData` (`dao/onlinePolicyDao.js`, the source of most jobs' data) and this server's
+  `buildFormDataFromPolicy` (`server.js`, thin / hydrated jobs) — **deploy both**.
+- **Already queued / failed jobs** keep the old text until rebuilt; Retry or a re-save rebuilds the payload from the policy.
+- No `.env` switch: it is a formatting correction (no I/O, no storage). Setting `TZ=Asia/Kolkata` on the hosts is not needed.
+- **Not changed:** the `split("T")[0]` fallback for an unformatted ISO string in `kshemaQuoteForm.js` (customer and nominee DOB) —
+  the data path never gives it one; the `new Date().toLocaleDateString()` "today" fallbacks in the Reliance flows (only used when a
+  date is missing).
+
+### 16.4 The portal answers a PA Cover change with an error (the "504")
+
+2026-10-15, `PA Cover Year` was chosen and the premium calculation answered
+`Http failure response for …/api/v1/product/calc/…?type=premium_calc: 504 OK`. `fillSection` reads any error toast right after the
+spinner and failed the field on the spot ("Portal rejected the field update"); the same toast, still on screen, then failed TPPD
+Restrict too — "2 failed" was one toast read twice. The field itself had been set: the portal was slow, the data was fine.
+
+`fillPaCoverDetails` (both quote forms) now wraps its `fillSection` with `recoverSectionAfterPortalError` (`kshemaSlowFields.js`):
+
+1. only when **every** failure is such a toast and the status is transient — 5xx, 0 ("Unknown Error"), 408, 425, 429, or
+   timeout / gateway wording (`isTransientPortalError`). A 400 / 409 / 422 or "Please provide…" is a verdict on the data and is left alone;
+2. up to **2 tries**: wait until the toast and the spinner are gone (≤ `KSHEMA_SLOW_FIELD_WAIT_MS`, 10 s) → untick PA Cover → settle →
+   tick it again (tick then untick when PA is off) → settle → wait quiet → fill the PA fields again (re-picks the year, re-reads toasts);
+3. the checkbox that is toggled is the paCover field's own (`PA_COVER_FIELDS[0].selectors`); its label is logged
+   (`The "PA Cover" checkbox used for the recovery reads: "…"`) so it is visible which one it is;
+4. out of tries: one colon-free sentence — `… the portal answered the change with an error (HTTP 504 on the premium calculation) even
+   after un-ticking "PA Cover" and putting it back 2 times (waited 10 s each time). The portal is slow right now, so run this policy
+   again in a few minutes.` The job's retry rule is unchanged (a PA failure is not auto-retried).
+
+Same two switches as §16.1; no new ones. Not covered: a 504 in the **vehicle** or **premium** section still fails fast (there is no
+known "re-trigger" there). **Found on the way, not touched:** `kshemaFields.js` does not export `asLocator`, but `submitQuoteForm`
+destructures and calls it, so its "did the page change" radio-group check (and the TP copy's `[TP] 5` "Save and Finalize" check) have
+always thrown a swallowed `TypeError` and never matched. Exporting it would make the radio-group check fire at once on the quote page
+(its Yes/No radios are already there), so it needs a considered fix, not a one-word one.
+
+## 18. KSHEMA KYC: the Aadhaar upload the portal could not read (fixed 2026-10-15)
+
+When the last-4-digits route is refused ("No record found") the flow uses "Try with different document" and uploads the policy's own
+Aadhaar. Done by hand the same picture was accepted; the automation's upload was not read. Two defects in the old
+`downloadAadharCardImage` / `recoverKycWithDocumentUpload`, either one enough:
+
+1. **It could upload an S3 error page.** The link stored on the job is minted by the backend with `AWS_SIGNED_URL_EXPIRES_SECONDS = 300`
+   (5 minutes); KYC runs minutes later; an expired link makes S3 answer 403 with a small XML body. The downloader never looked at the
+   status, only refused "0 bytes", saved the body as `kshema_kyc_….jpg` and uploaded it. (The Reliance flow had this bug and was fixed
+   on 2026-10-14 — a fresh link and a look at the first bytes; the KSHEMA copy of the downloader was the old one.)
+2. **It deleted the file before the portal read it.** `fs.unlink` ran 1.5 s after `sendKeys`, before "Submit for Verification" — which is
+   when a browser upload reads the file (Chrome: `ERR_UPLOAD_FILE_CHANGED`).
+
+Also: the extension came from `Content-Type` with `.jpg` as the default, the download had no timeout, `els[0]` of `input[type=file]`
+was taken blind, and a refusal was never shown — the wait for "Details are correct - Verify" just timed out with a generic sentence.
+
+`fullPolicycompany/kshema/kshemaKycDocument.js` (shared; both quote forms delegate to it from `recoverKycWithDocumentUpload`, which
+is now exported):
+
+- `fetchAadhaarDocument` — **a fresh link minted from the S3 key now** (`getPresignedUrl`, 7 days); the stored link / `location` only
+  as fallbacks; redirects followed; 30 s limit; 15 MB ceiling; the first bytes are inspected with the Reliance fix's
+  `inspectDocumentFile` — an S3 XML / HTML / JSON / empty body is refused *before the portal is touched*, with S3's own words
+  (`S3 answered "AccessDenied - Request has expired" instead of the file even with a fresh link`); a picture / PDF gets the
+  extension it really has;
+- `uploadAadhaarForKyc` — document first, then "Try with different document", Aadhaar card selected, attach, **read back
+  `input.files`** (logged), wait until Submit is live, press it, then watch for the review screen **and** the page's error text
+  (stale "No record found" on the hand-off card is filtered out by a baseline read) — a refusal returns at once with the portal's words
+  (`The KSHEMA KYC page refused the uploaded document - it said "…"`); **the temp file is removed in a `finally`, after the outcome**.
+- Storage: one small file per recovery, removed in `finally`; `temp_uploads` is also wiped at server start. No new switch (a defect
+  fix on a recovery path). Retry rules unchanged: a refused document is not auto-retried, a stuck verification still is, and a
+  storage timeout (transient) may be.
+- Side fix: the TP copy used to compute `temp_uploads` relative to itself (`multiCompany/temp_uploads`); the shared module uses the
+  project's `temp_uploads`.
+- Tests: `test/kshemaKycDocument.test.js` (a loopback storage + a fake KYC page on a virtual clock; includes "the file still exists
+  when Submit is pressed").
+- Not proven live: the KYC page's markup is known from screenshots and earlier runs only; the input / echo checks are best-effort and
+  only log when they cannot tell. If a run still fails, the failure now carries the portal's own words and the `kyc_details_failed`
+  screenshot.

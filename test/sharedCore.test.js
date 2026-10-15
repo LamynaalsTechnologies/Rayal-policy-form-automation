@@ -29,3 +29,10 @@ test("tpVehicle has no requires (it is copied between repos as is)", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "lib", "tpVehicle.js"), "utf8");
   assert.equal(/\brequire\s*\(/.test(src), false);
 });
+
+test("lib/policyDates.js is byte-identical to the backend's shared/policyDates.js", (t) => {
+  const backend = path.join(__dirname, "..", "..", "RayalBrokers-backend", "shared", "policyDates.js");
+  if (!fs.existsSync(backend)) return t.skip("backend repo not next to this one");
+  const mine = fs.readFileSync(path.join(__dirname, "..", "lib", "policyDates.js"));
+  assert.ok(mine.equals(fs.readFileSync(backend)), "the two copies of policyDates.js differ");
+});
