@@ -708,6 +708,12 @@ on the first poll, so `submitQuoteForm` returned OK before KSHEMA had answered. 
 | `fillAddonsDetails` | answered only when the step is "Addon"; "Quote" fails with `The Add-ons page is not open - KSHEMA's step bar still shows Quote ... Nothing was answered.`; any other step (Summary) skips with a log line |
 | `fillPremiumDetails` | a third-party policy never types a discount (it is zeroed; the saved policy may still carry an old one), so the step logs `Premium & Discount: not used for a third-party policy, skipping` once instead of two "nothing to enter" lines |
 
+**`[TP] 12` (2026-10-16, same switch): any KSHEMA message after the first Save stops the run.** A TP run got the toast "The Liability product type is not available for the selected RTO state." after the first Save and
+Continue and did not see it: the error words had "unavailable" but not "not available", so it counted as harmless; the silent-save diagnosis then refilled fields and pressed Save again, and the final error
+listed "invalid fields" without KSHEMA's words. Now (a) `kshemaToast.js` ERROR_WORDS also has "not available", "not allowed", "not eligible", "not permitted", "not supported", "not valid" (both flows, login too);
+(b) `waitLoaderWatchingToast` reads the toast while the loader is still up (the old 30 s loader wait looked only at the spinner); (c) `refusalWhenStuck`: page still on Quote + any message except KSHEMA's add-ons one =
+`KSHEMA refused Save and Continue - its message was "..."`, Save pressed once, no refill, no later step. The refill + second Save runs only when KSHEMA said nothing. The full-company form gets (a) only.
+
 A step bar that cannot be read (the portal changed) falls back to the old test with one warning, so there is no new way to fail. **Switch `KSHEMA_SAVE_VERIFY_ENABLED`** (on unless false / 0 / no / off): off = the old test, the old
 wording and the old Premium lines, exactly (`test/kshemaSaveVerify.test.js` proves the old bug comes back with it off).
 

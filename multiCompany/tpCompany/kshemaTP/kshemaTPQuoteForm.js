@@ -802,11 +802,18 @@ async function submitQuoteForm(driver) {
     await driver.sleep(500);
 
     // Wait for the loader to clear
+    if (saveVerify.isSaveVerifyEnabled()) { // [TP] 12 read KSHEMA's message while the spinner is still up
+      const during = await saveVerify.waitLoaderWatchingToast(driver, { waitLoader: waitForKshemaLoaderToDisappear, readToast, timeoutMs: 30000 }); // [TP] 12
+      if (during.toast) sawToast = during.toast.text; // [TP] 12
+      if (during.toast && during.toast.isError) return { result: { ok: false, error: saveVerify.refusalMessage(during.toast.text), toast: during.toast.text } }; // [TP] 12
+      if (!during.loaderGone) debug("Loader wait timed out after clicking Save and Continue"); // [TP] 12
+    } else { // [TP] 12
     try {
       await waitForKshemaLoaderToDisappear(driver, 30000);
     } catch (e) {
       debug("Loader wait timed out after clicking Save and Continue");
     }
+    } // [TP] 12
 
     // Wait up to 15 seconds for the next page to appear, or for an error toast
     const deadline = Date.now() + 15000;
@@ -814,7 +821,7 @@ async function submitQuoteForm(driver) {
 
     while (Date.now() < deadline) {
       const toast = await readToast(driver);
-      if (toast && toast.text) sawToast = toast.text; // [TP] 11
+      if (toast && toast.text && !saveVerify.isAddonsToast(toast.text)) sawToast = toast.text; // [TP] 11 [TP] 12
       if (toast && toast.text) {
         // If it's asking about add-ons, that's just the next page loading normally!
         if (toast.text.toLowerCase().includes("add-ons")) {
@@ -875,6 +882,10 @@ async function submitQuoteForm(driver) {
     const first = await pressSave(button.element);
     if (first.result) return first.result;
     if (first.pageChanged) return { ok: true };
+
+    // [TP] 12: the page did not move and KSHEMA said something - that is the reason. Stop here: no refill, no second Save.
+    const stuck = saveVerify.refusalWhenStuck(sawToast); // [TP] 12
+    if (stuck) return stuck; // [TP] 12
 
     // Save did nothing: name the fields the portal marks invalid, fill ours again and press Save once more. // [TP] 6
     return await section.afterSilentSave(driver, { // [TP] 6

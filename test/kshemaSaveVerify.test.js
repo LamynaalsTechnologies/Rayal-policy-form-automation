@@ -264,7 +264,7 @@ test("the operator sentences quote KSHEMA's words, have no colon, and the switch
  * A fake KSHEMA Quote page. `step(ms)` and `toast(ms)` say what the step bar and the snackbar show `ms` after Save and
  * Continue was pressed. "Save and Finalize" is always visible, as on the real Quote page. Time is the virtual clock.
  */
-function fakeQuotePage(clock, { step = () => "Quote", toast = () => null } = {}) {
+function fakeQuotePage(clock, { step = () => "Quote", toast = () => null, loader = () => false } = {}) {
   const state = { clickedAt: null, presses: 0 };
   const shown = (text) => ({ isDisplayed: async () => true, getText: async () => text, getAttribute: async () => null });
   const button = { ...shown("Save and Continue"), click: async () => { state.presses++; state.clickedAt = clock.time(); } };
@@ -280,6 +280,7 @@ function fakeQuotePage(clock, { step = () => "Quote", toast = () => null } = {})
       const key = String(locator.value || locator);
       if (/save and continue/i.test(key)) return [button];
       if (key.includes("Save and Finalize")) return [shown("Save and Finalize")];
+      if (key.includes("mat-spinner")) return loader(since()) ? [shown("")] : []; // [TP] 12 KSHEMA's loader
       if (key === "mat-snack-bar-container [matsnackbarlabel]") {
         const text = toast(since());
         return text ? [shown(text)] : [];
@@ -344,13 +345,72 @@ test("submitQuoteForm: the page moves to Addon and the error comes a moment late
   });
 });
 
-test("submitQuoteForm: a message that is not worded as an error is added to the 'did not open' sentence", async () => {
+test("submitQuoteForm: [TP] 12 a message that is not worded as an error, page still on Quote - stopped in KSHEMA's words, Save pressed once", async () => {
   await withVirtualClock(async (clock) => {
     const page = fakeQuotePage(clock, { toast: (ms) => (ms >= 1000 && ms < 30000 ? "Rate lookup returned two rows" : null) });
     const { value } = await quiet(() => submit(page));
     assert.equal(value.ok, false);
-    assert.match(value.error, /did not open the next page within 15 seconds\. KSHEMA showed "Rate lookup returned two rows" and nothing else\./);
+    assert.match(value.error, /^KSHEMA refused Save and Continue - its message was "Rate lookup returned two rows"\./);
+    assert.equal(page.state.presses, 1, "no refill and no second Save");
   });
+});
+
+const RTO_ERROR = "The Liability product type is not available for the selected RTO state.";
+
+test("REGRESSION 2026-10-16 [TP] 12: 'not available for the selected RTO state' after the first Save is a refusal at once", async () => {
+  await withVirtualClock(async (clock) => {
+    const page = fakeQuotePage(clock, { toast: (ms) => (ms >= 700 ? RTO_ERROR : null) });
+    const { value } = await quiet(() => submit(page));
+    assert.equal(value.ok, false);
+    assert.match(value.error, /^KSHEMA refused Save and Continue - its message was "The Liability product type is not available for the selected RTO state\."/);
+    assert.equal(value.toast, RTO_ERROR);
+    assert.equal(page.state.presses, 1, "Save and Continue is pressed once - nothing is filled again");
+    assert.ok(clock.time() - page.state.clickedAt < 3000, "it stops on the first look, not after the 15 s wait");
+  });
+});
+
+test("[TP] 12: a message shown only WHILE the loader spins (gone before the loader) is still caught", async () => {
+  await withVirtualClock(async (clock) => {
+    const page = fakeQuotePage(clock, {
+      loader: (ms) => ms < 8000,
+      toast: (ms) => (ms >= 1500 && ms < 5000 ? RTO_ERROR : null),
+    });
+    const { value } = await quiet(() => submit(page));
+    assert.equal(value.ok, false);
+    assert.equal(value.toast, RTO_ERROR);
+    assert.equal(page.state.presses, 1);
+  });
+});
+
+test("[TP] 12: the loader watch - waits the loader out, keeps the last message, ignores the add-ons message", async () => {
+  await withVirtualClock(async (clock) => {
+    let calls = 0;
+    const waitLoader = async (_d, ms) => { clock.advance(ms); calls++; if (calls < 3) throw new Error("still spinning"); };
+    const quietToast = await saveVerify.waitLoaderWatchingToast({}, { waitLoader, readToast: async () => null });
+    assert.deepEqual(quietToast, { toast: null, loaderGone: true });
+
+    calls = 0;
+    const addons = await saveVerify.waitLoaderWatchingToast({}, { waitLoader, readToast: async () => ({ text: "Do you want add-ons?", isError: false }) });
+    assert.equal(addons.toast, null, "KSHEMA's own add-ons message is not a refusal");
+
+    const never = await saveVerify.waitLoaderWatchingToast({}, { waitLoader: async (_d, ms) => { clock.advance(ms); throw new Error("x"); }, readToast: async () => null, timeoutMs: 5000 });
+    assert.deepEqual(never, { toast: null, loaderGone: false }, "it gives up after the timeout");
+  });
+});
+
+test("[TP] 12: refusalWhenStuck - a message stops the run, no message / add-ons / switch off do not", async () => {
+  assert.equal(saveVerify.refusalWhenStuck(RTO_ERROR).ok, false);
+  assert.equal(saveVerify.refusalWhenStuck(""), null);
+  assert.equal(saveVerify.refusalWhenStuck("Do you want add-ons?"), null);
+  await withEnv({ KSHEMA_SAVE_VERIFY_ENABLED: "false" }, async () => assert.equal(saveVerify.refusalWhenStuck(RTO_ERROR), null));
+});
+
+test("[TP] 12: 'not available' and friends are error words (they were read as harmless)", () => {
+  const { classifyToast } = require(path.join(ROOT, "fullPolicycompany", "kshema", "kshemaToast.js"));
+  for (const text of [RTO_ERROR, "Plan not allowed for this vehicle", "Vehicle not eligible", "Not permitted", "Not supported", "Engine number not valid"]) {
+    assert.equal(classifyToast(text).isError, true, text);
+  }
+  assert.equal(classifyToast("Quote saved successfully").isError, false);
 });
 
 /** A page that must not be touched: any look at it fails the test. */

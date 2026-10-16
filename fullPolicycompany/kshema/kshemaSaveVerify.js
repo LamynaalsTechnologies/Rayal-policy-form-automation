@@ -220,8 +220,56 @@ async function addonsPageVerdict(driver, { readStep } = {}) {
   return { run: false, skip: `KSHEMA is on the "${plain(step)}" step, not the Addon step - there is no add-ons question to answer` };
 }
 
+/** KSHEMA's own, expected message when the Add-ons page opens. */
+const isAddonsToast = (text) => /add-ons/i.test(String(text || ""));
+
+/**
+ * [TP] 12: the loader wait after Save and Continue, reading KSHEMA's message while the spinner is still up. The old wait
+ * looked only at the spinner (up to 30 s), so a message shown during it could be gone before anyone read it.
+ *
+ * @param {Object} driver
+ * @param {Object} o
+ * @param {Function} o.waitLoader  async (driver, ms) - resolves when the spinner is gone, throws after ms
+ * @param {Function} o.readToast   async (driver) -> { text, isError } | null
+ * @param {number}   [o.timeoutMs] default 30000
+ * @returns {Promise<{ toast: {text:string,isError:boolean} | null, loaderGone: boolean }>}  the last message seen
+ */
+async function waitLoaderWatchingToast(driver, { waitLoader, readToast, timeoutMs = 30000 }) {
+  const end = Date.now() + timeoutMs;
+  let seen = null;
+  for (;;) {
+    try {
+      const toast = await readToast(driver);
+      if (toast && toast.text && !isAddonsToast(toast.text)) {
+        seen = toast;
+        if (toast.isError) return { toast: seen, loaderGone: false };
+      }
+    } catch (e) { }
+    try {
+      await waitLoader(driver, 1000);
+      return { toast: seen, loaderGone: true };
+    } catch (e) { }
+    if (Date.now() >= end) return { toast: seen, loaderGone: false };
+  }
+}
+
+/**
+ * [TP] 12: Save and Continue did not open the next step and KSHEMA showed a message. That message is the answer. Stop
+ * here. Do not fill fields again or press Save again, and do not go on to the next steps (on 2026-10-16 the run went on
+ * and the quote form was left empty). Null when the switch is off or there was no message.
+ */
+function refusalWhenStuck(toastText) {
+  if (!isSaveVerifyEnabled()) return null;
+  const said = plain(toastText);
+  if (!said || isAddonsToast(said)) return null;
+  return { ok: false, error: refusalMessage(toastText), toast: toastText };
+}
+
 module.exports = {
   isSaveVerifyEnabled,
+  isAddonsToast,
+  waitLoaderWatchingToast,
+  refusalWhenStuck,
   settleWindowMs,
   readActiveStepInPage,
   readActiveStep,

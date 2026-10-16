@@ -64,7 +64,10 @@ const ERROR_WORDS = [
   // any of them, so they have to stop the job rather than slip through.
   "captcha", "otp", "verification code",
   // Validation errors
-  "limits", "please provide"
+  "limits", "please provide",
+  // 2026-10-16: "The Liability product type is not available for the selected RTO state." after Save and Continue
+  // was read as harmless ("unavailable" is in the list, "not available" was not) and the run went on. [TP] 12
+  "not available", "not allowed", "not eligible", "not permitted", "not supported", "not valid"
 ];
 
 /** Words that clearly mean it worked — checked first so "logged in successfully" is not caught by "success"-adjacent noise. */
