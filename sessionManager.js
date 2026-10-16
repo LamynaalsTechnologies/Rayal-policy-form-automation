@@ -871,7 +871,7 @@ async function createRelianceJobBrowser(jobId) {
   // timed-out first attempt still has open (Chrome locks it).
   const userDataDir = path.join(
     PATHS.CLONED_PROFILE_BASE,
-    `reliance_job_${jobId}_${Date.now()}`
+    `reliance_job_${jobId}_${Date.now()}_${require("./lib/jobDirs").uniqueSuffix()}`
   );
   const profileInfo = {
     userDataDir,
@@ -898,6 +898,11 @@ async function createRelianceJobBrowser(jobId) {
     }
     throw driverError;
   }
+
+  // This job now holds its profile and download folders: nobody else's cleanup may delete them (lib/jobDirs.js).
+  const jobDirs = require("./lib/jobDirs");
+  jobDirs.claim(profileInfo.userDataDir);
+  jobDirs.claim(profileInfo.downloadDir);
 
   console.log(`✅ [Job ${jobId}] Browser window ready\n`);
   return { driver, profileInfo, jobId, usingPool: false };
@@ -1102,7 +1107,11 @@ async function cleanupJobBrowser(jobBrowserInfo, { hadError = false } = {}) {
       jobBrowserInfo.profileInfo.userDataDir
     ) {
       const profilePath = jobBrowserInfo.profileInfo.userDataDir;
-      if (fs.existsSync(profilePath)) {
+      // Only the last job holding the folder deletes it; another live job's window keeps its profile.
+      const lastHolder = require("./lib/jobDirs").release(profilePath);
+      if (!lastHolder) {
+        console.log(`ℹ️  [Job ${jobId}] Profile kept - another running job still uses it: ${profilePath}`);
+      } else if (fs.existsSync(profilePath)) {
         deleteDirectoryRecursive(profilePath);
         console.log(
           `✅ [Job ${jobId}] Cloned profile deleted: ${profilePath}`
@@ -1115,6 +1124,7 @@ async function cleanupJobBrowser(jobBrowserInfo, { hadError = false } = {}) {
     if (
       jobBrowserInfo.profileInfo &&
       jobBrowserInfo.profileInfo.downloadDir &&
+      require("./lib/jobDirs").release(jobBrowserInfo.profileInfo.downloadDir) &&
       fs.existsSync(jobBrowserInfo.profileInfo.downloadDir)
     ) {
       try {

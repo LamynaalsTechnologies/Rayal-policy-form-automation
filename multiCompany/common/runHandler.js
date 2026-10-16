@@ -76,7 +76,11 @@ async function runHandler({ company, policyType, data = {}, body }) {
     };
 
     const result = await body(ctx);
-    return result && typeof result === "object" ? result : { success: true };
+    const outcome = result && typeof result === "object" ? result : { success: true };
+    // A handler that RETURNS a failure (or a deliberate stop) rather than throwing is not a completed job: its window
+    // follows KEEP_BROWSER_OPEN_ON_ERROR like a thrown one. Only a completed job follows CLOSE_BROWSER_AFTER_COMPLETE.
+    if (outcome.success === false || outcome.inProgress === true) hadError = true;
+    return outcome;
   } catch (error) {
     hadError = true;
     if (isAutomationStop(error)) {

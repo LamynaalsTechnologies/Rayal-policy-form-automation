@@ -133,6 +133,9 @@ function alertError(text) {
  * @param {string}   [o.reformatTo]     after typing, the box shows this instead (a page that rewrites the value)
  * @param {string}   [o.dialogAfterType]  a dialog that appears once the amount is typed
  * @param {string}   [o.dialogAfterAdd]
+ * @param {string}   [o.popupAfterType]   Reliance's own error popup (a plain div with closePopUp(), not a .ui-dialog) once typed
+ * @param {string}   [o.popupAfterAdd]    the same popup, shown `popupDelayMs` of fake time after Add — and Add adds no row
+ * @param {number}   [o.popupDelayMs]
  * @param {string[]} [o.ticked]         proposals ticked in Pending Quotes (default only ours)
  * @param {boolean}  [o.noTable]        Pending Quotes' checkboxes are gone from the page
  * @param {boolean}  [o.addHidden]
@@ -151,6 +154,8 @@ function makePanel(o = {}) {
     addClicks: 0,
     rows: 3,
     dialogs: [],
+    popups: [],
+    addAt: null,
     log: [],
     alertText: "",
     alertAccepted: 0,
@@ -212,7 +217,8 @@ function makePanel(o = {}) {
       }
     } else if (el === panel.add) {
       panel.addClicks++;
-      panel.rows += 1;
+      panel.addAt = panel.clock;
+      if (!o.popupAfterAdd) panel.rows += 1;
       if (panel.rowTexts) panel.rowTexts.push(`CDT ${panel.cdtDisplay.value} Delete`);
       if (o.dialogAfterAdd) panel.dialogs.push(o.dialogAfterAdd);
     }
@@ -221,12 +227,16 @@ function makePanel(o = {}) {
   const afterTyping = () => {
     if (o.reformatTo !== undefined) panel.cdtDisplay.value = o.reformatTo;
     if (o.dialogAfterType) panel.dialogs.push(o.dialogAfterType);
+    if (o.popupAfterType) panel.popups.push(o.popupAfterType);
     if (o.payableChangesTo !== undefined) panel.payableDisplay.value = o.payableChangesTo;
   };
 
   const documentStub = () => {
     if (o.payableAfterMs && panel.clock >= o.payableAfterMs && !panel.payableDisplay.value && panel.radios.some((r) => r.checked)) {
       panel.payableDisplay.value = o.payable ?? "1,234.50";
+    }
+    if (o.popupAfterAdd && panel.addAt !== null && panel.clock - panel.addAt >= (o.popupDelayMs || 0) && !panel.popups.includes(o.popupAfterAdd)) {
+      panel.popups.push(o.popupAfterAdd);
     }
     return {
       getElementsByName: (name) => (name === "objAgentPaymentOption.PaymentType" ? panel.radios : []),
@@ -244,6 +254,10 @@ function makePanel(o = {}) {
             w.querySelectorAll = () => [btn];
             return w;
           });
+        }
+        if (/closePopUp/.test(String(sel))) {
+          // each popup: the close icon div (no words of its own) inside the div that holds the sentence
+          return panel.popups.map((text) => make({ parent: make({ text }) }));
         }
         if (sel === "tr") {
           // rows that carry words (the new payment-details row is what the next step reconciles); bare rows otherwise
@@ -861,4 +875,73 @@ test("relianceForm.js: the four nested catches around Pay let a payment-step fai
   }
   assert.ok(formSrc.includes("if (errorInfo.onPageError && !err.keepMessage) {"));
   assert.ok(formSrc.includes("if (e.details && e.details.screenshotUrl) {"), "a stop that took a picture hands it to the error log");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Reliance's own error popup ("Your CDT Account Does not have sufficient balance ...")                       */
+/* -------------------------------------------------------------------------- */
+
+const NO_BALANCE = "Your CDT Account Does not have sufficient balance to make payment";
+
+test("the CDT-balance sentence counts as a refusal (it has no 'insufficient' in it)", () => {
+  assert.equal(wallet.REFUSAL_WORDS.test(NO_BALANCE), true);
+  assert.equal(wallet.REFUSAL_WORDS.test("Your CDT Account does not have enough balance"), true);
+  assert.equal(wallet.REFUSAL_WORDS.test("Payment details added. Click Ok to continue"), false);
+});
+
+test("Add pressed and Reliance's popup says the CDT balance is too low: an error with its words, the balance advice, nothing paid", async () => {
+  const p = makePanel({ popupAfterAdd: NO_BALANCE, popupDelayMs: 0 });
+  const r = await run(p);
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.equal(r.code, "ADD_REFUSED");
+  assert.equal(r.portalText, NO_BALANCE);
+  assert.match(r.message, /Reliance said "Your CDT Account Does not have sufficient balance to make payment" when Add was pressed/);
+  assert.match(r.message, /top it up, then run the policy again/);
+  assert.match(r.message, /Nothing was paid\.$/);
+  assert.equal(p.addClicks, 1, "Add pressed once");
+});
+
+test("the popup that comes a few seconds after the Add click is still caught", async () => {
+  const p = makePanel({ popupAfterAdd: NO_BALANCE, popupDelayMs: 3000 });
+  const r = await run(p);
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.equal(r.code, "ADD_REFUSED");
+  assert.equal(r.portalText, NO_BALANCE);
+  assert.equal(p.addClicks, 1);
+});
+
+test("the popup shown when the amount is typed stops the step before Add is pressed", async () => {
+  const p = makePanel({ popupAfterType: NO_BALANCE });
+  const r = await run(p);
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.equal(r.code, "PAGE_REFUSED");
+  assert.match(r.message, /when 1,234\.50 was entered in the CDT box/);
+  assert.match(r.message, /top it up/);
+  assert.equal(p.addClicks, 0);
+});
+
+test("a popup that was already on the page before typing is not blamed on this payment", async () => {
+  const p = makePanel();
+  p.popups.push(NO_BALANCE); // left over from earlier on the page
+  const r = await run(p);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(p.addClicks, 1);
+});
+
+test("typing refused as 'not interactable' is tried once more after the box was scrolled to, then the script way", async () => {
+  const p = makePanel({ typingBroken: true });
+  const r = await run(p);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.via, "script");
+});
+
+test("the failure becomes a PaymentStepError that carries the page's words (the form's catch then takes the screenshot)", async () => {
+  const p = makePanel({ popupAfterAdd: NO_BALANCE, popupDelayMs: 0 });
+  const err = await quiet(() =>
+    wallet.payWithCdtOrStop({ driver: p.driver, ...p.opts, stop: () => { throw new Error("must not stop"); } })
+  ).then(() => null, (e) => e);
+  assert.ok(err instanceof wallet.PaymentStepError);
+  assert.equal(err.portalRejected, true);
+  assert.equal(err.keepMessage, true);
+  assert.match(err.message, /does not have sufficient balance/i);
 });

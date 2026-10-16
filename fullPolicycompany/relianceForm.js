@@ -96,6 +96,15 @@ const {
   kycDocumentReasonText,
   saveKycStatus,
 } = require("./relianceKycSubmit");
+const { selectProposerTitle } = require("../lib/proposerTitle");
+// The CKYC result page after SUBMIT shows the name Reliance read from the Aadhaar: it must be the policy's own name
+// (Full Name + Surname, any order) before PROCEED is pressed.
+const {
+  isKycNameCheckEnabled,
+  checkKycName,
+  kycNameMismatchMessage,
+  KycNameMismatchError,
+} = require("./relianceKycName");
 // The same page's UPLOAD DOCUMENT option and its Identity / Address Verification upload areas, by the page's own markup
 // (the old code clicked the FIRST selectDoc option — PAN — and put the two documents into the wrong handlers).
 const {
@@ -1561,12 +1570,12 @@ async function fillRelianceForm(
       // === Fill mandatory fields with safe methods ===
       console.log("Filling form fields...");
 
-      // Proposer Title
-      await safeSelectDropdown(
-        driver,
-        "proposerTitle1",
-        data.proposerTitle || "Mr."
-      );
+      // Proposer Title — the title chosen on the Online Policy (Mr. / Ms. / Mrs. / M/S, as Reliance spells it), Mr. when
+      // none was chosen; read back so a title the portal did not take is reported here, not as a blank field later.
+      await selectProposerTitle(driver, data.proposerTitle, {
+        select: safeSelectDropdown,
+        log: (line) => console.log(line),
+      });
 
       // Name fields
       await safeSendKeys(driver, By.id("FirstName"), data.firstName || "John");
@@ -1616,6 +1625,8 @@ async function fillRelianceForm(
 
       // === ADDRESS DROPDOWNS - Simplified approach ===
       console.log("Filling address dropdowns...");
+
+Breaker.checkpoint("stopthis-location")
 
       // 1. Select State only (skip dependent dropdowns)
       await safeSelectDropdown(driver, "state", data.state || "30"); // KARNATAKA
@@ -4519,6 +4530,24 @@ async function fillRelianceForm(
                           );
                         }
                         console.log(`✅ SUBMIT accepted — the next page is open (${opened.waitedMs} ms)`);
+
+                        // The page shows the name Reliance read from the document. It has to be THIS policy's name — checked
+                        // BEFORE the KYC counts as accepted and before PROCEED, so a mismatch ends the policy as a failed KYC
+                        // (the fallback screenshots this very page and saves the links) instead of carrying on with the
+                        // wrong person's KYC. An unreadable box is not a mismatch: the run carries on as before.
+                        if (isKycNameCheckEnabled()) {
+                          const nameCheck = await checkKycName(driver, { data, log: (line) => console.log(line) });
+                          if (nameCheck.state === "mismatch") {
+                            const nameMessage = kycNameMismatchMessage(nameCheck);
+                            console.log(`❌ ${nameMessage}`);
+                            await saveKycStatus(nameMessage, data, jobId);
+                            throw new KycNameMismatchError(nameMessage, { portalName: nameCheck.portalName });
+                          }
+                          if (nameCheck.state === "unreadable") {
+                            console.log(`⚠️ KYC name not checked — ${nameCheck.reason || "it could not be read"}; carrying on`);
+                          }
+                        }
+
                         kycAccepted = true; // the KYC is done: from here on nothing below is a KYC failure
                         await saveKycStatus(null, data, jobId); // KYC is done: nothing for the View page to say
                       } else {
@@ -4557,6 +4586,7 @@ async function fillRelianceForm(
                         console.log("⏳ Waiting for API response after SUBMIT (10 seconds)...");
                         await driver.sleep(10000);
                       }
+
 
                       // === STEP 4: Wait for and Click PROCEED button ===
                       console.log("Looking for PROCEED button...");

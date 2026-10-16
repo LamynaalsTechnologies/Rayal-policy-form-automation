@@ -61,7 +61,7 @@ async function createNationalJobBrowser(jobId) {
     const clonedUserDataDir = path.join(
       process.cwd(),
       "cloned_profiles_national",
-      `national_job_${jobId}_${Date.now()}`
+      `national_job_${jobId}_${Date.now()}_${require("./lib/jobDirs").uniqueSuffix()}`
     );
     const clonedProfileDir = path.join(clonedUserDataDir, "Default");
 
@@ -91,6 +91,9 @@ async function createNationalJobBrowser(jobId) {
       }
       throw driverError;
     }
+
+    // This job now holds its folder: nobody else's cleanup may delete it (lib/jobDirs.js).
+    require("./lib/jobDirs").claim(clonedUserDataDir);
 
     console.log(`✅ [National Job ${jobId}] Fresh browser created successfully\n`);
 
@@ -156,7 +159,12 @@ async function cleanupNationalJobBrowser(jobBrowserInfo, { hadError = false } = 
       try {
         // Remove the entire cloned profile directory
         const clonedBasePath = path.dirname(profileInfo.fullPath);
-        if (fs.existsSync(clonedBasePath)) {
+        // Only the last job holding the folder deletes it; another live job's window keeps its profile.
+        if (!require("./lib/jobDirs").release(clonedBasePath)) {
+          console.log(
+            `ℹ️  [National Job ${jobBrowserInfo.jobId}] Profile kept - another running job still uses it`
+          );
+        } else if (fs.existsSync(clonedBasePath)) {
           fs.rmSync(clonedBasePath, { recursive: true, force: true });
           console.log(
             `✅ [National Job ${jobBrowserInfo.jobId}] Cloned profile cleaned up: ${clonedBasePath}`

@@ -49,7 +49,13 @@ const MAX_PAYABLE_PAISE = 1000000 * 100; // Rs 10,00,000
 
 /** A dialog / alert whose words are a refusal (anything else it shows is reported, not treated as an error). */
 const REFUSAL_WORDS =
-  /insufficient|not enough|exceed|more than|invalid|not allowed|failed|error|mandatory|required|cannot|can not|unable|please (?:select|enter|choose)/i;
+  /insufficient|not enough|(?:not|no) (?:have )?(?:sufficient|enough)|sufficient balance|exceed|more than|invalid|not allowed|failed|error|mandatory|required|cannot|can not|unable|please (?:select|enter|choose)/i;
+
+/** What to do about a refusal that is about the CDT balance (the page's own words stay in the message untouched). */
+const balanceAdvice = (words) =>
+  /sufficient|enough|balance/i.test(String(words || ""))
+    ? " The CDT balance of this Reliance login is lower than the payable amount — top it up, then run the policy again."
+    : "";
 
 /* -------------------------------------------------------------------------- */
 /* Money — whole paise, never floats                                          */
@@ -156,6 +162,22 @@ function readPanelInPage(ids) {
     }
   }
 
+  // Reliance's own error popup is not a .ui-dialog / .k-window: a plain div with a close icon (onclick="closePopUp()"), the
+  // red "critical" image and a span carrying the sentence (onclick="setFocus('txtcdtReduced')"). Its sentence is a dialog
+  // like the others — "Your CDT Account Does not have sufficient balance to make payment" arrives this way.
+  var popupMarks = document.querySelectorAll("[onclick*='closePopUp'], img[src*='critical']");
+  for (i = 0; i < popupMarks.length; i++) {
+    var holder = popupMarks[i].parentElement;
+    var sentence = "";
+    for (var up = 0; holder && up < 3; up++) {
+      sentence = text(holder);
+      if (sentence) break;
+      holder = holder.parentElement;
+    }
+    if (!holder || !sentence || sentence.length > 400 || !shown(holder)) continue;
+    if (out.dialogs.indexOf(sentence) < 0) out.dialogs.push(sentence);
+  }
+
   var list = document.getElementById(ids.paymentTypeList);
   out.paymentTypeOptions = [];
   if (list) {
@@ -193,6 +215,23 @@ function readPanelInPage(ids) {
   }
   out.proposalBoxes = total;
   return out;
+}
+
+/** Bring the CDT amount box into view and focus it, so that typing into it is not refused as "not interactable". */
+function prepareBoxInPage(id) {
+  var el = document.getElementById(id);
+  if (!el) return false;
+  try {
+    el.scrollIntoView({ block: "center" });
+  } catch (e) {
+    /* best effort */
+  }
+  try {
+    el.focus();
+  } catch (e) {
+    /* best effort */
+  }
+  return true;
 }
 
 /** Click an element by id with a script click (the page's own onclick runs). Returns whether it was found. */
@@ -517,22 +556,31 @@ async function payWithCdt(driver, o = {}) {
     const wanted = plainAmount(paise);
     let via = "typed";
     let entered = null;
-    try {
-      const box = await driver.findElement(By.id(IDS.cdtDisplay));
+    // "element not interactable" (the box was behind the panel's own animation / below the fold) is tried once more
+    // after the box was scrolled to and focused; only then does the script way take over.
+    for (let attempt = 1; attempt <= 2 && !entered; attempt++) {
       try {
-        await box.clear();
+        await driver.executeScript(prepareBoxInPage, IDS.cdtDisplay).catch(() => {});
+        const box = await driver.findElement(By.id(IDS.cdtDisplay));
+        try {
+          await box.clear();
+        } catch (e) {
+          if (isStop(e) || isUnexpectedAlert(e)) throw e;
+          /* a box that cannot be cleared is typed over */
+        }
+        await box.sendKeys(wanted);
+        await guarded(() => box.sendKeys(Key.TAB), alerts); // the blur runs the page's onchange — it may raise an alert
+        await sleep(settleMs);
+        entered = enteredOf(await read());
       } catch (e) {
-        if (isStop(e) || isUnexpectedAlert(e)) throw e;
-        /* a box that cannot be cleared is typed over */
+        if (isStop(e)) throw e;
+        if (isUnexpectedAlert(e)) {
+          alerts.push(alertTextOf(e));
+          break;
+        }
+        log(`typing into the CDT amount box did not work${attempt < 2 ? ", trying once more" : ""} (${e && e.message})`);
+        if (attempt < 2) await sleep(settleMs);
       }
-      await box.sendKeys(wanted);
-      await guarded(() => box.sendKeys(Key.TAB), alerts); // the blur runs the page's onchange — it may raise an alert
-      await sleep(settleMs);
-      entered = enteredOf(await read());
-    } catch (e) {
-      if (isStop(e)) throw e;
-      if (isUnexpectedAlert(e)) alerts.push(alertTextOf(e));
-      else log(`typing into the CDT amount box did not work (${e && e.message})`);
     }
     // a refusal raised while typing: do not go on to a second way of putting the same amount in
     const refusedWhileTyping = alerts.find((w) => REFUSAL_WORDS.test(w));
@@ -545,7 +593,7 @@ async function payWithCdt(driver, o = {}) {
     if (refusedWhileTyping) {
       return fail(
         "PAGE_REFUSED",
-        `Reliance said "${plain(refusedWhileTyping)}" when ${formatPaise(paise)} was entered in the CDT box for ${proposal}. ${notAdded}`,
+        `Reliance said "${plain(refusedWhileTyping)}" when ${formatPaise(paise)} was entered in the CDT box for ${proposal}.${balanceAdvice(refusedWhileTyping)} ${notAdded}`,
         { portalText: refusedWhileTyping }
       );
     }
@@ -567,7 +615,7 @@ async function payWithCdt(driver, o = {}) {
     if (refusal) {
       return fail(
         "PAGE_REFUSED",
-        `Reliance said "${plain(refusal)}" when ${formatPaise(paise)} was entered in the CDT box for ${proposal}. ${notAdded}`,
+        `Reliance said "${plain(refusal)}" when ${formatPaise(paise)} was entered in the CDT box for ${proposal}.${balanceAdvice(refusal)} ${notAdded}`,
         { portalText: refusal }
       );
     }
@@ -617,17 +665,31 @@ async function payWithCdt(driver, o = {}) {
     log(`Add pressed${clickError ? ` (by script — ${clickError})` : ""}`);
     await sleep(afterAddMs);
 
-    // 9. what the page did
-    const alertAfter = await takeAlertText(driver);
-    const done = await read();
-    const doneDialogs = (done.dialogs || []).filter((d) => !baselineDialogs.has(d));
+    // 9. what the page did. Reliance's error popup can come a moment after the click: when the payment-details grid did not
+    //    grow and nothing has been said yet, look for a few more seconds before taking "no news" as good news.
+    let alertAfter = await takeAlertText(driver);
+    let done = await read();
+    let doneDialogs = (done.dialogs || []).filter((d) => !baselineDialogs.has(d));
+    if (!alertAfter && !doneDialogs.length && !(done.rows > rowsBefore)) {
+      const late = await poll(async () => {
+        const said = await takeAlertText(driver);
+        const p = await read();
+        const dialogs = (p.dialogs || []).filter((d) => !baselineDialogs.has(d));
+        return said || dialogs.length || p.rows > rowsBefore ? { said, p, dialogs } : null;
+      }, { ...waitOpts, timeoutMs: 4000 });
+      if (late) {
+        alertAfter = late.said;
+        done = late.p;
+        doneDialogs = late.dialogs;
+      }
+    }
     const wordsAfter = [...alerts.slice(alertsBeforeAdd), alertAfter, ...doneDialogs].filter(Boolean);
     const refusedAfter = wordsAfter.find((w) => REFUSAL_WORDS.test(w));
     if (refusedAfter) {
       return fail(
         "ADD_REFUSED",
         `Reliance said "${plain(refusedAfter)}" when Add was pressed for the CDT payment of ${formatPaise(paise)} for ` +
-          `${proposal}. Nothing was paid.`,
+          `${proposal}.${balanceAdvice(refusedAfter)} Nothing was paid.`,
         { portalText: refusedAfter }
       );
     }
@@ -726,6 +788,7 @@ module.exports = {
   formatPaise,
   plainAmount,
   readPanelInPage,
+  prepareBoxInPage,
   clickByIdInPage,
   setAmountInPage,
   PaymentStepError,

@@ -1463,6 +1463,10 @@ const KYC_INCOMPLETE_MARKERS = [
   "continue to digilocker",
   "try with different document",
   "complete your kyc",
+  // the portal's verdict on a document it read, e.g. "The gender on your document doesn't match your profile ..."
+  "doesn't match",
+  "does not match",
+  "verify you through digilocker",
 ];
 
 async function readKycErrorHere(driver) {
@@ -1654,6 +1658,9 @@ async function fillKYCDetails(driver, data, capture = null) {
     let kycUrl = "";
     // Only a Confirm & Verify the portal accepted sets this.
     let kycCompleted = false;
+    // True once the page was watched for a verdict long enough (the upload recovery's settle window, or the 30 s refusal
+    // watch) — the late look below then needs only one read instead of another settle window.
+    let kycSettled = false;
 
     for (let handle of handles) {
       if (handle !== originalWindow) {
@@ -1747,6 +1754,7 @@ async function fillKYCDetails(driver, data, capture = null) {
                 if (recovery.ok) {
                   log("   ✅ Recovered via document upload — continuing.");
                   kycCompleted = true;
+                  kycSettled = recovery.settled === true;
                 } else {
                   // Deliberately NOT switching back to the proposal tab — see
                   // the note on the switch below.
@@ -1773,6 +1781,7 @@ async function fillKYCDetails(driver, data, capture = null) {
                 }
               } else {
                 kycCompleted = true;
+                kycSettled = true; // watched for 30 s above and nothing came
               }
             } else {
               log("   ⚠️ No valid Aadhaar number found to extract last 4 digits.");
@@ -1799,7 +1808,12 @@ async function fillKYCDetails(driver, data, capture = null) {
     // the last moment the KYC tab is in front — a check here costs a second and
     // stops a refused KYC being carried into the payment step.
     if (kycCompleted) {
-      const lateError = await readKycError(driver);
+      // A KYC that was not watched for a verdict yet (the "already complete -> Continue" branch) gets a settle window:
+      // one read straight after the click is before the portal has drawn anything.
+      const { settleKycOutcome, kycValidationMessage } = require("../../../fullPolicycompany/kshema/kshemaKycDocument");
+      const lateError = kycSettled
+        ? await readKycError(driver)
+        : (await settleKycOutcome(driver, { readKycError })).text || null;
       if (lateError) {
         err(`KYC refused: ${lateError}`);
         if (capture) await capture("kyc_rejected", "kyc_rejected");
@@ -1813,11 +1827,7 @@ async function fillKYCDetails(driver, data, capture = null) {
           proposalUrl,
           stayedOnKycPage: true,
           kycStatus: lateError,
-          error:
-            `The KSHEMA KYC page refused the verification: "${lateError}". ` +
-            "Check the customer's Aadhaar number and name on the policy against " +
-            "their card, then run this policy again. The KYC page has been left " +
-            "open on screen.",
+          error: kycValidationMessage(lateError),
         };
       }
     }

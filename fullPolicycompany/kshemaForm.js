@@ -561,15 +561,18 @@ async function fillKshemaForm(data = {}) {
 
   try {
     const outcome = await runKshemaFlow(data, jobId, loginUrl, (b) => (jobBrowser = b));
-    // A clean run is either a COMPLETED policy or the deliberate stopping
-    // point. Both have to be listed: the flow used to end only at the stopping
-    // point, and when it grew a real completion the check still asked only
-    // about inProgress — so every successful policy was recorded as an error
-    // and, with KEEP_BROWSER_OPEN_ON_ERROR set, left its browser open.
-    hadError = !(
-      outcome && (outcome.success === true || outcome.inProgress === true)
-    );
-    return { ...outcome, browserLeftOpen: shouldKeepBrowserOpen(hadError) };
+    // Only a COMPLETED policy is "clean" (CLOSE_BROWSER_AFTER_COMPLETE decides its window). A failure AND a deliberate
+    // stop (Breaker / stopper, `inProgress`) follow KEEP_BROWSER_OPEN_ON_ERROR — the same rule as the Reliance and
+    // National forms — so a stop can still be inspected by hand, and is closed like any other job when that is off.
+    hadError = !(outcome && outcome.success === true);
+    const browserLeftOpen = shouldKeepBrowserOpen(hadError);
+    const result = { ...outcome, browserLeftOpen };
+    // The finally below closes the window when it is not kept: a sentence saying "left open on screen" would be false.
+    if (!browserLeftOpen) {
+      const { closedWindowWording } = require("./kshema/kshemaWindowNote");
+      result.error = closedWindowWording(result.error);
+    }
+    return result;
   } finally {
     // The browser used to be left open on EVERY path. That was right while the
     // job was to look at a login page; it is a leak now that real jobs run —
@@ -609,6 +612,9 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
 
   try {
     jobBrowser = await createKshemaJobBrowser(jobId);
+    // Hand the browser to fillKshemaForm: ITS finally closes the window and deletes this job's profile. Without this
+    // line its own `jobBrowser` stayed null, cleanup returned at once, and no KSHEMA window or profile was ever removed.
+    registerBrowser(jobBrowser);
     const { driver } = jobBrowser;
 
     // Screen-record this job's own window (no-op unless RECORDING_ENABLED).
@@ -1430,6 +1436,17 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
             {
               $set: {
                 paymentLink: paymentResult.paymentUrl,
+                // The picture of the payment QR, kept on the policy so the View page can show it. It was uploaded
+                // to S3 and only returned in the run's result, which nothing stored on a successful run.
+                ...(paymentResult.qrScreenshotKey
+                  ? {
+                      paymentQrScreenshot: {
+                        fileName: `payment_qr_${jobId}.png`,
+                        key: paymentResult.qrScreenshotKey,
+                        location: paymentResult.qrScreenshotUrl || null,
+                      },
+                    }
+                  : {}),
                 updatedAt: new Date()
               }
             }

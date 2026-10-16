@@ -295,7 +295,15 @@ test("link: a FRESH link minted from the key is used; the stored 5-minute link i
  *   review screen --Details are correct - Verify--> done
  * Time is virtual: driver.sleep() advances the clock the module reads through Date.now().
  */
-function fakeKycPage({ ocr = "ok", refusalText = "Unable to read the document", echoFileName = false, submitLiveAfterMs = 0 } = {}) {
+function fakeKycPage({
+  ocr = "ok",
+  refusalText = "Unable to read the document",
+  echoFileName = false,
+  submitLiveAfterMs = 0,
+  // what the page does AFTER "Details are correct - Verify": "clean" (done), "gender-mismatch" (blank for 3 s, then the
+  // DigiLocker card with the verdict), "tab-closed" (the portal closes the tab: reading it throws)
+  afterVerify = "clean",
+} = {}) {
   const state = {
     phase: "card", // card | upload | ocr | review | done
     clicks: [],
@@ -304,6 +312,7 @@ function fakeKycPage({ ocr = "ok", refusalText = "Unable to read the document", 
     fileSizeAtSubmit: null,
     offset: 0,
     ocrDoneAt: 0,
+    verifiedAt: 0,
     attachedAt: 0,
     sleeps: 0,
   };
@@ -336,7 +345,10 @@ function fakeKycPage({ ocr = "ok", refusalText = "Unable to read the document", 
     },
     () => !!state.attached && now() >= state.attachedAt + submitLiveAfterMs
   );
-  const verifyBtn = button("Details are correct - Verify", () => state.phase === "ocr", () => { state.phase = "done"; });
+  const verifyBtn = button("Details are correct - Verify", () => state.phase === "ocr", () => {
+    state.phase = "done";
+    state.verifiedAt = now();
+  });
   const combo = { async getText() { return "Aadhaar card"; }, async click() {}, async isDisplayed() { return true; } };
   const fileInput = {
     async isDisplayed() { return false; },
@@ -386,11 +398,18 @@ function fakeKycPage({ ocr = "ok", refusalText = "Unable to read the document", 
 
   // what the page's own error reader says: the hand-off card's text all along, the refusal once OCR has refused
   const readKycError = async () => {
+    if (state.phase === "done") {
+      if (afterVerify === "tab-closed") throw new Error("no such window: target window already closed");
+      if (afterVerify === "gender-mismatch" && now() >= state.verifiedAt + 3000) return GENDER_TEXT;
+      return null;
+    }
     if (refused()) return refusalText;
     return state.phase === "card" || state.phase === "upload" || state.phase === "ocr" ? "No record found" : null;
   };
   return { driver, state, readKycError };
 }
+
+const GENDER_TEXT = "The gender on your document doesn't match your profile. We'll verify you through DigiLocker instead.";
 
 /** Run one upload on the fake page, the storage serving `route`. */
 async function runUpload(opts = {}) {
@@ -518,4 +537,74 @@ test("wiring: the shared module removes the temp file in a finally, after the po
   assert.ok(attach > 0 && finallyAt > attach && discard > finallyAt, "discard is in the finally after the attach");
   assert.equal(text.slice(attach, finallyAt).includes("discardDocument("), false, "nothing discards the file between attach and the outcome");
   assert.equal(/fs\.unlink\(/.test(text.slice(attach, finallyAt)), false);
+});
+
+/* ---- the verdict that comes AFTER Verify (the "gender doesn't match" run, 2026-10-15) ---- */
+
+test("verify: the review screen going away is not success — the gender-mismatch verdict drawn 3 s later is caught and reported in the portal's words", async () => {
+  const { result, state } = await runUpload({ page: { afterVerify: "gender-mismatch" } });
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.retryable, false);
+  assert.equal(result.kycStatus, GENDER_TEXT);
+  assert.match(result.error, /^KYC validation error - KSHEMA said "The gender on your document doesn't match your profile\./);
+  assert.match(result.error, /Correct the customer's gender, name or date of birth on the policy/);
+  assert.match(result.error, /left open on screen\.$/);
+  assert.ok(state.clicks.includes("Details are correct - Verify"), "it did get as far as Verify");
+});
+
+test("verify: a KYC that really finished stays clean for the whole settle window and is accepted", async () => {
+  const { result, state } = await runUpload({ page: { afterVerify: "clean" } });
+  assert.deepEqual(result, { ok: true, settled: true });
+  assert.ok(state.offset >= 10000, `it waited out the settle window (${state.offset} ms of fake time)`);
+});
+
+test("verify: the portal closing the KYC tab is not a refusal", async () => {
+  const { result } = await runUpload({ page: { afterVerify: "tab-closed" } });
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test("verify: KSHEMA_KYC_SETTLE_ENABLED=false is the old behaviour (one look, then ok) — the way back", async () => {
+  const before = process.env.KSHEMA_KYC_SETTLE_ENABLED;
+  process.env.KSHEMA_KYC_SETTLE_ENABLED = "false";
+  try {
+    const { result } = await runUpload({ page: { afterVerify: "gender-mismatch" } });
+    assert.equal(result.ok, true, "the verdict arrives after the single look");
+  } finally {
+    if (before === undefined) delete process.env.KSHEMA_KYC_SETTLE_ENABLED;
+    else process.env.KSHEMA_KYC_SETTLE_ENABLED = before;
+  }
+});
+
+test("verify: KSHEMA_KYC_SETTLE_MS is kept within 3 and 30 seconds", async () => {
+  const before = process.env.KSHEMA_KYC_SETTLE_MS;
+  try {
+    process.env.KSHEMA_KYC_SETTLE_MS = "100"; // asks for 0.1 s: raised to 3 s, so the 3 s verdict is still seen
+    const { result } = await runUpload({ page: { afterVerify: "gender-mismatch" } });
+    assert.equal(result.ok, false);
+  } finally {
+    if (before === undefined) delete process.env.KSHEMA_KYC_SETTLE_MS;
+    else process.env.KSHEMA_KYC_SETTLE_MS = before;
+  }
+});
+
+test("verify: an Aadhaar-detail mismatch gets the 'correct it on the policy' advice; anything else the image advice", () => {
+  const { kycValidationMessage } = require(path.join(ROOT, "fullPolicycompany", "kshema", "kshemaKycDocument.js"));
+  assert.match(kycValidationMessage("Name does not match"), /Correct the customer's gender, name or date of birth/);
+  const other = kycValidationMessage("Verification failed");
+  assert.match(other, /Check the customer's Aadhaar card image/);
+  assert.ok(!/:/.test(kycValidationMessage("Error: bad : colon")), "no colon survives into the sentence");
+});
+
+test("wiring: both quote forms settle before leaving the KYC tab, and know the portal's mismatch wording", () => {
+  for (const file of [
+    path.join(ROOT, "fullPolicycompany", "kshema", "kshemaQuoteForm.js"),
+    path.join(ROOT, "multiCompany", "tpCompany", "kshemaTP", "kshemaTPQuoteForm.js"),
+  ]) {
+    const src = read(file);
+    assert.ok(src.includes("settleKycOutcome(driver, { readKycError })"), `${path.basename(file)}: late look settles`);
+    assert.ok(src.includes("kycValidationMessage(lateError)"), `${path.basename(file)}: validation sentence`);
+    for (const marker of ["doesn't match", "does not match", "verify you through digilocker"]) {
+      assert.ok(src.includes(`"${marker}"`), `${path.basename(file)}: marker ${marker}`);
+    }
+  }
 });

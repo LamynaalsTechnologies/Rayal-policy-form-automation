@@ -434,6 +434,10 @@ const sweepOrphanedProfiles = () => {
         const stats = fs.statSync(profilePath);
         const ageMs = Date.now() - stats.mtimeMs;
         if (ageMs < ORPHAN_PROFILE_MAX_AGE_MS) continue; // may still be in use
+        // A folder a job of THIS process still holds (a long-running or detached job, or a window kept open for
+        // inspection) is never swept, however old it looks: the top folder's date does not move while Chrome writes
+        // inside it. lib/jobDirs.js — the same claims the jobs' own cleanups honour.
+        if (require("./lib/jobDirs").holdersOf(profilePath) > 0) continue;
 
         let size = 0;
         try {

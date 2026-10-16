@@ -49,6 +49,21 @@ const REVIEW_WAIT_MS = 40000;
 const AFTER_VERIFY_WAIT_MS = 20000;
 const POLL_MS = 500;
 
+/**
+ * How long the KYC page has to stay free of any refusal before the KYC counts as done (2026-10-15).
+ *
+ * After "Details are correct - Verify" the portal removes the review screen and shows a blank / loading state for a few
+ * seconds BEFORE it draws the DigiLocker card with its verdict ("The gender on your document doesn't match your
+ * profile ..."). "The review button is gone and no error yet" was taken as success, and the run went on to payment.
+ * ON unless KSHEMA_KYC_SETTLE_ENABLED is false / 0 / no / off (off = one look, the old behaviour).
+ */
+const settleEnabled = () => !/^(false|0|no|off)$/i.test(String(process.env.KSHEMA_KYC_SETTLE_ENABLED || "").trim());
+const settleWindowMs = () => {
+  const asked = parseInt(process.env.KSHEMA_KYC_SETTLE_MS, 10);
+  const ms = Number.isFinite(asked) && asked > 0 ? asked : 10000;
+  return Math.min(Math.max(ms, 3000), 30000);
+};
+
 /** One line, no colon, safe to put in the operator's message. */
 const plain = (text) =>
   String(text || "")
@@ -56,6 +71,50 @@ const plain = (text) =>
     .replace(/\s+/g, " ")
     .replace(/:/g, " -")
     .trim();
+
+/**
+ * The operator's sentence for a refusal the KYC page showed AFTER the document was read, in the portal's own words.
+ * No colon in it (beautifyError keeps only the text after the last one).
+ */
+function kycValidationMessage(portalText) {
+  const said = plain(portalText);
+  const mismatch = /match|gender|date of birth|\bdob\b|name/i.test(said);
+  return (
+    `KYC validation error - KSHEMA said "${said}". ` +
+    (mismatch
+      ? "The details on the Aadhaar document do not agree with the details on the policy. Correct the customer's " +
+        "gender, name or date of birth on the policy so they match the Aadhaar, then run the policy again. "
+      : "Check the customer's Aadhaar card image on the policy, then run the policy again. ") +
+    "The KYC page has been left open on screen."
+  );
+}
+
+/**
+ * Has the KYC page stayed free of any refusal for the whole settle window? Returns the moment one appears.
+ *
+ * @param {Object} driver
+ * @param {Object} o
+ * @param {Function} o.readKycError  async (driver) -> the page's error / incomplete text or null
+ * @param {Function} [o.sleep]       async (ms)
+ * @param {number}   [o.settleMs]    override the window (tests)
+ * @returns {Promise<{ok:true}|{ok:false, text:string}>}
+ */
+async function settleKycOutcome(driver, { readKycError, sleep, settleMs } = {}) {
+  const pause = sleep || ((ms) => driver.sleep(ms));
+  const windowMs = settleEnabled() ? (Number.isFinite(settleMs) ? settleMs : settleWindowMs()) : 0;
+  const end = Date.now() + windowMs;
+  for (;;) {
+    let text = null;
+    try {
+      text = await readKycError(driver);
+    } catch (e) {
+      text = null; // the tab was closed by the portal, or is between pages: not a refusal
+    }
+    if (text) return { ok: false, text };
+    if (Date.now() >= end) return { ok: true };
+    await pause(POLL_MS);
+  }
+}
 
 /** A problem with the DOCUMENT (nothing reached the portal). `transient` = time could fix it. */
 class KshemaDocumentError extends Error {
@@ -563,7 +622,9 @@ async function uploadAadhaarForKyc(driver, data, jobId, opts = {}) {
     await clickElement(driver, verifyBtn, "Details are correct - Verify");
     log("   ✅ Clicked Details are correct - Verify");
 
-    // 7. Watch it move on. Still on the review screen with no error = cancel, retry later.
+    // 7. Watch it move on. Still on the review screen with no error = cancel, retry later. The review screen going away
+    //    is NOT success by itself: the verdict (DigiLocker card + "gender doesn't match" and the like) is drawn a few
+    //    seconds later, so the page has to stay clean for a settle window first.
     const afterDeadline = Date.now() + AFTER_VERIFY_WAIT_MS;
     while (Date.now() < afterDeadline) {
       const freshError = await readKycError(driver).catch(() => null);
@@ -578,7 +639,19 @@ async function uploadAadhaarForKyc(driver, data, jobId, opts = {}) {
         };
       }
       const stillOnReview = await driver.findElements(buttonWithText("details are correct"));
-      if (stillOnReview.length === 0) return { ok: true };
+      if (stillOnReview.length === 0) {
+        const settled = await settleKycOutcome(driver, { readKycError, sleep });
+        if (!settled.ok) {
+          warn(`   ✗ The KYC page refused the verification: ${plain(settled.text)}`);
+          return {
+            ok: false,
+            retryable: false,
+            kycStatus: settled.text,
+            error: kycValidationMessage(settled.text),
+          };
+        }
+        return { ok: true, settled: true };
+      }
       await sleep(1000);
     }
 
@@ -607,6 +680,8 @@ async function uploadAadhaarForKyc(driver, data, jobId, opts = {}) {
 module.exports = {
   fetchAadhaarDocument,
   uploadAadhaarForKyc,
+  settleKycOutcome,
+  kycValidationMessage,
   discardDocument,
   downloadToFile,
   documentMessage,

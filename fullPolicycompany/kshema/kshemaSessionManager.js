@@ -16,6 +16,7 @@ const fs = require("fs");
 const { CONFIG, PATHS, createJobBrowserDriver } = require("./kshemaBrowserConfig");
 const { shouldKeepBrowserOpen, logRetainedBrowser } = require("../../debugRetention");
 const { log, debug, warn, err } = require("./kshemaLog");
+const jobDirs = require("../../lib/jobDirs");
 
 /**
  * Open a browser for one KSHEMA job.
@@ -33,7 +34,7 @@ async function createKshemaJobBrowser(jobId) {
     // from under the running retry.
     const userDataDir = path.join(
       PATHS.CLONED_PROFILE_BASE,
-      `kshema_job_${jobId}_${Date.now()}`
+      `kshema_job_${jobId}_${Date.now()}_${jobDirs.uniqueSuffix()}`
     );
     const profileDir = path.join(userDataDir, "Default");
 
@@ -70,6 +71,9 @@ async function createKshemaJobBrowser(jobId) {
       }
       throw driverError;
     }
+
+    // This job now holds its folder: nobody else's cleanup may delete it (lib/jobDirs.js).
+    jobDirs.claim(userDataDir);
 
     debug(`✅ Job ${jobId}: Fresh browser created successfully`);
     return { driver, profileInfo, jobId };
@@ -121,6 +125,11 @@ async function cleanupKshemaJobBrowser(jobBrowserInfo, { hadError = false } = {}
 
     if (profileInfo && profileInfo.userDataDir) {
       try {
+        // Only the last job holding the folder deletes it; another live job's window keeps its profile.
+        if (!jobDirs.release(profileInfo.userDataDir)) {
+          debug(`🧹 Job ${jobId}: Profile kept - another running job still uses it`);
+          return;
+        }
         fs.rmSync(profileInfo.userDataDir, { recursive: true, force: true });
         debug(`🧹 Job ${jobId}: Profile removed`);
       } catch (rmError) {
