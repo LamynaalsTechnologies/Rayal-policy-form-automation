@@ -1641,6 +1641,8 @@ async function fillRelianceMultiForm( // [MC] 6
       // === ADDRESS DROPDOWNS - Simplified approach ===
       console.log("Filling address dropdowns...");
 
+Breaker.checkpoint("stopthis-location")
+
       // 1. Select State only (skip dependent dropdowns)
       await safeSelectDropdown(driver, "state", data.state || "30"); // KARNATAKA
       console.log("Selected State");

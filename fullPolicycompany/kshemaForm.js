@@ -1243,7 +1243,9 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     // KYC — the one case where somebody has to open that page by hand — threw
     // the link away. It is captured either way, so it is stored either way.
 
-    if (kycResult.kycUrl || kycResult.proposalUrl) {
+    // Also when the KYC simply WORKED: a policy that was refused earlier, edited and run again still carries the old
+    // refusal in `kycStatus`, and the View page kept telling the operator "KYC not completed" about a KYC that had passed.
+    if (kycResult.kycUrl || kycResult.proposalUrl || kycResult.ok) {
       log("💾 Updating OnlinePolicy with the KYC and proposal links...");
       let client = null;
       try {
@@ -1275,9 +1277,12 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
                 // What the portal said about the KYC, in its own words —
                 // "No record found" and the like. Stored so the operator can
                 // read it on the policy instead of hunting through job logs.
+                // A refusal is written; a KYC that passed CLEARS the note left by an earlier attempt.
                 ...(kycResult.kycStatus
                   ? { kycStatus: kycResult.kycStatus }
-                  : {}),
+                  : kycResult.ok
+                    ? { kycStatus: null }
+                    : {}),
                 updatedAt: new Date()
               }
             }
