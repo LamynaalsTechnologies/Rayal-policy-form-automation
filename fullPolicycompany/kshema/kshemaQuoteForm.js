@@ -237,106 +237,11 @@ const CUSTOMER_FIELDS = [
  * @returns {Promise<{ok, filled, failures, error, screenshots}>}
  */
 async function fillSection(driver, data, fields, sectionName, capture = null) {
-  const filled = [];
-  const failures = [];
-  const screenshots = [];
-
-  for (const field of fields) {
-    const value = field.value(data);
-    let isEmpty = Array.isArray(value) ? value.length === 0 : !value;
-    if (field.type === "checkbox" && value === false) {
-      isEmpty = false; // false is a valid value for a checkbox (uncheck)
-    }
-
-    if (isEmpty) {
-      const isRequired = typeof field.required === "function" ? field.required(data) : field.required;
-      if (isRequired) {
-        failures.push({
-          label: field.label,
-          reason: `this policy has no ${field.label.toLowerCase()} to enter`,
-        });
-      } else {
-        log(`   – ${field.label}: nothing to enter, skipping`);
-      }
-      continue;
-    }
-
-    let result;
-    if (field.type === "radio") {
-      result = await selectMatRadio(driver, field.selectors, value, field.label);
-    } else if (field.type === "checkbox") {
-      result = await require("./kshemaFields").setMatCheckbox(driver, field.selectors, value, field.label);
-    } else if (field.type === "slider") {
-      result = await require("./kshemaFields").setSlider(driver, field.selectors, value, field.label);
-    } else if (field.type === "date") {
-      result = await typeIntoDateField(driver, field.selectors, value, field.label);
-    } else if (field.type === "select") {
-      result = await selectMatOption(driver, field.selectors, value, field.label, {
-        fuzzy: field.fuzzy,
-        searchable: field.searchable,
-        searchTerm: field.searchValue ? field.searchValue(data) : null,
-        noise: field.noise,
-        emptyReason: field.emptyReason,
-        recover: field.recover || null,
-        beforeClose: capture
-          ? async (why) => {
-            const shot = await capture(
-              `kshema_${field.key}_${why}`,
-              `${field.key}_${why.replace(/-/g, "_")}`
-            );
-            if (shot && shot.screenshotUrl) screenshots.push(shot);
-          }
-          : null,
-      });
-    } else {
-      result = await typeIntoField(driver, field.selectors, value, field.label, {
-        stripSpaces: field.stripSpaces,
-        maxLength: field.maxLength,
-        recover: field.recover || null,
-      });
-    }
-
-    if (result.ok) {
-      filled.push(field.label);
-      // Some fields kick off an async lookup that re-renders the ones below
-      // them. Wait it out rather than typing into a form that is mid-rebuild.
-      if (field.settleMs) {
-        // Give the loader a moment to appear, then wait for it to disappear
-        await driver.sleep(300);
-        await require("../kshemaForm").waitForKshemaLoaderToDisappear(driver, 20000);
-        
-        // Check if an error toast appeared after the reload (e.g. "Quotation already converted to proposal")
-        const { readToast: getToast } = require("./kshemaToast");
-        const toast = await getToast(driver);
-        if (toast && toast.isError) {
-          const errMsg = `Portal rejected the field update: "${toast.text}"`;
-          warn(`   ✗ ${field.label}: ${errMsg}`);
-          failures.push({ label: field.label, reason: errMsg });
-        }
-      }
-    } else if (field.required) {
-      warn(`   ✗ ${field.label}: ${result.reason}`);
-      failures.push({ label: field.label, reason: result.reason });
-    } else {
-      warn(`   – ${field.label}: ${result.reason} (not required, carrying on)`);
-    }
-  }
-
-  const ok = failures.length === 0;
-  log(`${ok ? "✓" : "⚠️ "} ${sectionName}: ${filled.length} field(s) filled` +
-    (failures.length ? `, ${failures.length} failed` : ""));
-
-  return {
-    ok,
-    filled,
-    failures,
-    screenshots,
-    error: ok
-      ? null
-      : `Could not fill the ${sectionName} on the KSHEMA quote form: ` +
-      failures.map((f) => `${f.label} — ${f.reason}`).join("; ") +
-      ".",
-  };
+  // The shared, careful version (kshemaSection.js): the same first pass as before, then — behind
+  // KSHEMA_FIELD_RECHECK_ENABLED — one more try for a failed field and a read-back of every filled one.
+  return require("./kshemaSection").fillSection(driver, data, fields, sectionName, capture, {
+    waitForLoader: (d, ms) => require("../kshemaForm").waitForKshemaLoaderToDisappear(d, ms),
+  });
 }
 
 /** Fill the customer details section. */
@@ -821,6 +726,7 @@ async function submitQuoteForm(driver) {
   const { asLocator, clickElement, findVisible } = require("./kshemaFields");
   const { waitForKshemaLoaderToDisappear } = require("../kshemaForm");
   const { readToast } = require("./kshemaToast");
+  const section = require("./kshemaSection");
 
   log("🚀 Submitting Quote Form...");
   const buttonSelectors = [
@@ -836,8 +742,9 @@ async function submitQuoteForm(driver) {
     return { ok: false, error: 'Could not find the "Save and Continue" button on the page.' };
   }
 
-  try {
-    await clickElement(driver, button.element, "Save and Continue button");
+  // One press of Save and Continue and the wait for its answer. Returns { pageChanged } or { result } (a refusal).
+  const pressSave = async (saveButton) => {
+    await clickElement(driver, saveButton, "Save and Continue button");
     await driver.sleep(500);
 
     // Wait for the loader to clear
@@ -862,14 +769,22 @@ async function submitQuoteForm(driver) {
         }
 
         if (toast.isError) {
-          return { ok: false, error: `Portal rejected the submission: "${toast.text}"`, toast: toast.text };
+          return { result: { ok: false, error: `Portal rejected the submission: "${toast.text}"`, toast: toast.text } };
         }
       }
 
-      // Check if the add-ons radio group appeared
+      // Check if the add-ons page appeared — by ITS question. (This used to look for any Yes/No radio group, which the
+      // quote form itself has — "Is New Vehicle?" — and it never ran at all: asLocator was not exported, so the call
+      // threw inside this try. A Save was only recognised by the "add-ons" toast.)
       try {
-        const els = await driver.findElements(asLocator('//mat-radio-group[.//input[@value="Yes" or @value="No"]]'));
-        if (els.length > 0 && await els[0].isDisplayed()) {
+        const els = await driver.findElements(
+          asLocator('//descendant::*[text()[contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "want add-on")]]')
+        );
+        let shownNow = false;
+        for (const el of els) {
+          if (await el.isDisplayed()) { shownNow = true; break; }
+        }
+        if (shownNow) {
           pageChanged = true;
           break;
         }
@@ -878,14 +793,30 @@ async function submitQuoteForm(driver) {
       await driver.sleep(500);
     }
 
-    if (!pageChanged) {
-      return {
-        ok: false,
-        error: "The page did not change after 15 seconds. There might be a silent validation error on the quote form. Please check the screenshot."
-      };
-    }
+    return { pageChanged };
+  };
 
-    return { ok: true };
+  const SILENT =
+    "The page did not change after 15 seconds. There might be a silent validation error on the quote form. Please check the screenshot.";
+
+  try {
+    // Every field filled so far, read back once more: an answer in a later section can clear an earlier one, and the
+    // portal then refuses the quote (KSHEMA_FIELD_RECHECK_ENABLED; does nothing when it is off).
+    await section.recheckBeforeSave(driver);
+
+    const first = await pressSave(button.element);
+    if (first.result) return first.result;
+    if (first.pageChanged) return { ok: true };
+
+    // Save did nothing: name the fields the portal marks invalid, fill ours again and press Save once more.
+    return await section.afterSilentSave(driver, {
+      fallbackError: SILENT,
+      retrySave: async () => {
+        const again = await findVisible(driver, buttonSelectors, null, 10000);
+        if (!again || !again.element) return { pageChanged: false };
+        return pressSave(again.element);
+      },
+    });
   } catch (e) {
     return { ok: false, error: `Failed to click Save and Continue: ${e.message}` };
   }
@@ -1362,6 +1293,14 @@ async function fillNomineeDetails(driver, data, capture = null) {
     log("⏭️  PA Cover is OFF or Brisk — skipping nominee entry.");
   }
 
+  // 6b. The financier (KSHEMA_FINANCIER_ENABLED): the Yes/No question below the nominee, then the financier's name and
+  //     Additional Details. A policy with no financier is not touched. Fails with a plain sentence — the caller takes the
+  //     screenshot — so nothing is filed with the wrong financier.
+  {
+    const financier = await require("./kshemaFinancier").fillFinancier(driver, data);
+    if (!financier.ok) return { ok: false, error: financier.error };
+  }
+
   // 7. Click Save and Finalize button
   try {
     log("🚀 Clicking Save and Finalize...");
@@ -1374,9 +1313,20 @@ async function fillNomineeDetails(driver, data, capture = null) {
       const cls = await finalizeBtn.getAttribute("class");
       return disabled !== "true" && disabled !== "disabled" && (!cls || !cls.includes("mat-mdc-button-disabled"));
     }, 10000).catch(() => {});
+
+    // A button that is STILL disabled cannot be pressed. When the form shows why (the Financier Name box, other fields not
+    // filled) stop here with that — KSHEMA_AFTER_FINALIZE_ENABLED; with no reason found it is pressed as before.
+    const afterFinalize = require("./kshemaAfterFinalize");
+    const blocked = await afterFinalize.checkFinalizeEnabled(driver, finalizeBtn, data);
+    if (!blocked.ok) return { ok: false, error: blocked.error };
     
     await clickElement(driver, finalizeBtn, "Save and Finalize button");
     await driver.sleep(2000); // Wait for navigation
+
+    // The loader that opens while KSHEMA saves: wait for it to end (progress in the log), then read the Financier Name box
+    // again — a box the portal marks invalid means it refused to move on. KSHEMA_AFTER_FINALIZE_ENABLED.
+    const saved = await afterFinalize.waitAfterFinalize(driver, data);
+    if (!saved.ok) return { ok: false, error: saved.error };
     
     // Check if an error toast appeared (e.g. "Quotation already converted to proposal")
     const { readToast: getToast } = require("./kshemaToast");
@@ -1581,12 +1531,12 @@ async function fillKYCDetails(driver, data, capture = null) {
   log("🆔 Navigating to KYC...");
 
   try {
-    // Wait for the KYC button to appear on the new page
-    const kycBtn = await driver.wait(async () => {
-      const elements = await driver.findElements(By.xpath('//button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "kyc")] | //i-kyc//button'));
-      if (elements.length > 0) return elements[0];
-      return null;
-    }, 15000, "KYC button did not appear after 15 seconds");
+    // Wait for the KYC button to appear on the new page. KSHEMA_AFTER_FINALIZE_ENABLED: wait for the loader first, count the
+    // patience from the Save and Finalize click, and when the button does not come name the reason (the portal's message,
+    // the Financier Name box, other invalid fields, a loader that never ended). Off = the old 15-second wait.
+    const waited = await require("./kshemaAfterFinalize").awaitKycButton(driver, data);
+    if (!waited.ok) return { ok: false, error: waited.error };
+    const kycBtn = waited.button;
 
     await driver.executeScript("arguments[0].scrollIntoView({block:'center'});", kycBtn);
 

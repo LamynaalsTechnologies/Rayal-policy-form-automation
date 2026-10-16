@@ -18,6 +18,7 @@
 const { assertMultiCompanyEnabled, MULTI_COMPANY_AUTOMATION_ENABLED } = require("../../common/featureGate");
 const { kshemaTpProductType, isKshemaTpReady } = require("./tpConfig");
 const { fillKshemaForm } = require("./kshemaTPForm");
+const kshemaLog = require("../../../fullPolicycompany/kshema/kshemaLog");
 
 const HOLD_NOTICE =
   "⏸️  [KSHEMA TP] a KSHEMA TP part logs in, fills the quote as far as the Product Type, lists the portal's Product " +
@@ -37,12 +38,34 @@ if (MULTI_COMPANY_AUTOMATION_ENABLED) {
 
 /**
  * @param {Object} data - job payload (username / password / loginUrl resolved by server.js or lib/partRunner.js, plus
- *   the policy's form data — the TP part's vehicle already overlaid by lib/partRunner.js).
+ *   the policy's form data — the TP part's vehicle alrea[kshema TP   ] ✓ PA Cover details: 3 field(s) filled
+[kshema TP   ] 💰  Filling Premium & Discount details...
+[kshema TP   ]    – Discount / Loading Choice: nothing to enter, skipping
+[kshema TP   ]    – Discount Value: nothing to enter, skipping
+[kshema TP   ] ✓ Premium details: 0 field(s) filled
+[Breaker] checkpoint "KSHEMA TP/quote" reached — continuing (BREAKER_STOP_AT=stopthis-location)
+[kshema TP   ] 🚀 Submitting Quote Form...
+[PA Logic] paCover: true (true), paCoverCompany: Company (company) => isCompanyPA: true
+[kshema TP   ] 📦  Filling Add-ons details...
+[kshema TP   ]    ✓ Do you want add-ons?: No
+[kshema TP   ] ⚠️     ✗ Do you want add-ons?: Portal rejected the field update: "System Error More than one rate found for rate"
+[kshema TP   ]    – Nil Depreciation: nothing to enter, skipping
+[kshema TP   ] ⚠️  Add-ons details: 1 field(s) filled, 1 faileddy overlaid by lib/partRunner.js).
  */
 async function fillKshemaTP(data = {}) {
   assertMultiCompanyEnabled();
-  if (!isKshemaTpReady()) console.log(HOLD_NOTICE);
-  return fillKshemaForm(data);
+  // The whole run prints "[kshema TP   ]". The helpers (kshemaLog, kshemaFields, kshemaSection ...) are shared with the
+  // full-company flow, whose word is "Full" — without this a TP-only policy's log said "[kshema Full ]" on every line and
+  // looked like the full flow (kshemaLog.js, FLOW_LOG_PREFIX_ENABLED). The first line says which flow it is, too.
+  return kshemaLog.withFlow("TP", async () => {
+    kshemaLog.log(
+      isKshemaTpReady()
+        ? `▶ KSHEMA third-party-only flow (Product Type "${kshemaTpProductType()}")`
+        : "▶ KSHEMA third-party-only flow (held at the Product Type)"
+    );
+    if (!isKshemaTpReady()) console.log(HOLD_NOTICE);
+    return fillKshemaForm(data);
+  });
 }
 
 module.exports = { fillKshemaTP };

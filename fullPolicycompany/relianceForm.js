@@ -96,7 +96,7 @@ const {
   kycDocumentReasonText,
   saveKycStatus,
 } = require("./relianceKycSubmit");
-const { selectProposerTitle } = require("../lib/proposerTitle");
+const { selectProposerTitle, verifyMainPageTitle } = require("../lib/proposerTitle");
 // The CKYC result page after SUBMIT shows the name Reliance read from the Aadhaar: it must be the policy's own name
 // (Full Name + Surname, any order) before PROCEED is pressed.
 const {
@@ -1626,7 +1626,6 @@ async function fillRelianceForm(
       // === ADDRESS DROPDOWNS - Simplified approach ===
       console.log("Filling address dropdowns...");
 
-Breaker.checkpoint("stopthis-location")
 
       // 1. Select State only (skip dependent dropdowns)
       await safeSelectDropdown(driver, "state", data.state || "30"); // KARNATAKA
@@ -1732,6 +1731,11 @@ Breaker.checkpoint("stopthis-location")
 
       // Back to main content
       await driver.switchTo().defaultContent();
+
+      // The Form 60 box's Title only counts once Reliance has copied it into the MAIN page's Salutation box (and the
+      // Gender that follows from it). One that did not arrive stops the run here, with Reliance's own state, instead of
+      // as "Please select Salutation. Please select Gender." at Validate Customer below.
+      await verifyMainPageTitle(driver, data.proposerTitle, { log: (line) => console.log(line) });
 
       // === STEP 8: Handle post-submission elements ===
 
@@ -5770,6 +5774,9 @@ Breaker.checkpoint("stopthis-location")
       timestamp: new Date(),
       stage: "login-form", // Indicate this is a login form error
       postSubmissionFailed: false,
+      // An error that says no retry can fix it (a Title Reliance cannot take, lib/proposerTitle.js TitleError) ends the
+      // part here; without this it came back as "retryable -> pending" and a new window opened every minute.
+      ...(e && e.nonRetryable === true ? { retryable: false } : {}),
     };
   } finally {
     // Cleanup: Always close browser and delete cloned profile

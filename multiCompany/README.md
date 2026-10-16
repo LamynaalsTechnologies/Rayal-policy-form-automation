@@ -649,7 +649,7 @@ so a KSHEMA TP that finishes releases the OD and one that stops keeps it "Waitin
 |---|---|
 | `kshemaTP.js` | the handler: feature gate (`[E110]`), the notice about the product text, then `kshemaTPForm`. It does **not** go through `runHandler` (the form has its own browser and login, like `kshemaForm.js`). Nothing is prepared before the browser: the bundled KSHEMA dispatch prepares nothing either. |
 | `kshemaTPForm.js` | duplicate of `fullPolicycompany/kshemaForm.js` (untouched) with `[TP]` changes: **1** require depth · **2** failure screenshots under `screenshots/multiCompany/kshema/` (10-day S3 lifecycle prefix) · **6** no inline Brisk certificate · **7** an unexpected error is stage `tp-form` · **8** Breaker checkpoints `KSHEMA TP/quote`, `KSHEMA TP/payment`. |
-| `kshemaTPQuoteForm.js` | duplicate of `fullPolicycompany/kshema/kshemaQuoteForm.js` (untouched; its field tables are module constants, so it had to be copied) with `[TP]` changes: **3** the Product Type is `tpProduct.js`, at the same place in the field order, plus the stop while the text is not set · **4** no IDV (and no range check), no OD discount, no add-ons / Nil Depreciation · **5** a TP quote may have no add-ons page: the proposal page also counts as "the quote went through" · **8** checkpoint `KSHEMA TP/product`. |
+| `kshemaTPQuoteForm.js` | duplicate of `fullPolicycompany/kshema/kshemaQuoteForm.js` (untouched; its field tables are module constants, so it had to be copied) with `[TP]` changes: **3** the Product Type is `tpProduct.js`, at the same place in the field order, plus the stop while the text is not set · **4** no IDV (and no range check), no OD discount, no add-ons / Nil Depreciation · **5** a TP quote may have no add-ons page: the proposal page also counts as "the quote went through" (its test is replaced by 11) · **8** checkpoint `KSHEMA TP/product` · **11** Save and Continue is checked by KSHEMA's step bar, see §13.5. |
 | `tpProduct.js` | Product Type: exact match (never the original's "contains" fallback), read back, `TpProductError` listing the portal's options, never retried. |
 | `tpConfig.js` / `stopBeforeProduct.js` | the two `.env` settings, and the stop that lists the options. |
 
@@ -675,6 +675,45 @@ the original fails the test until it is ported.
 3. A KSHEMA TP's **PA**: a portal part has PA only when it `carriesPa`; the PA year handling is the full-company one, untouched.
 4. Same open decisions as §12.7 (when the OD starts: link sent vs policy issued; `completed_with_errors` releasing the OD).
 5. Frontend/backend: nothing changed. Possible follow-ups: `partChanges.js` `isNationalPart` nominee group for a KSHEMA TP, and whether a KSHEMA TP should force a "No of Year" pick as National's does.
+6. **PARTLY OPEN (2026-10-16): "System Error More than one rate found for rate" after Save and Continue of a KSHEMA TP-only policy.** The detection is fixed (§13.5, not run live yet); *why* KSHEMA's rater answers that for this quote is still unknown. Evidence, candidates and next steps: root README "OPEN ITEMS", item 1 (`../../README.md`).
+
+### 13.4 Telling the two KSHEMA flows apart in the log (2026-10-16)
+
+The KSHEMA helpers (`kshemaLog`, `kshemaFields`, `kshemaSection` ...) are shared by both flows, and the log bracket was a fixed
+`[kshema Full ]` — so a **TP-only** policy printed "Full" on every line and looked like it was running the full-company flow
+(a policy edited from OD + TP to TP only, job part `tp`, was reported as "working like full"; it was running this handler all along).
+
+- `kshemaTP.js` now runs the whole form under `kshemaLog.withFlow("TP", ...)`: its lines say **`[kshema TP   ]`**, and the first one is
+  `▶ KSHEMA third-party-only flow (Product Type "…")`. The full-company flow still prints **`[kshema Full ]`**, byte for byte.
+  `AsyncLocalStorage`, so two jobs in one process keep their own word.
+- Other proof of which flow runs: the queue line — `[KSHEMA Queue][tp] processing portal part …` (a `portal` part with key `tp` is what
+  resolves to `fillKshemaTP`; the bundled full-company part says `bundled part` and key `motor`) — and, at the Product Type step,
+  `✅ TP Product Type selected: "…"`, which only this flow prints.
+- `FLOW_LOG_PREFIX_ENABLED=false` (the Reliance flow tag's switch) puts the old fixed `Full` back. Tests: `test/kshemaLog.test.js`.
+
+### 13.5 Save and Continue is checked (2026-10-16)
+
+**What went wrong.** A TP-only run showed KSHEMA's toast "System Error More than one rate found for rate" after Save and Continue; the automation did not see it, carried on to the Add-ons page although it
+never opened, and the toast was finally read after an unrelated click and blamed on "Do you want add-ons?". Looking at the run's still-open window: the portal was on the **Quote** step (its step bar marks the
+active step `.stepper-item-text.stepper-active`), and "Save and Finalize" is a permanent button on the Quote page. `[TP] 5` took that button (or the quote-download icon) as "the next page opened", which is true
+on the first poll, so `submitQuoteForm` returned OK before KSHEMA had answered. `POST /api/v1/quote` had returned 200 and the page made no request after it.
+
+**What it does now** (`fullPolicycompany/kshema/kshemaSaveVerify.js`, used only by `kshemaTPQuoteForm.js` as `[TP] 11`; the full-company quote form never calls it):
+
+| Where | Rule |
+|---|---|
+| `submitQuoteForm` wait loop (15 s) | the toast is read first, then the step bar: moved = the active step is no longer "Quote". An error toast ends it with `KSHEMA refused Save and Continue - its message was "...". The run stopped there and nothing after the quote was filled. ...` (no colon in the sentence) |
+| after the move | `lateRefusal` keeps watching for the settle window (`KSHEMA_SAVE_SETTLE_MS`, default 3000, kept within 1000-15000): an error toast (`KSHEMA opened the next step and then showed an error - its message was "..."`) or the step falling back to "Quote" fails the quote; a quiet window logs `KSHEMA is on the "Addon" step and showed no error for 3 s` |
+| no move, no error for 15 s | `Save and Continue did not open the next page within 15 seconds. No error message appeared. ...` (the portal's own words are added when it showed a message that is not worded as an error); the existing silent-save diagnosis (invalid fields, one refill and one more Save) still runs first |
+| `fillAddonsDetails` | answered only when the step is "Addon"; "Quote" fails with `The Add-ons page is not open - KSHEMA's step bar still shows Quote ... Nothing was answered.`; any other step (Summary) skips with a log line |
+| `fillPremiumDetails` | a third-party policy never types a discount (it is zeroed; the saved policy may still carry an old one), so the step logs `Premium & Discount: not used for a third-party policy, skipping` once instead of two "nothing to enter" lines |
+
+A step bar that cannot be read (the portal changed) falls back to the old test with one warning, so there is no new way to fail. **Switch `KSHEMA_SAVE_VERIFY_ENABLED`** (on unless false / 0 / no / off): off = the old test, the old
+wording and the old Premium lines, exactly (`test/kshemaSaveVerify.test.js` proves the old bug comes back with it off).
+
+**Not known.** Which step a long-term TP-only quote lands on after a good Save ("Addon" or "Summary") and everything after it. Why KSHEMA's rater finds more than one rate — root README "OPEN ITEMS" item 1.
+Tests: `test/kshemaSaveVerify.test.js` (27: the step reader, the 2026-10-16 regression, the late watch, the guards, the sentences, the real `submitQuoteForm` against a fake page that behaves like that run, the wiring);
+`test/kshemaTP.test.js` (drift guard) updated for `[TP] 11`.
 
 ## 14. OD only / TP only from one insurer, and PA Company / Brisk on a TP-only policy
 
@@ -812,6 +851,8 @@ the payment page after Pay. In order, on the panel Pay opens:
 Amounts are whole paise (`parseRupees` / `formatPaise`); the amount is Reliance's own and is not compared with the premium on the
 policy (an agent's payable amount may differ). First look: `BREAKER_STOP_AT=Reliance/wallet-cdt-add` (or `Reliance OD/…` in the
 copy). Not proven: how Reliance's currency widget takes the typed value, what Add validates, what comes after Add.
+
+**2026-10-15 — the balance popup.** Reliance's "Your CDT Account Does not have sufficient balance to make payment" popup is a plain `div` (`closePopUp()`, the red `critical.png`, the sentence in a span), not a `.ui-dialog` / `.k-window`, and "does not have sufficient" matched no error word, so the step walked past it. The popup is now read after typing and after Add (popups already on the page before typing are ignored), "not sufficient / not enough / sufficient balance" count as refusals, the step waits up to 4 s after Add when the grid did not grow and nothing was said, typing scrolls to and focuses the box and retries once before the script fallback, and a balance refusal says "The CDT balance of this Reliance login is lower than the payable amount - top it up, then run the policy again." (screenshot while the popup is open). Not proven: a popup inside an iframe would be missed. See also the repo guide, section 5.
 
 ### 15.8 Pending Quotes has pages (shared with the full-company flow)
 
@@ -977,6 +1018,8 @@ always thrown a swallowed `TypeError` and never matched. Exporting it would make
 
 ## 18. KSHEMA KYC: the Aadhaar upload the portal could not read (fixed 2026-10-15)
 
+> Also on the KSHEMA KYC page (2026-10-15): the **verdict settle** window (`settleKycOutcome`, `KSHEMA_KYC_SETTLE_ENABLED`) that catches "The gender on your document doesn't match your profile ...", and the stale KYC note being cleared — repo guide, section 6 (`../README.md`).
+
 When the last-4-digits route is refused ("No record found") the flow uses "Try with different document" and uploads the policy's own
 Aadhaar. Done by hand the same picture was accepted; the automation's upload was not read. Two defects in the old
 `downloadAadharCardImage` / `recoverKycWithDocumentUpload`, either one enough:
@@ -1013,3 +1056,88 @@ is now exported):
 - Not proven live: the KYC page's markup is known from screenshots and earlier runs only; the input / echo checks are best-effort and
   only log when they cannot tell. If a run still fails, the failure now carries the portal's own words and the `kyc_details_failed`
   screenshot.
+
+## 19. KSHEMA: every field filled carefully, a missed one recovered (2026-10-16)
+
+"Sometimes a field is missed and the run fails." Every helper in `fullPolicycompany/kshema/kshemaFields.js` already waited, retried and read its
+value back; what turned a passing hiccup into a failed policy was at the section and Save level. Shared by the full-company flow (OD+TP) and the
+TP-only copy — both quote forms' `fillSection` now hand their fields to `fullPolicycompany/kshema/kshemaSection.js`.
+
+- **Pass 1** is the old loop, unchanged — except that an exception inside a helper is now that field's failure ("could not be filled (…)"),
+  not the end of the section.
+- **Pass 2**: each failed field is tried once more after the loader has cleared. Not retried: missing data ("this policy has no …"), a portal
+  rejection toast, a field with its own slow-field recovery (§16, it already ran).
+- **Pass 3**: every filled field is read back (`readFieldState`: text / date value, the select's shown text, a radio / checkbox / slider state); one
+  the portal cleared is filled again and read again, else reported ("filled twice and the portal cleared it both times"). A field not on screen is
+  left alone (never refilled on a guess).
+- **Save and Continue**: every field filled so far on THIS job's form (kept per driver, so parallel jobs never mix) is read back first. When Save does
+  nothing, `readInvalidFields` reads the portal's own verdict (`ng-invalid` controls, visible `mat-error`): fields we filled are filled again and Save is
+  pressed **once** more (a form with invalid fields was not submitted); otherwise the error names them instead of "there might be a silent validation
+  error".
+- **Bug fixed on the way:** `asLocator` was not exported from `kshemaFields.js`, so both forms' "has the next page appeared?" checks threw inside a
+  `try` and never ran — a good Save was recognised only by the "add-ons" toast, and the TP-only flow (no add-ons page) could not see its next page at
+  all ("The page did not change after 15 seconds"). It is exported now; the add-ons page is recognised by its own question ("want add-on"), never by
+  any Yes/No group (the quote form has those too: "Is New Vehicle?").
+- Switch: `KSHEMA_FIELD_RECHECK_ENABLED` (on unless false / 0 / no / off; off = the old single pass and the old Save, exactly). Tests:
+  `test/kshemaSection.test.js`. **Not proven on the live portal**: the invalid-field markup (`ng-invalid` / `mat-error` are Angular Material's
+  standard ones) and the add-ons question wording.
+
+## 20. KSHEMA: the financier on the nominee page (2026-10-16)
+
+KSHEMA's nominee page asks, below the nominee entry, a Yes/No financier question; "Yes" reveals **Financier Name** (an autocomplete, placeholder
+`+ Financier Name`) and **Additional Details** (`data-iid="hypo_branch_address"`). The automation never entered them, so a policy with a financier
+was filed without one. The policy already carried `hasFinancier`, `financierName`, `financierAddress` (server.js maps them); for a KSHEMA-only
+policy the Online Policy form now asks just the name and the Additional Details (stored in `financierAddress`).
+
+- **Where:** `fullPolicycompany/kshema/kshemaFinancier.js`, called by BOTH nominee flows (`kshemaQuoteForm.js`, the TP copy) after the nominee Save
+  and before "Save and Finalize". A policy with no financier: nothing is touched.
+- **Yes** is chosen on the Yes/No group found by the words "financier" / "hypothecat" next to a short label, and VERIFIED: the "+ Financier Name"
+  box must appear. If the group is not found or the box never shows, the run stops and the message lists every Yes/No question the page showed
+  (KSHEMA's wording was not known when this was written).
+- **Name:** the Financier Name is a SEARCH dropdown (a `mat-autocomplete`, `autoactivefirstoption`; its rows are
+  `mat-option[data-iid="financier_name"]` in the overlay, e.g. ` SERA COM PVT. LTD. `). The name is typed, the list is waited for (up to 12 s — it may be
+  fetched — and until the same first row has stood for 0.6 s, because it re-filters while the name is typed) and the **FIRST** row is clicked; its text
+  must land in the box. "No results found" and disabled rows are not options. **No data** = the run stops with *KSHEMA's financier list showed no
+  financier for "…"* (+ the `nominee_details_failed` screenshot); nothing is typed free-hand. When the first row does not look like the typed name
+  (Ltd = Limited, Pvt, Co ignored; score under 70) it is still chosen — as asked — and a warning says "please check it".
+- **Minimum 2 letters (spaces do not count):** KSHEMA's list does not open for a single character. The Online Policy form refuses a shorter name for any
+  policy with a KSHEMA leg (`companyRules.js` `KSHEMA_FINANCIER_NAME_MIN_LETTERS`, a Yup test on `financierName`; a name of only spaces is "required"
+  now for every insurer), and the automation re-checks it (`MIN_NAME_LETTERS`, keep the two equal) for a policy saved before the rule: a one-letter name
+  stops the run *before* the portal is touched — *the financier name "A" is too short - KSHEMA's financier list opens only after 2 letters …* — instead
+  of waiting 12 s for a list that cannot open.
+- **Read-back:** after the Additional Details the name box is read again (present, not empty, not `ng-invalid` / `aria-invalid` / a visible
+  `mat-error`); a box a re-render wiped is entered once more, never more than twice.
+- **Additional Details:** `typeIntoField` (3 tries, read-back); optional, so a miss is a warning.
+- A failure ends the nominee step with a plain sentence and the existing `nominee_details_failed` screenshot. No colon in any sentence.
+- Switch: `KSHEMA_FINANCIER_ENABLED` (on unless false / 0 / no / off; off = not entered). Tests: `test/kshemaFinancier.test.js`.
+  **Not proven on the live portal:** the Yes/No wording of the question. The dropdown rows are from the portal's own markup.
+
+## 21. KSHEMA: after Save and Finalize — the loader, the financier box, and why the KYC button did not come (2026-10-16)
+
+A run stopped with `KYC button did not appear after 15 seconds` (stage `kyc-details`). Pressing **Save and Finalize** makes KSHEMA show its loader while
+it saves; the KYC page is drawn when the loader ends, and a slow portal needs longer than 15 s. When the portal refuses to move on (the Financier Name
+box empty or marked invalid, another required field missing) the run could not tell — it waited, gave up, and named nothing.
+
+- **Where:** `fullPolicycompany/kshema/kshemaAfterFinalize.js`, used by BOTH flows (`kshemaQuoteForm.js`, the TP copy — lines tagged `[TP] 10`):
+  - `checkFinalizeEnabled` — before the click. A Save and Finalize that is STILL disabled (same test as the form's own wait) cannot be pressed; if the
+    form shows why (financier box, other invalid fields) the run stops there: *Save and Finalize stayed disabled - …*. With nothing to blame it is pressed
+    as before (no new way to fail).
+  - `waitAfterFinalize` — right after the click (and the existing 2 s): waits for the loader (`mat-spinner[data-iid="__loading"], .mat-mdc-progress-spinner`,
+    the one `waitForKshemaLoaderToDisappear` watches) to open, run and stay gone for 0.8 s (two requests in a row leave a gap); progress lines every 10 s;
+    error snackbars that flash by are remembered. Then it reads the **Financier Name box again**: marked invalid on a second look = KSHEMA's refusal →
+    *KSHEMA did not accept Save and Finalize - the Financier Name box is marked invalid (…) and it holds "…"*. A page that left the form has no box (fine); an
+    empty box that is not marked invalid is left to the timeout diagnosis (a form may reset itself on its way out). A loader that never closes is waited for
+    the whole budget and is not a verdict by itself.
+  - `awaitKycButton` — the KYC step's wait: the button is taken once the loader is gone (a button with a loader that stays is pressed anyway after 15 s —
+    a spinner that stays must not stall the run). Patience is counted **from the click** (default 60 s, `KSHEMA_AFTER_FINALIZE_WAIT_SECONDS`, kept within
+    15-300), never less than 10 s for this step, and a loader still open stretches it by at most 10 s.
+- **When the button never comes** the page is read and the error lists, most telling first (joined by "; "): the snackbar KSHEMA showed · the Financier Name
+  box (empty / invalid + its message) · the other fields it marks invalid (financier not repeated, first six + a count) · a loader that never ended.
+  Nothing found = *the page showed no message, no invalid field and no loader, so the portal simply did not move on (the page is "…")*. The failure
+  screenshot (`kyc_details_failed`) is taken with the page as it stands.
+- Nothing here presses a button or fills a field again — it waits, reads and reports. (A second Save and Finalize could meet *Quotation already converted
+  to proposal*.) No colon in any sentence.
+- Switch: `KSHEMA_AFTER_FINALIZE_ENABLED` (on unless false / 0 / no / off; off = the old fixed 15 s wait and its message, word for word). Tests:
+  `test/kshemaAfterFinalize.test.js` (a scripted page + fake clock), wiring in both forms, `test/kshemaTP.test.js` (sync).
+  **Not proven on the live portal:** that the loader selector matches this particular loader, and the wording of KSHEMA's field errors.
+

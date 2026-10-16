@@ -31,7 +31,7 @@ const CHANGES = [
   { tag: "1", from: ["} = require(\"./relianceKycSubmit\");"], to: ["} = require(\"../../../fullPolicycompany/relianceKycSubmit\");"] },
   { tag: "1", from: ["} = require(\"./relianceKycUpload\");"], to: ["} = require(\"../../../fullPolicycompany/relianceKycUpload\");"] },
   { tag: "1", from: ["} = require(\"./relianceKycName\");"], to: ["} = require(\"../../../fullPolicycompany/relianceKycName\");"] },
-  { tag: "1", from: ["const { selectProposerTitle } = require(\"../lib/proposerTitle\");"], to: ["const { selectProposerTitle } = require(\"../../../lib/proposerTitle\");"] },
+  { tag: "1", from: ["const { selectProposerTitle, verifyMainPageTitle } = require(\"../lib/proposerTitle\");"], to: ["const { selectProposerTitle, verifyMainPageTitle } = require(\"../../../lib/proposerTitle\");"] },
   { tag: "1", from: ["} = require(\"./relianceKycFallback\");"], to: ["} = require(\"../../../fullPolicycompany/relianceKycFallback\");"] },
   { tag: "1", from: ["} = require(\"./relianceWalletCdt\");"], to: ["} = require(\"../../../fullPolicycompany/relianceWalletCdt\");"] },
   { tag: "1", from: ["} = require(\"./relianceWalletIssue\");"], to: ["} = require(\"../../../fullPolicycompany/relianceWalletIssue\");"] },

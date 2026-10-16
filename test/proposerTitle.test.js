@@ -25,6 +25,18 @@ test("the list is the same one the backend saves (the two copies cannot drift)",
   assert.deepEqual(require(backend).PROPOSER_TITLES, PROPOSER_TITLES);
 });
 
+/** Run fn with the real-pick switch off: these tests are about the scripted setter (the way back) and the read-back. */
+async function scripted(fn) {
+  const before = process.env.RELIANCE_REALISTIC_SELECT_ENABLED;
+  process.env.RELIANCE_REALISTIC_SELECT_ENABLED = "false";
+  try {
+    return await fn();
+  } finally {
+    if (before === undefined) delete process.env.RELIANCE_REALISTIC_SELECT_ENABLED;
+    else process.env.RELIANCE_REALISTIC_SELECT_ENABLED = before;
+  }
+}
+
 /** A driver whose Title <select> accepts only Reliance's four options (anything else leaves it blank, as a real one). */
 function fakeTitleBox({ offers = PROPOSER_TITLES } = {}) {
   const state = { value: "", set: [] };
@@ -49,7 +61,7 @@ function fakeTitleBox({ offers = PROPOSER_TITLES } = {}) {
   };
 }
 
-test("each of the four titles is selected on #proposerTitle1 and read back", async () => {
+test("switch off - each of the four titles is selected on #proposerTitle1 by the scripted setter and read back", () => scripted(async () => {
   for (const title of PROPOSER_TITLES) {
     const box = fakeTitleBox();
     const lines = [];
@@ -58,16 +70,16 @@ test("each of the four titles is selected on #proposerTitle1 and read back", asy
     assert.deepEqual(box.state.set, [["proposerTitle1", title]]);
     assert.match(lines[0], new RegExp(`Title set to ${title.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`));
   }
-});
+}));
 
-test("a policy with no title (or an unknown one) is filed as Mr. — what was always sent", async () => {
+test("switch off - a policy with no title (or an unknown one) is filed as Mr. — what was always sent", () => scripted(async () => {
   for (const raw of [undefined, "", "Dr.", null]) {
     const box = fakeTitleBox();
     assert.equal(await selectProposerTitle(box.driver, raw, { select: box.select }), "Mr.");
   }
-});
+}));
 
-test("a title the portal does not take is an error that says so (no colon), nothing is carried on", async () => {
+test("switch off - a title the portal does not take is an error that says so (no colon), nothing is carried on", () => scripted(async () => {
   const box = fakeTitleBox({ offers: ["Mr."] }); // the portal list changed: no "Ms." any more
   await assert.rejects(
     () => selectProposerTitle(box.driver, "Ms.", { select: box.select }),
@@ -78,7 +90,7 @@ test("a title the portal does not take is an error that says so (no colon), noth
       return true;
     }
   );
-});
+}));
 
 test("the in-page reader returns the select's value, or null when the box is gone", () => {
   const saved = globalThis.document;

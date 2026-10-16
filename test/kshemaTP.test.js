@@ -145,7 +145,7 @@ test("quote copy: Product Type is chosen between rtoLocation and idv, exact, aft
   assert.ok(first < crumb && crumb < stop && stop < select && select < rest, "order: fields, checkpoint, stop, select, rest");
 });
 
-test("quote copy: no IDV, no OD discount, no add-ons, and the TP submit accepts a proposal page", () => {
+test("quote copy: no IDV, no OD discount, no add-ons, and the TP submit asks KSHEMA's step bar whether the page moved", () => {
   const source = codeOf(read(QUOTE_COPY));
   // IDV is never typed and never range-checked
   const idv = source.slice(at(source, 'key: "idv"'), at(source, 'key: "idv"') + 700);
@@ -155,8 +155,13 @@ test("quote copy: no IDV, no OD discount, no add-ons, and the TP submit accepts 
   // discount and Nil Depreciation are zeroed before the sections are filled
   assert.match(source, /fillSection\(driver, \{ \.\.\.data, discount: 0, ODDiscount: 0 \}, PREMIUM_FIELDS/);
   assert.match(source, /fillSection\(driver, \{ \.\.\.data, zeroDepreciation: false \}, ADDON_FIELDS/);
-  // a quote with no add-ons page can still be seen to have gone through
-  assert.match(source, /Save and Finalize"\)\] \| \/\/mat-icon\[@data-iid="dnld-download-quote"\]/);
+  // a quote with no add-ons page can still be seen to have gone through: by KSHEMA's step bar, never by the "Save and
+  // Finalize" button / download icon, which are ON the Quote page too (the 2026-10-16 run took them as "moved")
+  const submit = source.slice(at(source, "async function submitQuoteForm(driver) {"), at(source, "const ADDON_FIELDS = ["));
+  assert.match(submit, /saveVerify\.nextPageShown\(driver\)/);
+  assert.doesNotMatch(submit, /Save and Finalize|dnld-download-quote/);
+  // the zeroed-discount call is still there; the Premium step only announces itself once when nothing is typed
+  assert.match(source, /isSaveVerifyEnabled\(\) && !PREMIUM_FIELDS\.some\(/);
 });
 
 test("form copy: checkpoints, no inline Brisk, own stage label and the multiCompany screenshot prefix", () => {

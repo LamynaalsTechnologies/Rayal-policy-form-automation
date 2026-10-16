@@ -793,9 +793,13 @@ test("504 wiring: both quote forms run the section recovery from fillPaCoverDeta
 /* ----------------------- wiring ----------------------- */
 
 test("wiring: both quote forms pass `recover` to the select and the text helpers and carry the PA hooks", () => {
+  // The per-field dispatch (select + text get `recover`) lives in the shared kshemaSection.js since 2026-10-16; both quote
+  // forms hand their sections to it.
+  const shared = read(path.join(__dirname, "..", "fullPolicycompany", "kshema", "kshemaSection.js"));
+  assert.equal(shared.split("recover: field.recover || null,").length - 1, 2, "kshemaSection.js: select + text");
   for (const file of [QUOTE_ORIGINAL, QUOTE_COPY]) {
     const text = read(file);
-    assert.equal(text.split("recover: field.recover || null,").length - 1, 2, `${path.basename(file)}: select + text`);
+    assert.match(text, /kshemaSection"\)\.fillSection\(driver, data, fields, sectionName, capture,/, `${path.basename(file)}: delegates`);
     assert.equal(text.split("paToggleRecovery({").length - 1, 2, `${path.basename(file)}: year + reason`);
     assert.match(text, /kshema\/kshemaSlowFields"\)|\.\/kshemaSlowFields"\)/);
   }

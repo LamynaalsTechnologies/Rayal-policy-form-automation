@@ -1289,7 +1289,158 @@ async function typeIntoDateField(driver, selectors, value, label) {
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/* Reading a filled field back (kshemaSection.js re-checks)                   */
+/* -------------------------------------------------------------------------- */
+
+/** Same text, ignoring case, spaces and surrounding whitespace ("98765 43210" holds "9876543210"). */
+const sameText = (a, b) => norm(a).replace(/\s+/g, "") === norm(b).replace(/\s+/g, "");
+
+/**
+ * Does a field the automation filled still hold its value? Read-only, no waiting.
+ *
+ * @param {Object} field     the field definition (type, selectors, label)
+ * @param {*}      wanted    what was asked for (the radio / checkbox / slider value, the typed text)
+ * @param {*}      expected  what the helper read back when it filled it (the option's wording, the date as shown)
+ * @returns {Promise<{holds:boolean, actual:string}|null>} null when it cannot be told right now (not on screen) —
+ *   an unknown is never "fixed" by filling again
+ */
+async function readFieldState(driver, field, wanted, expected) {
+  const selectors = (field && field.selectors) || [];
+  const type = field && field.type;
+
+  if (type === "radio") {
+    for (const selector of selectors) {
+      let found = [];
+      try {
+        found = await driver.findElements(asLocator(selector));
+      } catch (e) {
+        continue;
+      }
+      if (!found.length) continue;
+      const tag = String(await found[0].getTagName()).toLowerCase();
+      const radios = tag === "input" ? found : await found[0].findElements(By.css('input[type="radio"]'));
+      for (const radio of radios) {
+        if (norm(await radio.getAttribute("value")) === norm(wanted)) {
+          const on = await radio.isSelected();
+          return { holds: !!on, actual: on ? String(wanted) : "another choice" };
+        }
+      }
+    }
+    return null;
+  }
+
+  if (type === "checkbox" || type === "slider") {
+    let target = null;
+    for (const selector of selectors) {
+      try {
+        const found = await driver.findElements(asLocator(selector));
+        if (found.length) {
+          target = found[0];
+          break;
+        }
+      } catch (e) { }
+    }
+    if (!target) return null;
+    let on;
+    if (type === "checkbox") {
+      on = await target.isSelected();
+    } else {
+      const cls = String((await target.getAttribute("class")) || "");
+      on = cls.includes("slider-on") || cls.includes("mat-checked");
+    }
+    return { holds: on === !!wanted, actual: on ? "on" : "off" };
+  }
+
+  const found = await findVisibleOnce(driver, selectors);
+  if (!found.element) return null;
+
+  if (type === "select") {
+    const actual = await readMatSelectValue(driver, found.element);
+    if (!actual) return { holds: false, actual: "" };
+    if (expected === null || expected === undefined || expected === "") return { holds: true, actual };
+    const a = norm(actual);
+    const e = norm(expected);
+    return { holds: a === e || a.includes(e) || e.includes(a), actual };
+  }
+
+  const actual = String((await found.element.getAttribute("value")) || "");
+  if (type === "date") {
+    if (!actual.trim()) return { holds: false, actual: "" };
+    return { holds: expected ? sameText(actual, expected) : true, actual };
+  }
+  // text: what it was typed as (the helper applies stripSpaces / maxLength and hands back what landed)
+  const want = expected !== null && expected !== undefined && expected !== "" ? expected : wanted;
+  return { holds: sameText(actual, want), actual };
+}
+
+/**
+ * The fields the portal itself marks as not filled / invalid, as it shows them: Angular's ng-invalid on a control, or a
+ * visible <mat-error>. Read in the page in one go.
+ *
+ * @returns {Promise<Array<{iid:string, label:string, placeholder:string, message:string}>>}
+ */
+async function readInvalidFields(driver) {
+  const found = await driver.executeScript(function () {
+    function shown(el) {
+      if (!el) return false;
+      var r = el.getBoundingClientRect();
+      var st = window.getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && st.display !== "none" && st.visibility !== "hidden";
+    }
+    function text(el) {
+      return String((el && (el.innerText || el.textContent)) || "").replace(/\s+/g, " ").trim();
+    }
+    var out = [];
+    var seen = {};
+    var controls = document.querySelectorAll(
+      "input.ng-invalid, mat-select.ng-invalid, mat-radio-group.ng-invalid, textarea.ng-invalid, " +
+        ".mat-form-field-invalid, .mat-mdc-form-field.ng-invalid"
+    );
+    for (var i = 0; i < controls.length; i++) {
+      var el = controls[i];
+      if (el.tagName === "FORM") continue;
+      var field = el.closest ? el.closest("mat-form-field, .mat-mdc-form-field") || el : el;
+      if (!shown(field) && !shown(el)) continue;
+      var withIid = el.getAttribute("data-iid") ? el : el.querySelector && el.querySelector("[data-iid]");
+      if (!withIid && el.closest) withIid = el.closest("[data-iid]");
+      var iid = withIid ? withIid.getAttribute("data-iid") || "" : "";
+      var labelEl = field.querySelector && field.querySelector("mat-label, label");
+      var input = el.matches && el.matches("input, textarea") ? el : field.querySelector && field.querySelector("input, textarea");
+      var errEl = field.querySelector && field.querySelector("mat-error");
+      var item = {
+        iid: iid,
+        label: text(labelEl),
+        placeholder: input ? input.getAttribute("placeholder") || "" : el.getAttribute("placeholder") || "",
+        message: shown(errEl) ? text(errEl) : "",
+      };
+      var key = item.iid || item.label || item.placeholder;
+      if (!key || seen[key]) continue;
+      seen[key] = true;
+      out.push(item);
+    }
+    var errors = document.querySelectorAll("mat-error");
+    for (var j = 0; j < errors.length; j++) {
+      if (!shown(errors[j])) continue;
+      var msg = text(errors[j]);
+      if (!msg || seen["msg:" + msg]) continue;
+      var already = out.some(function (o) { return o.message === msg; });
+      if (already) continue;
+      seen["msg:" + msg] = true;
+      out.push({ iid: "", label: "", placeholder: "", message: msg });
+    }
+    return out;
+  });
+  return Array.isArray(found) ? found : [];
+}
+
 module.exports = {
+  // used by both quote forms' Save and Continue — it was missing here, so their "has the next page appeared?" checks
+  // threw a TypeError inside a try/catch and never ran
+  asLocator,
+  findVisibleOnce,
+  readFieldState,
+  readInvalidFields,
   selectMatOption,
   selectOtherMatOption,
   selectMatRadio,
