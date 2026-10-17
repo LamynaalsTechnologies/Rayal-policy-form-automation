@@ -306,6 +306,11 @@ const resolveBriskVehicle = async (make, model, jobId = "") => {
 };
 
 async function createBriskCertificate(data) {
+  // BRISK_V2_AUTOMATION_ENABLED=true: through our server's new Brisk API code (lib/briskV2Automation.js). Off (the
+  // default): the production call below, unchanged.
+  const briskV2 = require("./lib/briskV2Automation");
+  if (briskV2.isEnabled()) return briskV2.createViaBackend(data);
+
   // Translate the policy's vehicle make/model into the exact strings Brisk's
   // own catalogue uses, before building the payload.
   const briskVehicle = await resolveBriskVehicle(

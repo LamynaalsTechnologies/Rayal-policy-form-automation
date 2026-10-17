@@ -222,3 +222,35 @@ Detail for the first four is in `multiCompany/README.md`: §13 (TP-only flow; §
 ## 8. Open items for this repo
 
 See the numbered list in [`../README.md`](../README.md) (section "Open items"). The first one is a KSHEMA TP-only add-ons error ("More than one rate found for rate"), with the log and the next steps.
+
+## Brisk PA certificate through our server's new Brisk API (2026-10-17)
+
+`lib/briskV2Automation.js`, called first thing in `createBriskCertificate` (`briskCertificate.js`), so the parts runner and the
+inline Reliance / National / KSHEMA flows all use it.
+
+| `.env` key | Default | Meaning |
+|---|---|---|
+| `BRISK_V2_AUTOMATION_ENABLED` | `false` | exactly `true` = ask our server (`POST <BRISK_V2_BACKEND_URL>/briskV2/automation/certificates`). Anything else = the old production `/createBriskCertificate` call, unchanged. |
+| `BRISK_V2_BACKEND_URL` | `http://localhost:4005/api` | the server's API base |
+| `BRISK_V2_AUTOMATION_KEY` | (random, set) | the same value as the server's `BRISK_V2_AUTOMATION_KEY` |
+| `BRISK_V2_AUTOMATION_TIMEOUT_MS` | `150000` | how long to wait for the server |
+
+The server matches the policy to Brisk's lists, never charges (PA was paid with the policy), answers the same certificate when
+asked again, and saves every Brisk request and answer (Online Policy View page, "Brisk Certificate (new API)"). Answers: LIVE
+made = `{ policyId: <number>, downloadUrl }` (stored as before); **TEST made = an error** (a TEST certificate is never stored on
+a real policy); a refusal = an error with the server's sentence; not known = no number ("check Brisk before running this again";
+a re-run is safe, the server answers what it made). **Careful:** the server's `BRISK_V2_BASEURL` decides the Brisk account —
+while it is the TEST account, turning this on means real policies get TEST certificates that are not stored (their PA step
+fails and says so). Tests: `test/briskV2Automation.test.js` (10, fake fetch only).
+
+
+## Reliance KYC name — the owner's four combinations (2026-10-17)
+
+`fullPolicycompany/relianceKycName.js`, switch `RELIANCE_KYC_NAME_COMBINATIONS_ENABLED` (ON unless false / 0 / no / off).
+The name Reliance read from the Aadhaar (CKYC result box) must be one of: **Full Name** · **Full Name + Surname** ·
+**Full Name + Father Name** · **Full Name + Surname + Father Name** (words in any order; case, spacing, punctuation ignored;
+Father Name = the policy's `fatherName`). Anything else → "KYC name mismatch …" and the run **stops on the KYC page**:
+PROCEED is not pressed, Pending Quotes / Pay are **not** opened, no links are saved (the KYC fallback is skipped for this
+error only — `skipsKycFallback`); the screenshot is of the KYC page with the name box marked red. Off = the old rule (Full
+Name + Surname only) and the fallback as before. Applies to the full-company flow and its generated [MC] copy. Tests in
+`test/relianceKycName.test.js`; 6 deliberate breaks caught.

@@ -99,12 +99,13 @@ const {
 } = require("../../../fullPolicycompany/relianceKycSubmit");
 const { selectProposerTitle, verifyMainPageTitle } = require("../../../lib/proposerTitle");
 // The CKYC result page after SUBMIT shows the name Reliance read from the Aadhaar: it must be the policy's own name
-// (Full Name + Surname, any order) before PROCEED is pressed.
+// (Full Name + Surname, any order; with RELIANCE_KYC_NAME_COMBINATIONS_ENABLED also Full Name alone / + Father Name) before PROCEED.
 const {
   isKycNameCheckEnabled,
   checkKycName,
   kycNameMismatchMessage,
   KycNameMismatchError,
+  skipsKycFallback,
 } = require("../../../fullPolicycompany/relianceKycName");
 // The same page's UPLOAD DOCUMENT option and its Identity / Address Verification upload areas, by the page's own markup
 // (the old code clicked the FIRST selectDoc option — PAN — and put the two documents into the wrong handlers).
@@ -5484,7 +5485,10 @@ async function fillRelianceMultiForm( // [MC] 6
           if (isAutomationStop(err)) throw err;
           console.log("Error handling post-calculation elements:", err.message);
 
-          if (isKycFallbackEnabled() && kycStarted && !kycAccepted) {
+          // A KYC name mismatch stops right here on the KYC page (the owner's rule): no Pending Quotes, no Pay, no links.
+          if (skipsKycFallback(err)) console.log("🛑 Stopped on the KYC page (KYC name mismatch) - Pending Quotes and Pay are not opened");
+
+          if (isKycFallbackEnabled() && kycStarted && !kycAccepted && !skipsKycFallback(err)) {
             // The KYC did not work (this error, or the step that ended without a document): the screenshot of the error,
             // the payment page, the links on the policy — then the run ends as a failed KYC. Nothing is paid or sent.
             const rescued = await rescueAfterKycFailure({

@@ -1065,7 +1065,8 @@ test("relianceForm.js: the failure catch hands a KYC that did not work to the fa
   const rescue = at("await rescueAfterKycFailure({", catchAt);
   const generic = at('"post-calculation-error"', rescue);
   assert.ok(catchAt < rescue && rescue < generic);
-  assert.match(formSrc.slice(catchAt, rescue), /if \(isKycFallbackEnabled\(\) && kycStarted && !kycAccepted\) \{/);
+  // a KYC name mismatch stops on the KYC page instead (relianceKycName.js skipsKycFallback, the owner's rule 2026-10-17)
+  assert.match(formSrc.slice(catchAt, rescue), /if \(isKycFallbackEnabled\(\) && kycStarted && !kycAccepted && !skipsKycFallback\(err\)\) \{/);
   assert.match(formSrc.slice(rescue, generic), /\} else \{/, "the old handling is the else branch");
   // a stop on purpose is still thrown before any of this
   assert.match(formSrc.slice(catchAt - 120, catchAt), /if \(isAutomationStop\(err\)\) throw err;/);

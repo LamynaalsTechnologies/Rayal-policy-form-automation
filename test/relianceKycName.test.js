@@ -241,3 +241,104 @@ for (const file of [
     assert.match(src, /require\("(\.|\.\.\/\.\.\/\.\.\/fullPolicycompany)\/relianceKycName"\)/);
   });
 }
+
+/* ------------------------- the owner's four combinations (RELIANCE_KYC_NAME_COMBINATIONS_ENABLED) ------------------------- */
+
+const combo = (portalName, extra = {}) =>
+  kyc.compareKycName({ fullName: "ANMOL ARORA", surname: "MASTER", fatherName: "RAJESH", portalName, combinations: true, ...extra }).ok;
+
+test("combinations: Full Name alone, + Surname, + Father Name, or all three — any word order", () => {
+  assert.equal(combo("Anmol Arora"), true, "Full Name alone (the 2026-10-17 log: KYC 'Anmol Arora', Surname MASTER)");
+  assert.equal(combo("Anmol Arora Master"), true, "Full Name + Surname");
+  assert.equal(combo("Master Anmol Arora"), true, "surname first");
+  assert.equal(combo("Anmol Arora Rajesh"), true, "Full Name + Father Name");
+  assert.equal(combo("Anmol Arora Rajesh Master"), true, "all three");
+  assert.equal(combo("ANMOL ARORA MASTER RAJESH"), true, "all three, other order");
+});
+
+test("combinations: anything else is a mismatch", () => {
+  assert.equal(combo("Anmol"), false, "part of the Full Name only");
+  assert.equal(combo("Arora Master"), false, "without the Full Name");
+  assert.equal(combo("Master Rajesh"), false, "Surname + Father Name only");
+  assert.equal(combo("Anmol Arora Kumar"), false, "an extra word");
+  assert.equal(combo("Rahul Sharma"), false, "another person");
+  assert.equal(combo(""), false, "nothing read");
+  assert.equal(combo("Anmol Arora Rajesh", { fatherName: "" }), false, "no Father Name on the policy");
+  assert.equal(combo("Anmol Arora", { fullName: "" }), false, "no Full Name on the policy");
+});
+
+test("combinations off: the old rule (Full Name + Surname only)", () => {
+  assert.equal(combo("Anmol Arora", { combinations: false }), false);
+  assert.equal(combo("Anmol Arora Master", { combinations: false }), true);
+  assert.equal(combo("Anmol Arora Rajesh", { combinations: false }), false);
+});
+
+test("RELIANCE_KYC_NAME_COMBINATIONS_ENABLED is ON unless false / 0 / no / off", () => {
+  const saved = process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED;
+  try {
+    for (const on of [undefined, "", "true", "1", "yes"]) {
+      if (on === undefined) delete process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED;
+      else process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED = on;
+      assert.equal(kyc.isKycNameCombinationsEnabled(), true, String(on));
+    }
+    for (const off of ["false", "0", "no", "off", " FALSE "]) {
+      process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED = off;
+      assert.equal(kyc.isKycNameCombinationsEnabled(), false, off);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED;
+    else process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED = saved;
+  }
+});
+
+test("on the page: the log's case now passes, Father Name is read from the policy, another name still stops", async () => {
+  const saved = process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED;
+  delete process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED;
+  try {
+    const data = { firstName: "ANMOL ARORA", lastName: "MASTER", fatherName: "RAJESH" };
+    assert.equal((await run(resultPage({ box: { id: "result_name", value: "Anmol Arora" } }), data)).state, "match");
+    assert.equal((await run(resultPage({ box: { id: "result_name", value: "Anmol Arora Rajesh" } }), data)).state, "match");
+    const other = await run(resultPage({ box: { id: "result_name", value: "Anmol Kumar" } }), data);
+    assert.equal(other.state, "mismatch");
+    const message = kyc.kycNameMismatchMessage(other);
+    assert.match(message, /Father Name "RAJESH"/);
+    assert.match(message, /Allowed is Full Name alone, Full Name \+ Surname, Full Name \+ Father Name, or all three/);
+    assert.match(message, /Stopped on the KYC page, PROCEED was not pressed and nothing was paid\.$/);
+    assert.equal(message.includes(":"), false, "no colon (beautifyError keeps only the text after the last one)");
+  } finally {
+    if (saved === undefined) delete process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED;
+    else process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED = saved;
+  }
+});
+
+test("a name mismatch skips the KYC fallback (stop on the KYC page); other KYC errors and the switch off do not", () => {
+  const saved = process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED;
+  try {
+    delete process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED;
+    const mismatch = new kyc.KycNameMismatchError("KYC name mismatch - x", { portalName: "x" });
+    assert.equal(mismatch.keepMessage, true, "the page's text never replaces the sentence");
+    assert.equal(kyc.skipsKycFallback(mismatch), true);
+    assert.equal(kyc.skipsKycFallback(new PortalRejectedError("upload refused")), false);
+    assert.equal(kyc.skipsKycFallback(new Error("timeout")), false);
+    assert.equal(kyc.skipsKycFallback(null), false);
+    process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED = "false";
+    assert.equal(kyc.skipsKycFallback(mismatch), false, "switch off = the fallback as before");
+  } finally {
+    if (saved === undefined) delete process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED;
+    else process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED = saved;
+  }
+});
+
+for (const file of [
+  path.join(ROOT, "fullPolicycompany", "relianceForm.js"),
+  path.join(ROOT, "multiCompany", "common", "reliance", "relianceMultiForm.js"),
+]) {
+  test(`${path.basename(file)}: the post-calculation catch does not run the KYC fallback for a name mismatch`, () => {
+    const src = fs.readFileSync(file, "utf8");
+    const at = src.indexOf('console.log("Error handling post-calculation elements:", err.message);');
+    assert.ok(at > 0);
+    const block = src.slice(at, at + 1200);
+    assert.match(block, /if \(isKycFallbackEnabled\(\) && kycStarted && !kycAccepted && !skipsKycFallback\(err\)\) \{/);
+    assert.match(block, /Stopped on the KYC page \(KYC name mismatch\)/);
+  });
+}

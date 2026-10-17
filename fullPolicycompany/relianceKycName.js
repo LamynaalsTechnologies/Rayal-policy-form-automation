@@ -19,6 +19,13 @@
  * flow carries on exactly as before, so a changed Reliance page can never stop good policies.
  *
  * RELIANCE_KYC_NAME_CHECK_ENABLED in the automation's .env: ON unless false / 0 / no / off. Read at call time.
+ *
+ * RELIANCE_KYC_NAME_COMBINATIONS_ENABLED (the owner's rule, 2026-10-17; ON unless false / 0 / no / off): the portal's
+ * name may be any of these four, words in any order —
+ *     Full Name  |  Full Name + Surname  |  Full Name + Father Name  |  Full Name + Surname + Father Name
+ * (Father Name = the policy's fatherName, the father's first name typed into Reliance's FatherFirstName box). Anything
+ * else is a mismatch, and the run STOPS on that page: no Pending Quotes, no Pay, no links (the KYC fallback is skipped
+ * for it — skipsKycFallback). Off = the rule above (Full Name + Surname only) and a mismatch goes to the KYC fallback.
  */
 require("dotenv").config({ quiet: true });
 
@@ -28,6 +35,10 @@ const isOff = (value) => /^(0|false|no|off)$/i.test(String(value == null ? "" : 
 
 function isKycNameCheckEnabled() {
   return !isOff(process.env.RELIANCE_KYC_NAME_CHECK_ENABLED);
+}
+
+function isKycNameCombinationsEnabled() {
+  return !isOff(process.env.RELIANCE_KYC_NAME_COMBINATIONS_ENABLED);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -56,22 +67,54 @@ function without(from, other) {
   return left;
 }
 
+const sameWords = (a, b) => a.length > 0 && b.length > 0 && without(a, b).length === 0 && without(b, a).length === 0;
+
 /**
- * @returns {{ok:boolean, comparable:boolean, expected:string[], portal:string[], missing:string[], extra:string[]}}
- *   `comparable` is false when the policy has no name at all (nothing to compare against).
+ * The names the portal may show for this policy: Full Name + Surname only (`combinations` false), or the owner's four
+ * (Full Name; + Surname; + Father Name; + both). Each is a list of words; an empty part adds nothing, so duplicates
+ * collapse.
  */
-function compareKycName({ fullName = "", surname = "", portalName = "" } = {}) {
+function allowedNames({ fullName = "", surname = "", fatherName = "", combinations = false } = {}) {
+  const first = nameTokens(fullName);
+  const sur = nameTokens(surname);
+  const father = nameTokens(fatherName);
+  if (!first.length) return [];
+  const list = combinations
+    ? [first, [...first, ...sur], [...first, ...father], [...first, ...sur, ...father]]
+    : [[...first, ...sur]];
+  const seen = new Set();
+  return list.filter((words) => {
+    const key = [...words].sort().join(" ");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * @returns {{ok:boolean, comparable:boolean, expected:string[], portal:string[], missing:string[], extra:string[],
+ *            matched?:string[], allowed:string[][]}}
+ *   `comparable` is false when the policy has no Full Name (nothing to compare against). `missing` / `extra` are measured
+ *   against Full Name + Surname, as before. `matched` = the allowed name the portal's equals.
+ */
+function compareKycName({ fullName = "", surname = "", fatherName = "", portalName = "", combinations = false } = {}) {
   const expected = [...nameTokens(fullName), ...nameTokens(surname)];
   const portal = nameTokens(portalName);
-  const missing = without(expected, portal);
-  const extra = without(portal, expected);
+  const allowed = combinations
+    ? allowedNames({ fullName, surname, fatherName, combinations: true })
+    : expected.length
+    ? [expected]
+    : [];
+  const matched = allowed.find((words) => sameWords(words, portal));
   return {
-    ok: expected.length > 0 && portal.length > 0 && missing.length === 0 && extra.length === 0,
-    comparable: expected.length > 0,
+    ok: !!matched,
+    comparable: combinations ? nameTokens(fullName).length > 0 : expected.length > 0,
     expected,
     portal,
-    missing,
-    extra,
+    missing: without(expected, portal),
+    extra: without(portal, expected),
+    matched,
+    allowed,
   };
 }
 
@@ -120,7 +163,17 @@ function markKycNameMismatchInPage(label) {
 /* -------------------------------------------------------------------------- */
 
 /** The sentence the operator reads. No colon in it (beautifyError keeps only the text after the last one). */
-function kycNameMismatchMessage({ portalName, fullName, surname } = {}) {
+function kycNameMismatchMessage({ portalName, fullName, surname, fatherName, combinations = false } = {}) {
+  if (combinations) {
+    return (
+      `KYC name mismatch - Reliance's KYC shows "${plain(portalName)}" but the policy has ` +
+      `Full Name "${plain(fullName)}"${plain(surname) ? `, Surname "${plain(surname)}"` : ""}` +
+      `${plain(fatherName) ? `, Father Name "${plain(fatherName)}"` : ""}. ` +
+      "Allowed is Full Name alone, Full Name + Surname, Full Name + Father Name, or all three. " +
+      "Correct the name on the policy, or use the customer's own Aadhaar, then run the policy again. " +
+      "Stopped on the KYC page, PROCEED was not pressed and nothing was paid."
+    );
+  }
   return (
     `KYC name mismatch - Reliance's KYC shows "${plain(portalName)}" but the policy has ` +
     `Full Name "${plain(fullName)}"${plain(surname) ? ` and Surname "${plain(surname)}"` : ""}. ` +
@@ -134,7 +187,13 @@ class KycNameMismatchError extends PortalRejectedError {
   constructor(message, { portalName = "" } = {}) {
     super(message, { stage: "kyc-name", portalText: portalName });
     this.name = "KycNameMismatchError";
+    this.keepMessage = true; // the failure catch must not replace it with whatever the page says
   }
+}
+
+/** The owner's rule: a KYC name mismatch stops on the KYC page — no Pending Quotes, no Pay, no links (no fallback). */
+function skipsKycFallback(err) {
+  return !!err && (err instanceof KycNameMismatchError || err.name === "KycNameMismatchError") && isKycNameCombinationsEnabled();
 }
 
 /**
@@ -157,9 +216,11 @@ async function checkKycName(driver, o = {}) {
   } = o;
   const fullName = String(data.firstName || data.fullName || "").trim();
   const surname = String(data.lastName || data.surname || "").trim();
-  const out = { state: "unreadable", portalName: "", fullName, surname };
+  const fatherName = String(data.fatherName || data.fatherFirstName || "").trim();
+  const combinations = isKycNameCombinationsEnabled();
+  const out = { state: "unreadable", portalName: "", fullName, surname, fatherName, combinations };
 
-  if (!nameTokens(`${fullName} ${surname}`).length) {
+  if (!nameTokens(combinations ? fullName : `${fullName} ${surname}`).length) {
     out.reason = "the policy has no name to compare with";
     return out;
   }
@@ -183,7 +244,7 @@ async function checkKycName(driver, o = {}) {
   }
 
   out.portalName = read.value;
-  const compare = compareKycName({ fullName, surname, portalName: read.value });
+  const compare = compareKycName({ fullName, surname, fatherName, portalName: read.value, combinations });
   out.compare = compare;
   if (compare.ok) {
     out.state = "match";
@@ -205,6 +266,9 @@ async function checkKycName(driver, o = {}) {
 
 module.exports = {
   isKycNameCheckEnabled,
+  isKycNameCombinationsEnabled,
+  allowedNames,
+  skipsKycFallback,
   nameTokens,
   compareKycName,
   readKycNameInPage,
