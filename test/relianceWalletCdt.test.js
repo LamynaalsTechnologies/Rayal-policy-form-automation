@@ -12,9 +12,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { Key } = require("selenium-webdriver");
 
-const wallet = require("../fullPolicycompany/relianceWalletCdt");
-const hold = require("../fullPolicycompany/relianceWalletHold");
-const { findProposalCheckboxInPage } = require("../fullPolicycompany/relianceKycFallback");
+const wallet = require("../fullPolicycompany/reliance/relianceWalletCdt");
+const hold = require("../fullPolicycompany/reliance/relianceWalletHold");
+const { findProposalCheckboxInPage } = require("../fullPolicycompany/reliance/relianceKycFallback");
 const { beautifyError } = require("../lib/errorHandler");
 const { AutomationStoppedError, isAutomationStop } = require("../automationStopper");
 

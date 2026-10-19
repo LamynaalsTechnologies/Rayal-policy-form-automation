@@ -35,7 +35,7 @@ const { By } = require("selenium-webdriver");
 const { log, warn } = require("./kshemaLog");
 // The Reliance fix's byte sniffing (S3 XML / HTML / empty are refused, a real
 // picture or PDF is told by its first bytes). Exported and tested there.
-const { inspectDocumentFile } = require("../relianceKycSubmit");
+const { inspectDocumentFile } = require("../reliance/relianceKycSubmit");
 
 /** The project's temp_uploads (wiped at server start); not relative to the TP copy. */
 const TEMP_DIR = path.join(__dirname, "..", "..", "temp_uploads");

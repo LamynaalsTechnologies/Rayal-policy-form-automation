@@ -36,3 +36,10 @@ test("lib/policyDates.js is byte-identical to the backend's shared/policyDates.j
   const mine = fs.readFileSync(path.join(__dirname, "..", "lib", "policyDates.js"));
   assert.ok(mine.equals(fs.readFileSync(backend)), "the two copies of policyDates.js differ");
 });
+
+test("lib/relianceStagesCore.js is byte-identical to the backend's shared/relianceStagesCore.js", (t) => {
+  const backend = path.join(__dirname, "..", "..", "RayalBrokers-backend", "shared", "relianceStagesCore.js");
+  if (!fs.existsSync(backend)) return t.skip("backend repo not next to this one");
+  const mine = fs.readFileSync(path.join(__dirname, "..", "lib", "relianceStagesCore.js"));
+  assert.ok(mine.equals(fs.readFileSync(backend)), "the two copies of relianceStagesCore.js differ");
+});

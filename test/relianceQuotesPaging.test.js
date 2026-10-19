@@ -10,8 +10,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const qp = require("../fullPolicycompany/relianceQuotesPaging");
-const fallback = require("../fullPolicycompany/relianceKycFallback");
+const qp = require("../fullPolicycompany/reliance/relianceQuotesPaging");
+const fallback = require("../fullPolicycompany/reliance/relianceKycFallback");
 
 const OURS = "R141026119597";
 

@@ -10,7 +10,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const settle = require("../fullPolicycompany/relianceCoverSettle");
+const settle = require("../fullPolicycompany/reliance/relianceCoverSettle");
 const { beautifyError } = require("../lib/errorHandler");
 
 /** Run fn with RELIANCE_COVER_SETTLE_ENABLED set (undefined = absent), then put it back. */

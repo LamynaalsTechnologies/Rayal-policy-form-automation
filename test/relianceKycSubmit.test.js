@@ -10,7 +10,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const kyc = require("../fullPolicycompany/relianceKycSubmit");
+const kyc = require("../fullPolicycompany/reliance/relianceKycSubmit");
 const { beautifyError } = require("../lib/errorHandler");
 
 const ERR = "Please upload valid OVD file only.";

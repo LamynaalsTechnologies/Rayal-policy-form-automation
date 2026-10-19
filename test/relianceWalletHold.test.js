@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const hold = require("../fullPolicycompany/relianceWalletHold");
+const hold = require("../fullPolicycompany/reliance/relianceWalletHold");
 const { stopper, isAutomationStop, stoppedResult } = require("../automationStopper");
 
 /** Run fn with RELIANCE_WALLET_HOLD_ENABLED set (undefined = absent), then put it back. */
@@ -81,7 +81,8 @@ test("relianceForm.js: the hold sits after Pay is clicked, beside the link flow,
   const linkBranch = at("data.Paymentmethod.toLowerCase() === 'link'");
   const holdBranch = at("else if (shouldHoldForWallet(data.Paymentmethod))");
   const stopCall = at("stopper(WALLET_HOLD_MESSAGE, { stage: WALLET_HOLD_STAGE");
-  const brisk = at("Payment flow completed, continuing to Brisk API");
+  // after the payment block: stage 3 is recorded (relianceStages.js), then the run goes on to the Brisk call
+  const brisk = at("if (paymentDone) {");
   assert.ok(payClicked < linkBranch && linkBranch < holdBranch && holdBranch < stopCall && stopCall < brisk);
   assert.equal(src.split("shouldHoldForWallet(").length - 1, 1, "one hold branch only");
 });

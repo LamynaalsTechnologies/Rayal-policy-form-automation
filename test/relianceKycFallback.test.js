@@ -10,8 +10,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const fb = require("../fullPolicycompany/relianceKycFallback");
-const kyc = require("../fullPolicycompany/relianceKycSubmit");
+const fb = require("../fullPolicycompany/reliance/relianceKycFallback");
+const kyc = require("../fullPolicycompany/reliance/relianceKycSubmit");
 const { beautifyError } = require("../lib/errorHandler");
 
 const OURS = "R14102628432";
@@ -369,7 +369,7 @@ test("never throws: a driver that fails comes back as 'not reached' with the rea
 });
 
 test("it never goes near the payment-link / wallet controls of the success path", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "fullPolicycompany", "relianceKycFallback.js"), "utf8");
+  const source = fs.readFileSync(path.join(__dirname, "..", "fullPolicycompany", "reliance", "relianceKycFallback.js"), "utf8");
   const code = source.replace(/^[ \t]*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
   for (const forbidden of ["Send Payment Link", "SendMail", "k-dropdown-wrap", "shouldHoldForWallet", "createBriskCertificate"]) {
     assert.equal(code.includes(forbidden), false, `${forbidden} must not appear in the fallback`);
@@ -984,7 +984,7 @@ test("onNewError: not called for text the page already showed before the upload,
 });
 
 test("onNewError: the same hook works in the slot wait (document upload)", async () => {
-  const up = require("../fullPolicycompany/relianceKycUpload");
+  const up = require("../fullPolicycompany/reliance/relianceKycUpload");
   const seen = [];
   let t = 0;
   const driver = {
@@ -1051,7 +1051,13 @@ test("relianceForm.js: accepted is set exactly where Reliance accepted SUBMIT; t
   const accepted = at("kycAccepted = true; // the KYC is done");
   const cleared = at("await saveKycStatus(null, data, jobId);", accepted);
   assert.ok(accepted < cleared);
-  assert.equal(formSrc.split("kycAccepted = true;").length - 1, 2, "the accepted path and the switch-off path, nowhere else");
+  assert.equal(
+    formSrc.split("kycAccepted = true;").length - 1,
+    3,
+    "the accepted path, the switch-off path and a resumed run whose KYC an earlier run finished (relianceStages.js), nowhere else"
+  );
+  const resumed = at("kycAccepted = true; // an earlier run finished the KYC of this proposal");
+  assert.match(formSrc.slice(resumed - 200, resumed), /if \(resume\.skipKyc\) \{/, "only when the saved stage 2 says so");
 
   const completed = at('console.log("✅ All new flow steps completed successfully!");');
   const incomplete = at("throw new KycIncompleteError(", completed);
@@ -1060,21 +1066,23 @@ test("relianceForm.js: accepted is set exactly where Reliance accepted SUBMIT; t
   assert.match(formSrc.slice(incomplete - 400, incomplete), /if \(isKycFallbackEnabled\(\) && kycStarted && !kycAccepted\) \{/);
 });
 
-test("relianceForm.js: the failure catch hands a KYC that did not work to the fallback BEFORE the generic screenshot", () => {
+test("relianceForm.js: the failure catch STOPS a KYC that did not work at the KYC (no rescue to the payment page) BEFORE the generic screenshot", () => {
+  // the owner's rule 2026-10-19 (relianceStages.js): a failed KYC never opens Pending Quotes / Pay or saves links
+  assert.equal(formSrc.includes("rescueAfterKycFailure"), false, "the rescue to the payment page is not used by the form any more");
   const catchAt = at('console.log("Error handling post-calculation elements:", err.message);');
-  const rescue = at("await rescueAfterKycFailure({", catchAt);
-  const generic = at('"post-calculation-error"', rescue);
-  assert.ok(catchAt < rescue && rescue < generic);
-  // a KYC name mismatch stops on the KYC page instead (relianceKycName.js skipsKycFallback, the owner's rule 2026-10-17)
-  assert.match(formSrc.slice(catchAt, rescue), /if \(isKycFallbackEnabled\(\) && kycStarted && !kycAccepted && !skipsKycFallback\(err\)\) \{/);
-  assert.match(formSrc.slice(rescue, generic), /\} else \{/, "the old handling is the else branch");
+  const stop = at("await stopAtKycFailure({", catchAt);
+  const generic = at('"post-calculation-error"', stop);
+  const elseAt = at("} else {", stop);
+  assert.ok(catchAt < stop && stop < elseAt);
+  assert.match(formSrc.slice(catchAt, stop), /if \(stageNow === "kyc" && !kycAccepted\) \{/, "every failure in stage 2 that is not an accepted KYC");
   // a stop on purpose is still thrown before any of this
   assert.match(formSrc.slice(catchAt - 120, catchAt), /if \(isAutomationStop\(err\)\) throw err;/);
-  // what the result carries
-  const body = formSrc.slice(rescue, generic);
-  for (const needle of ["postCalculationFailed = true;", "postCalculationError = rescued.message;", "thisScreenshotUrl = rescued.screenshotUrl;", "thisScreenshotKey = rescued.screenshotKey;"]) {
+  // what the result carries; no keeper screenshot = the generic one
+  const body = formSrc.slice(stop, elseAt);
+  for (const needle of ["shots: kycShots,", "postCalculationFailed = true;", "postCalculationError = stopped.message;", "thisScreenshotUrl = stopped.screenshotUrl;", "thisScreenshotKey = stopped.screenshotKey;", "if (!thisScreenshotUrl) {"]) {
     assert.ok(body.includes(needle), needle);
   }
+  assert.ok(generic > stop);
 });
 
 test("relianceForm.js: every KYC message thrown inside the step is the brief form when the fallback adds the rest", () => {
@@ -1101,8 +1109,10 @@ test("relianceForm.js: the success path is untouched — the payment link flow a
   const accepted = at("kycAccepted = true; // the KYC is done");
   const pendingQuotes = at('console.log("Navigating to Pending Quotes page...");', accepted);
   const sendLink = at("Selecting 'Send Payment Link'...", pendingQuotes);
-  const rescue = at("await rescueAfterKycFailure({");
-  assert.ok(accepted < pendingQuotes && pendingQuotes < sendLink && sendLink < rescue);
+  // stage 3 (the payment) runs after the KYC block, and is checked afterwards (relianceStages.js)
+  const kycEnd = at("} // end of: stage 2 (the KYC)", accepted);
+  const paymentChecked = at("if (paymentDone) {", sendLink);
+  assert.ok(accepted < kycEnd && kycEnd < pendingQuotes && pendingQuotes < sendLink && sendLink < paymentChecked);
 });
 
 

@@ -16,9 +16,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const issue = require("../fullPolicycompany/relianceWalletIssue");
-const cdtModule = require("../fullPolicycompany/relianceWalletCdt");
-const hold = require("../fullPolicycompany/relianceWalletHold");
+const issue = require("../fullPolicycompany/reliance/relianceWalletIssue");
+const cdtModule = require("../fullPolicycompany/reliance/relianceWalletCdt");
+const hold = require("../fullPolicycompany/reliance/relianceWalletHold");
 const { beautifyError } = require("../lib/errorHandler");
 const { AutomationStoppedError } = require("../automationStopper");
 
@@ -1811,7 +1811,7 @@ test("every failure message survives beautifyError unchopped (no colon outside t
 /* -------------------------------------------------------------------------- */
 
 const formSrc = fs.readFileSync(path.join(__dirname, "..", "fullPolicycompany", "relianceForm.js"), "utf8");
-const issueSrc = fs.readFileSync(path.join(__dirname, "..", "fullPolicycompany", "relianceWalletIssue.js"), "utf8");
+const issueSrc = fs.readFileSync(path.join(__dirname, "..", "fullPolicycompany", "reliance", "relianceWalletIssue.js"), "utf8");
 const at = (src, needle, from = 0) => {
   const i = src.indexOf(needle, from);
   assert.ok(i >= 0, `missing: ${needle}`);
@@ -1835,7 +1835,9 @@ test("relianceForm.js: the gate runs before any browser opens; the issue step is
     "the issue step sits directly behind the switch"
   );
   const warn = at(formSrc, "if (issued.warning && !documentUploadError) documentUploadError = issued.warning;", issueCall);
-  const fallthrough = at(formSrc, 'console.log("✅ Payment flow completed, continuing to Brisk API...");', warn);
+  const issuedMark = at(formSrc, 'paymentDone = "wallet"; // stage 3 done', warn);
+  // stage 3 recorded after the payment block (relianceStages.js), then on to the Brisk step
+  const fallthrough = at(formSrc, "if (paymentDone) {", issuedMark);
   const brisk = at(formSrc, "// === STEP 9: Call Brisk Certificate API ===", fallthrough);
   assert.ok(issueCall < warn && warn < fallthrough && fallthrough < brisk, "after the issue step the run goes on to the Brisk step");
   const body = formSrc.slice(issueCall, warn);

@@ -39,14 +39,14 @@ const {
   isWalletRecoverEnabled,
   WALLET_HOLD_STAGE,
   WALLET_HOLD_MESSAGE,
-} = require("../../../fullPolicycompany/relianceWalletHold");
+} = require("../../../fullPolicycompany/reliance/relianceWalletHold");
 // A wallet policy, past Pay: the CDT option, the payable amount, Add — then wait (instead of only holding).
 const {
   PaymentStepError,
   payWithCdtOrStop,
   waitForProposalCheckbox,
   readSelection,
-} = require("../../../fullPolicycompany/relianceWalletCdt");
+} = require("../../../fullPolicycompany/reliance/relianceWalletCdt");
 // After Add: Submit Details (once, behind a note on the policy), the policy number, the policy PDF — saved on the policy —
 // and the run carries on to the Brisk / merge steps. checkSubmitGate refuses a policy whose payment was already submitted.
 const {
@@ -55,7 +55,7 @@ const {
   payWithCdtAndIssue,
   recoverIssuedPolicyPdf,
   createPolicyPdfUploader,
-} = require("../../../fullPolicycompany/relianceWalletIssue");
+} = require("../../../fullPolicycompany/reliance/relianceWalletIssue");
 // What the portal answered to "Get Coverage Details": the cover table, or only a refusal sentence in
 // #DivCoverDetails ("No Discount available for mentioned Details ...").
 const {
@@ -65,7 +65,7 @@ const {
   readCoverDetailsRejection,
   sentDetails,
   isPortalSuccessMessage,
-} = require("../../../fullPolicycompany/relianceCoverDetails");
+} = require("../../../fullPolicycompany/reliance/relianceCoverDetails");
 // Get Coverage Details is fired four ways, so Reliance answers four times, in any order, and every answer redraws
 // the cover table and re-ticks PA to Owner Driver. Wait for the last answer; check PA is really off.
 const {
@@ -73,7 +73,7 @@ const {
   waitForPortalIdle,
   ensureOwnerDriverPaOff,
   ownerDriverPaStillOnMessage,
-} = require("../../../fullPolicycompany/relianceCoverSettle");
+} = require("../../../fullPolicycompany/reliance/relianceCoverSettle");
 // The KYC (OVD upload) page: wait for the SUBMIT button and for the page after SUBMIT instead of pressing a hidden
 // button with a JavaScript click and carrying on as if the portal had accepted the document.
 const {
@@ -96,7 +96,7 @@ const {
   kycReasonText,
   kycDocumentReasonText,
   saveKycStatus,
-} = require("../../../fullPolicycompany/relianceKycSubmit");
+} = require("../../../fullPolicycompany/reliance/relianceKycSubmit");
 const { selectProposerTitle, verifyMainPageTitle } = require("../../../lib/proposerTitle");
 // The CKYC result page after SUBMIT shows the name Reliance read from the Aadhaar: it must be the policy's own name
 // (Full Name + Surname, any order; with RELIANCE_KYC_NAME_COMBINATIONS_ENABLED also Full Name alone / + Father Name) before PROCEED.
@@ -106,7 +106,7 @@ const {
   kycNameMismatchMessage,
   KycNameMismatchError,
   skipsKycFallback,
-} = require("../../../fullPolicycompany/relianceKycName");
+} = require("../../../fullPolicycompany/reliance/relianceKycName");
 // The same page's UPLOAD DOCUMENT option and its Identity / Address Verification upload areas, by the page's own markup
 // (the old code clicked the FIRST selectDoc option — PAN — and put the two documents into the wrong handlers).
 const {
@@ -114,24 +114,36 @@ const {
   findUploadOptionInPage,
   chooseUploadDocument,
   uploadKycDocument,
-} = require("../../../fullPolicycompany/relianceKycUpload");
+} = require("../../../fullPolicycompany/reliance/relianceKycUpload");
 // When the KYC does not work, whatever the reason: the screenshot of the error, the payment page, the links on the policy
 // — and the run ends as a failed KYC instead of carrying on (or just stopping on the KYC page).
+// (Since 2026-10-19 a failed KYC stops at the KYC — relianceStages.js — so the rescue to the payment page is not used here.)
 const {
   KycIncompleteError,
   createKycShotKeeper,
-  rescueAfterKycFailure,
   clearStaleProcessLinks,
   saveCurrentPageLink,
   findProposalCheckboxInPage,
-} = require("../../../fullPolicycompany/relianceKycFallback");
+} = require("../../../fullPolicycompany/reliance/relianceKycFallback");
+// Reliance in three stages — proposal, KYC, payment — each remembered on the policy, so a later run does not redo a
+// finished one; the payment only after the KYC is finished; a failed KYC stops at the KYC.
+const {
+  loadResumePlan,
+  markStage,
+  RelianceStageError,
+  kycNotDoneMessage,
+  proceedMissingMessage,
+  resumeNoKycLinkMessage,
+  paymentNotDoneMessage,
+  stopAtKycFailure,
+} = require("../../../fullPolicycompany/reliance/relianceStages");
 // Pending Quotes is a Kendo grid, 10 rows to a page: the proposal is looked for on every page (the pager's next link), and
 // a proposal that is nowhere in the list stops the policy — the old "first checkbox" fallback ticked ANOTHER customer's.
 const {
   isQuotesPagingEnabled,
   findProposalAcrossPages,
   describeScan,
-} = require("../../../fullPolicycompany/relianceQuotesPaging");
+} = require("../../../fullPolicycompany/reliance/relianceQuotesPaging");
 require("../../../breaker"); // defines the global `Breaker` for a standalone run of this file
 // [MC] 3: the product of the part (OD / TP) and the stop taken while it is not configured
 const { reliancePartProduct, relianceMultiLabel, xpathLiteral } = require("./multiConfig"); // [MC] 3
@@ -1235,6 +1247,14 @@ async function fillRelianceMultiForm( // [MC] 6
   // The issued policy's PDF is already stored on the policy (relianceWalletIssue.js): with no Brisk certificate there is
   // nothing to merge, so the run completes right after it instead of calling the merge service.
   let policyPdfOnPolicy = false;
+  // Reliance in three stages (relianceStages.js): proposal -> KYC -> payment. `resume` = what an earlier run already
+  // finished for this policy; `stageNow` = the stage this run is in (a failure is recorded on it).
+  let resume = { skipProposal: false, skipKyc: false, proposalNumber: null, startAt: "proposal" };
+  let stageNow = "proposal";
+  let kycProceeded = false; // PROCEED was pressed after the KYC: the KYC tab is closed, the main tab is back
+  let paymentDone = null; // "link" (the link was sent) / "wallet" (the CDT payment is issued)
+  let paymentProblem = null; // the last thing in the payment step that went wrong and was only logged
+  let paymentSkippedByConfig = false; // wallet hold and CDT both switched off: nothing to pay here, as before
 
   try {
     // === STEP 0: Open this job's own browser window ===
@@ -1385,6 +1405,7 @@ async function fillRelianceMultiForm( // [MC] 6
         });
         if (recovered.warning && !documentUploadError) documentUploadError = recovered.warning;
         policyPdfOnPolicy = true; // the policy has its PDF (stored now, or already there)
+        await markStage(data, "payment", "completed", { mode: "wallet", proposalNumber: data.proposalNumber || data.proposal_number || null }, { jobId });
       } catch (recoveryErr) {
         if (isAutomationStop(recoveryErr)) throw recoveryErr;
         // the payment was made earlier: a failure here is a post-submission one, never retried by itself
@@ -1401,8 +1422,20 @@ async function fillRelianceMultiForm( // [MC] 6
       }
     }
 
+    // === Stages: where this run starts (relianceStages.js). A proposal / KYC an earlier run finished is not done again ===
+    if (!issuedRecovery) {
+      resume = await loadResumePlan(data, { jobId });
+      if (resume.skipProposal) {
+        data.proposalNumber = resume.proposalNumber;
+        console.log(
+          `▶ [${jobId}] Resuming at ${resume.skipKyc ? "the payment (stage 3)" : resume.skipPayment ? "the KYC (stage 2) - KYC only, the payment is done" : "the KYC (stage 2)"} with proposal ${resume.proposalNumber} saved by an earlier run`
+        );
+      }
+    }
+
     // === The form (STEP 3 to the end of the modal / payment steps) — skipped for a policy that was already issued ===
     if (!issuedRecovery) {
+    if (!resume.skipProposal) { // stage 1 - the proposal (part A, the menus and the product)
 
     // === STEP 3: hover Motors and click Two Wheeler ===
     // Retried with a real visibility wait — on a slow portal the submenu can
@@ -1561,8 +1594,11 @@ async function fillRelianceMultiForm( // [MC] 6
       console.error("❌ Could not select Kendo dropdown option:", err.message);
     }
 
+    } // end of: stage 1 part A
+
     // === STEP 6: Checkbox + iframe form ===
     try {
+      if (!resume.skipProposal) { // stage 1 - the proposal (part B, Form 60 and the customer)
       const ispCheckbox = await driver.wait(
         until.elementLocated(By.id("ISPANNotAvailable")),
         5000
@@ -1757,7 +1793,9 @@ async function fillRelianceMultiForm( // [MC] 6
 
       console.log("Looking for post-submission elements...");
 
+      } // end of: stage 1 part B
       try {
+        if (!resume.skipProposal) { // stage 1 - the proposal (part C, vehicle, covers, Calculate Premium)
         // // Wait for the Vertical Code dropdown
         // console.log("Waiting for Vertical Code dropdown...");
         // const verticalCodeDropdown = await driver.wait(
@@ -3111,7 +3149,10 @@ async function fillRelianceMultiForm( // [MC] 6
         // === STEP 10: Handle post-calculation elements ===
         console.log("Handling post-calculation elements...");
 
+        } // end of: stage 1 part C
         try {
+          let proposalNumber = resume.proposalNumber || null; // a resumed run already has it
+          if (!resume.skipProposal) { // stage 1 - the proposal (part D, Save and the proposal number)
           // Click Save button
           console.log("Looking for Save button...");
           const saveButton = await driver.wait(
@@ -3136,7 +3177,7 @@ async function fillRelianceMultiForm( // [MC] 6
 
           // === NEW FLOW: Extract Proposal Number ===
           console.log("Extracting proposal number from success message...");
-          let proposalNumber = null;
+          proposalNumber = null;
           try {
             // Wait for success message span to appear
             const successMessage = await driver.wait(
@@ -3170,6 +3211,12 @@ async function fillRelianceMultiForm( // [MC] 6
           // point can still fail, and when it does the proposal number is
           // exactly what is needed to find the submission in the portal.
           await saveProposalNumber(proposalNumber, data, jobId);
+          await markStage(data, "proposal", "completed", { proposalNumber }, { jobId }); // stage 1 done (KYC + payment pending)
+          } // end of: stage 1 - the proposal
+
+          // === Stage 2 — the KYC (relianceStages.js): skipped when an earlier run finished it for this proposal ===
+          stageNow = "kyc";
+          if (!resume.skipKyc) {
 
           // === NEW FLOW: Navigate to View Policy ===
           console.log("Navigating to View Policy...");
@@ -3562,7 +3609,9 @@ async function fillRelianceMultiForm( // [MC] 6
             }
 
             if (!doKycLink) {
-              throw new Error("DO KYC link not found after search");
+              throw resume.skipProposal
+                ? new RelianceStageError(resumeNoKycLinkMessage(proposalNumber), { stage: "kyc" })
+                : new Error("DO KYC link not found after search");
             }
 
             await driver.wait(until.elementIsVisible(doKycLink), 5000);
@@ -4573,6 +4622,7 @@ async function fillRelianceMultiForm( // [MC] 6
 
                         kycAccepted = true; // the KYC is done: from here on nothing below is a KYC failure
                         await saveKycStatus(null, data, jobId); // KYC is done: nothing for the View page to say
+                        await markStage(data, "kyc", "completed", { proposalNumber }, { jobId }); // stage 2 done
                       } else {
                         await driver.sleep(5000);
 
@@ -4604,6 +4654,7 @@ async function fillRelianceMultiForm( // [MC] 6
 
                         console.log("✅ SUBMIT completed successfully");
                         kycAccepted = true; // (switch-off path: SUBMIT was pressed and nothing was checked)
+                        await markStage(data, "kyc", "completed", { proposalNumber }, { jobId }); // stage 2 done
 
                         // Wait for API response - increased wait time
                         console.log("⏳ Waiting for API response after SUBMIT (10 seconds)...");
@@ -4691,6 +4742,97 @@ async function fillRelianceMultiForm( // [MC] 6
                         }
 
                         await driver.sleep(2000);
+
+                        // === Stage 3 (Pending Quotes, Pay, link / wallet) runs after the KYC block, below ===
+                        kycProceeded = true;
+
+                      } else {
+                        console.log("❌ PROCEED button not found after all attempts");
+                      }
+
+
+                      // Wait indefinitely after payment flow - don't close driver
+                      // DISABLED: Allowing code to continue to Brisk API call
+                      /*
+                      console.log("⏳ Waiting indefinitely (driver won't close)...");
+                      await new Promise(() => {
+                        // Never resolve - keeps browser open
+                      });
+                      */
+                      console.log("✅ KYC step finished - the payment (stage 3) follows");
+                      await driver.sleep(2000);
+                    } else {
+                      console.log("❌ SUBMIT button could not be located");
+                      kycProblem = "the SUBMIT button could not be located on the KYC page";
+                    }
+
+                  } catch (submitErr) {
+                    if (isAutomationStop(submitErr) || submitErr.portalRejected) throw submitErr;
+                    console.log(`⚠️  Submit button error: ${submitErr.message}`);
+                    kycProblem = `the SUBMIT step failed (${submitErr.message})`;
+                  }
+
+                } catch (uploadErr) {
+                  if (isAutomationStop(uploadErr) || uploadErr.portalRejected) throw uploadErr;
+                  console.log(`⚠️ Upload error: ${uploadErr.message}`);
+                  kycProblem = `the document upload failed (${uploadErr.message})`;
+                }
+              } else {
+                console.log("❌ UPLOAD DOCUMENT div not found");
+                kycProblem = "the UPLOAD DOCUMENT option was not found on the KYC page";
+              }
+            } else {
+              console.log("⚠️ No Aadhar card found in database");
+              if (isKycSubmitWaitEnabled()) await saveKycStatus(KYC_NO_DOCUMENT, data, jobId);
+              kycProblem = KYC_NO_DOCUMENT;
+            }
+          } catch (err) {
+            // a refusal by the portal ends the policy here (see relianceKycSubmit.js); everything else in this
+            // step stays a non-fatal warning, as before
+            if (isAutomationStop(err) || err.portalRejected) throw err;
+            console.log("Error uploading document:", err.message);
+            documentUploadError = `Aadhaar document upload to portal failed: ${err.message}`;
+            kycProblem = err.message;
+          }
+
+          if (documentUploadError) {
+            console.log("⚠️ New flow steps completed WITH WARNINGS (document upload failed)");
+          } else {
+            console.log("✅ All new flow steps completed successfully!");
+          }
+
+          // The KYC step is over and Reliance never accepted a document, yet nothing was thrown for it (a warning that was
+          // only logged, no Aadhaar on the policy ...). That is a KYC that did not work: the catch below hands it to
+          // relianceKycFallback.js — screenshot, payment page, links — instead of the run going on to buy the Brisk PA.
+          if (isKycFallbackEnabled() && kycStarted && !kycAccepted) {
+            const why = kycProblem || "Reliance did not accept a document";
+            throw new KycIncompleteError(`KYC did not complete - ${why}`, { reason: why });
+          }
+
+          } // end of: stage 2 (the KYC)
+
+          // === Stage 3 — the payment (Pending Quotes, Pay, link / wallet). Only when the KYC is finished (relianceStages.js) ===
+          if (resume.skipKyc) {
+            kycAccepted = true; // an earlier run finished the KYC of this proposal
+            console.log(`▶ [${jobId}] The KYC of proposal ${proposalNumber} was finished by an earlier run - straight to Pending Quotes`);
+          } else if (!kycAccepted) {
+            const why = kycProblem || "Reliance did not accept a document";
+            throw kycStarted
+              ? new KycIncompleteError(`KYC did not complete - ${why}`, { reason: why })
+              : new RelianceStageError(kycNotDoneMessage(proposalNumber, why), { stage: "kyc" });
+          }
+          // KYC set back to pending on a policy whose payment is done: only the KYC was to be redone — nothing is paid or
+          // sent again, and the Brisk / PDF steps after the payment were done by that earlier run too (relianceStagesCore)
+          if (resume.skipPayment) {
+            console.log(
+              `▶ [${jobId}] Only the KYC of proposal ${proposalNumber} was redone - its payment was done by an earlier run, so the run ends here`
+            );
+            return { success: true, kycOnly: true, documentUploadError };
+          }
+          stageNow = "payment";
+          if (!resume.skipKyc && !kycProceeded) {
+            throw new RelianceStageError(proceedMissingMessage(proposalNumber), { stage: "payment" });
+          }
 
                         // === STEP 6: Navigate to Pending Quotes ===
                         console.log("Navigating to Pending Quotes page...");
@@ -5007,12 +5149,15 @@ async function fillRelianceMultiForm( // [MC] 6
                                         await driver.wait(until.elementIsVisible(yesButton), 5000);
                                         await yesButton.click();
                                         console.log("✅ Clicked Yes (Send Mail) button");
+                                        paymentDone = "link"; // stage 3 done: the link was sent
                                       } catch (yesErr) {
                                         console.log("⚠️ Yes button not found: " + yesErr.message);
+                                        paymentProblem = "the Yes (Send Mail) button did not appear";
                                       }
 
                                     } catch (linkFlowErr) {
                                       console.log("❌ Error in Payment Link flow: " + linkFlowErr.message);
+                                      paymentProblem = `the payment link step failed - ${linkFlowErr.message}`;
                                     }
                                   } else if (isWalletCdtEnabled() && isWalletPayment(data.Paymentmethod)) {
                                     // WALLET with the CDT option (relianceWalletCdt.js): is the option there, choose it, enter
@@ -5054,6 +5199,7 @@ async function fillRelianceMultiForm( // [MC] 6
                                       });
                                       if (issued.warning && !documentUploadError) documentUploadError = issued.warning;
       policyPdfOnPolicy = true; // issued, and its PDF is stored (an error was thrown otherwise)
+      paymentDone = "wallet"; // stage 3 done: the CDT payment is issued
                                     } else {
                                       await payWithCdtOrStop(walletArgs);
                                     }
@@ -5071,6 +5217,7 @@ async function fillRelianceMultiForm( // [MC] 6
                                     stopper(WALLET_HOLD_MESSAGE, { stage: WALLET_HOLD_STAGE, pageUrl: holdUrl });
                                   } else {
                                     console.log(`👉 Payment Method is '${data.Paymentmethod || 'wallet'}', wallet hold is switched off. Skipping Link flow.`);
+                                    paymentSkippedByConfig = true; // nothing to do here, as before
                                   }
 
                                   // === STEP 11: Enter amount in currency input ===
@@ -5160,87 +5307,39 @@ async function fillRelianceMultiForm( // [MC] 6
                                 } catch (payBtnErr) {
                                   if (isAutomationStop(payBtnErr) || payBtnErr.portalRejected) throw payBtnErr;
                                   console.log(`⚠️  Pay button error: ${payBtnErr.message}`);
+                                  paymentProblem = `the Pay step failed - ${payBtnErr.message}`;
                                 }
 
                               } catch (tpErr) {
                                 if (isAutomationStop(tpErr) || tpErr.portalRejected) throw tpErr;
                                 console.log(`⚠️  TP Declaration error: ${tpErr.message}`);
+                                paymentProblem = `the TP declaration step failed - ${tpErr.message}`;
                               }
                             } else {
                               console.log("❌ Could not find proposal checkbox");
+                              paymentProblem = "the proposal was not found in Pending Quotes";
                             }
 
                           } catch (proposalErr) {
                             if (isAutomationStop(proposalErr) || proposalErr.portalRejected) throw proposalErr;
                             console.log(`⚠️  Proposal checkbox error: ${proposalErr.message}`);
+                            paymentProblem = `the proposal checkbox step failed - ${proposalErr.message}`;
                           }
 
                         } catch (paymentMenuErr) {
                           if (isAutomationStop(paymentMenuErr) || paymentMenuErr.portalRejected) throw paymentMenuErr;
                           console.log(`⚠️  Payment menu error: ${paymentMenuErr.message}`);
+                          paymentProblem = `Pending Quotes could not be opened - ${paymentMenuErr.message}`;
                         }
 
-                      } else {
-                        console.log("❌ PROCEED button not found after all attempts");
-                      }
-
-
-                      // Wait indefinitely after payment flow - don't close driver
-                      // DISABLED: Allowing code to continue to Brisk API call
-                      /*
-                      console.log("⏳ Waiting indefinitely (driver won't close)...");
-                      await new Promise(() => {
-                        // Never resolve - keeps browser open
-                      });
-                      */
-                      console.log("✅ Payment flow completed, continuing to Brisk API...");
-                      await driver.sleep(2000);
-                    } else {
-                      console.log("❌ SUBMIT button could not be located");
-                      kycProblem = "the SUBMIT button could not be located on the KYC page";
-                    }
-
-                  } catch (submitErr) {
-                    if (isAutomationStop(submitErr) || submitErr.portalRejected) throw submitErr;
-                    console.log(`⚠️  Submit button error: ${submitErr.message}`);
-                    kycProblem = `the SUBMIT step failed (${submitErr.message})`;
-                  }
-
-                } catch (uploadErr) {
-                  if (isAutomationStop(uploadErr) || uploadErr.portalRejected) throw uploadErr;
-                  console.log(`⚠️ Upload error: ${uploadErr.message}`);
-                  kycProblem = `the document upload failed (${uploadErr.message})`;
-                }
-              } else {
-                console.log("❌ UPLOAD DOCUMENT div not found");
-                kycProblem = "the UPLOAD DOCUMENT option was not found on the KYC page";
-              }
-            } else {
-              console.log("⚠️ No Aadhar card found in database");
-              if (isKycSubmitWaitEnabled()) await saveKycStatus(KYC_NO_DOCUMENT, data, jobId);
-              kycProblem = KYC_NO_DOCUMENT;
-            }
-          } catch (err) {
-            // a refusal by the portal ends the policy here (see relianceKycSubmit.js); everything else in this
-            // step stays a non-fatal warning, as before
-            if (isAutomationStop(err) || err.portalRejected) throw err;
-            console.log("Error uploading document:", err.message);
-            documentUploadError = `Aadhaar document upload to portal failed: ${err.message}`;
-            kycProblem = err.message;
-          }
-
-          if (documentUploadError) {
-            console.log("⚠️ New flow steps completed WITH WARNINGS (document upload failed)");
-          } else {
-            console.log("✅ All new flow steps completed successfully!");
-          }
-
-          // The KYC step is over and Reliance never accepted a document, yet nothing was thrown for it (a warning that was
-          // only logged, no Aadhaar on the policy ...). That is a KYC that did not work: the catch below hands it to
-          // relianceKycFallback.js — screenshot, payment page, links — instead of the run going on to buy the Brisk PA.
-          if (isKycFallbackEnabled() && kycStarted && !kycAccepted) {
-            const why = kycProblem || "Reliance did not accept a document";
-            throw new KycIncompleteError(`KYC did not complete - ${why}`, { reason: why });
+          if (paymentDone) {
+            await markStage(data, "payment", "completed", { mode: paymentDone, proposalNumber }, { jobId });
+          } else if (!paymentSkippedByConfig) {
+            const linkPolicy = !!(data.Paymentmethod && String(data.Paymentmethod).toLowerCase() === "link");
+            throw new RelianceStageError(
+              paymentNotDoneMessage(proposalNumber, { link: linkPolicy, why: paymentProblem }),
+              { stage: "payment" }
+            );
           }
 
 
@@ -5485,27 +5584,28 @@ async function fillRelianceMultiForm( // [MC] 6
           if (isAutomationStop(err)) throw err;
           console.log("Error handling post-calculation elements:", err.message);
 
-          // A KYC name mismatch stops right here on the KYC page (the owner's rule): no Pending Quotes, no Pay, no links.
-          if (skipsKycFallback(err)) console.log("🛑 Stopped on the KYC page (KYC name mismatch) - Pending Quotes and Pay are not opened");
-
-          if (isKycFallbackEnabled() && kycStarted && !kycAccepted && !skipsKycFallback(err)) {
-            // The KYC did not work (this error, or the step that ended without a document): the screenshot of the error,
-            // the payment page, the links on the policy — then the run ends as a failed KYC. Nothing is paid or sent.
-            const rescued = await rescueAfterKycFailure({
-              driver,
+          // Stage 2 failed: stop at the KYC (the owner's rule, 2026-10-19) - the screenshot, the KYC note, stage 2 = failed.
+          // No Pending Quotes, no Pay, no links; Re-submit runs only the KYC again, with the same proposal (relianceStages.js).
+          if (stageNow === "kyc" && !kycAccepted) {
+            if (skipsKycFallback(err)) console.log("🛑 Stopped on the KYC page (KYC name mismatch) - Pending Quotes and Pay are not opened");
+            else console.log("🛑 Stopped at the KYC - Pending Quotes and Pay are not opened");
+            const stopped = await stopAtKycFailure({
               data,
               jobId,
               error: err,
               proposalNumber: data.proposalNumber || data.proposal_number,
-              proposalPageUrl: kycProposalPageUrl,
-              kycWindowHandle,
               shots: kycShots,
               log: (line) => console.log(line),
             });
             postCalculationFailed = true;
-            postCalculationError = rescued.message;
-            thisScreenshotUrl = rescued.screenshotUrl;
-            thisScreenshotKey = rescued.screenshotKey;
+            postCalculationError = stopped.message;
+            thisScreenshotUrl = stopped.screenshotUrl;
+            thisScreenshotKey = stopped.screenshotKey;
+            if (!thisScreenshotUrl) {
+              const errorInfo = await captureErrorScreenshot(driver, err, data, "post-calculation-error");
+              thisScreenshotUrl = errorInfo.screenshotUrl;
+              thisScreenshotKey = errorInfo.screenshotKey;
+            }
           } else {
             // Mark post-calculation as failed
             postCalculationFailed = true;
@@ -5527,6 +5627,9 @@ async function fillRelianceMultiForm( // [MC] 6
             // Store screenshot details for the caller
             thisScreenshotUrl = errorInfo.screenshotUrl;
             thisScreenshotKey = errorInfo.screenshotKey;
+
+            // the stage this run was in (the KYC is recorded above; a KYC already accepted is never undone here)
+            if (stageNow !== "kyc") await markStage(data, stageNow, "failed", { error: postCalculationError }, { jobId });
           }
         }
 

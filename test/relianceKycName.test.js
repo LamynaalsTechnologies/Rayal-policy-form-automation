@@ -9,9 +9,9 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const kyc = require(path.join(ROOT, "fullPolicycompany", "relianceKycName.js"));
-const fallback = require(path.join(ROOT, "fullPolicycompany", "relianceKycFallback.js"));
-const { PortalRejectedError } = require(path.join(ROOT, "fullPolicycompany", "relianceKycSubmit.js"));
+const kyc = require(path.join(ROOT, "fullPolicycompany", "reliance", "relianceKycName.js"));
+const fallback = require(path.join(ROOT, "fullPolicycompany", "reliance", "relianceKycFallback.js"));
+const { PortalRejectedError } = require(path.join(ROOT, "fullPolicycompany", "reliance", "relianceKycSubmit.js"));
 
 const cmp = (fullName, surname, portalName) => kyc.compareKycName({ fullName, surname, portalName });
 
@@ -238,7 +238,7 @@ for (const file of [
     assert.ok(throwAt > gate && accepted > throwAt, "the throw comes before kycAccepted");
     assert.ok(proceed > accepted, "and PROCEED is later still");
     assert.match(src, /await saveKycStatus\(nameMessage, data, jobId\);/);
-    assert.match(src, /require\("(\.|\.\.\/\.\.\/\.\.\/fullPolicycompany)\/relianceKycName"\)/);
+    assert.match(src, /require\("(\.|\.\.\/\.\.\/\.\.\/fullPolicycompany)\/reliance\/relianceKycName"\)/);
   });
 }
 
@@ -338,7 +338,10 @@ for (const file of [
     const at = src.indexOf('console.log("Error handling post-calculation elements:", err.message);');
     assert.ok(at > 0);
     const block = src.slice(at, at + 1200);
-    assert.match(block, /if \(isKycFallbackEnabled\(\) && kycStarted && !kycAccepted && !skipsKycFallback\(err\)\) \{/);
+    // since 2026-10-19 EVERY failed KYC stops at the KYC (relianceStages.js) — the rescue to the payment page is gone
+    assert.equal(src.includes("rescueAfterKycFailure"), false);
+    assert.match(block, /if \(stageNow === "kyc" && !kycAccepted\) \{/);
     assert.match(block, /Stopped on the KYC page \(KYC name mismatch\)/);
+    assert.match(block, /await stopAtKycFailure\(\{/);
   });
 }

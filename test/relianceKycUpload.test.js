@@ -16,8 +16,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const up = require("../fullPolicycompany/relianceKycUpload");
-const kyc = require("../fullPolicycompany/relianceKycSubmit");
+const up = require("../fullPolicycompany/reliance/relianceKycUpload");
+const kyc = require("../fullPolicycompany/reliance/relianceKycSubmit");
 
 const IDENTITY = "uploadFile($file,'file1', true, 'pan')";
 const ADDRESS = "uploadFile($file,'file2')";
@@ -631,7 +631,7 @@ test("relianceForm.js: SUBMIT and PROCEED are the ones on screen (the page has s
 
 test("relianceForm.js imports what it uses from the upload module", () => {
   for (const name of ["SLOT_LABEL", "findUploadOptionInPage", "chooseUploadDocument", "uploadKycDocument"]) {
-    assert.match(formSrc, new RegExp(`\\b${name}\\b[^\\n]*\\n(?:[^\\n]*\\n){0,6}[^\\n]*require\\("\\./relianceKycUpload"\\)`), name);
+    assert.match(formSrc, new RegExp(`\\b${name}\\b[^\\n]*\\n(?:[^\\n]*\\n){0,6}[^\\n]*require\\("\\./reliance/relianceKycUpload"\\)`), name);
   }
   assert.match(formSrc, /findKycButton,\s*\n\s*waitForKycSubmitReady/);
 });

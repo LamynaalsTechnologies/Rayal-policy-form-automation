@@ -9,7 +9,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const cover = require("../fullPolicycompany/relianceCoverDetails");
+const cover = require("../fullPolicycompany/reliance/relianceCoverDetails");
 const { beautifyError } = require("../lib/errorHandler");
 
 /** The sentence Reliance wrote into the div on 2026-10-14 (the markup the user pasted). */

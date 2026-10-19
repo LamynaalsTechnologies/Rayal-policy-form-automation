@@ -133,16 +133,16 @@ if (require("./multiCompany/common/featureGate").MULTI_COMPANY_AUTOMATION_ENABLE
     .ensureMultiCompanyScreenshotLifecycleRule()
     .catch((e) => console.error("multiCompany screenshot lifecycle setup error:", e.message));
 }
-// Reliance KYC failure screenshots (fullPolicycompany/relianceKycFallback.js): only when that feature is on, so nothing
+// Reliance KYC failure screenshots (fullPolicycompany/reliance/relianceKycFallback.js): only when that feature is on, so nothing
 // touches S3 otherwise. Expiry is enforced by S3 itself (a lifecycle rule on screenshots/kyc/), not by a cron.
-if (require("./fullPolicycompany/relianceKycSubmit").isKycFallbackEnabled()) {
+if (require("./fullPolicycompany/reliance/relianceKycSubmit").isKycFallbackEnabled()) {
   require("./s3Uploader")
     .ensureKycScreenshotLifecycleRule()
     .catch((e) => console.error("KYC screenshot lifecycle setup error:", e.message));
 }
-// Reliance wallet (CDT) payment screenshots (fullPolicycompany/relianceWalletCdt.js): same rule — only when that feature
+// Reliance wallet (CDT) payment screenshots (fullPolicycompany/reliance/relianceWalletCdt.js): same rule — only when that feature
 // is on, expiry enforced by S3 itself on screenshots/wallet/.
-if (require("./fullPolicycompany/relianceWalletHold").isWalletCdtEnabled()) {
+if (require("./fullPolicycompany/reliance/relianceWalletHold").isWalletCdtEnabled()) {
   require("./s3Uploader")
     .ensureWalletScreenshotLifecycleRule()
     .catch((e) => console.error("wallet screenshot lifecycle setup error:", e.message));
@@ -253,6 +253,11 @@ const { formatPolicyDate } = require("./lib/policyDates");
 // Only jobs that carry `parts` go through these; every other job keeps the
 // original path below unchanged.
 const partRunner = require("./lib/partRunner");
+// Reliance steps set back with "Only update" in the History dialog run when this server starts and when the queue is idle
+const { sweepRunLater, createIdleSweeper } = require("./lib/relianceRunLater");
+const idleRunLater = createIdleSweeper();
+// "Hold" pressed while a job runs: honoured when its attempt ends (JOB_HOLD_REQUEST_ENABLED).
+const holdRequest = require("./lib/holdRequest");
 // OD waits for its policy's TP job (the old two-job shape) — see lib/jobSequence.js.
 const jobSequence = require("./lib/jobSequence");
 const { runBriskPart } = require("./lib/briskPartRunner");
@@ -988,6 +993,11 @@ const runQueuePass = async () => {
     const zombieParts = await partRunner.recoverPartsJobs(jobQueueCollection, {
       filter: silentJobs,
     });
+    // "Hold" pressed while a job was running: now that its attempt has ended, it is put on hold instead of starting
+    // again (lib/holdRequest.js, JOB_HOLD_REQUEST_ENABLED).
+    await holdRequest.applyHoldRequests(jobQueueCollection).catch((err) =>
+      console.error("[Hold] could not apply hold requests:", err && err.message)
+    );
     const zombieCount = zombies.modifiedCount + zombieParts.modifiedCount;
     if (zombieCount > 0) {
       console.warn(
@@ -1031,6 +1041,7 @@ const runQueuePass = async () => {
     const candidateJobs = await jobQueueCollection
       .find({
         status: JOB_STATUS.PENDING,
+        ...holdRequest.claimFilter(), // a job whose hold was asked for while it ran is never started again
         $or: [
           // Never scheduled: absent, or a stored null (which the old
           // `$exists: false` never matched, so such a job never ran).
@@ -1113,6 +1124,14 @@ const runQueuePass = async () => {
         // poll interval, even though a browser slot was free.
         scheduleQueueWakeup(dueAt);
       }
+
+      // The final check, when nothing runs and nothing is ready to start: Reliance steps an operator set back with
+      // "Only update" are queued now (lib/relianceRunLater.js; at most once a minute). A queued one starts this pass's
+      // follow-up pass straight away.
+      if (processingJobs.length === 0) {
+        const swept = await idleRunLater({ jobs: jobQueueCollection, policies: db.collection("onlinePolicy"), logger: console });
+        if (swept && swept.requeued) queuePassRequested = true;
+      }
       return; // No pending jobs ready
     }
 
@@ -1134,7 +1153,7 @@ const runQueuePass = async () => {
         claimed = await partRunner.claimPart(jobQueueCollection, candidate, part);
       } else {
         const claim = await jobQueueCollection.findOneAndUpdate(
-          { _id: candidate._id, status: JOB_STATUS.PENDING },
+          { _id: candidate._id, status: JOB_STATUS.PENDING, ...holdRequest.claimFilter() },
           {
             $set: {
               status: JOB_STATUS.PROCESSING,
@@ -2212,6 +2231,14 @@ db.once("open", async () => {
   if (clearedCount > 0) {
     console.log(
       `[Job Queue] ⏩ Cleared retry backoff on ${clearedCount} pending job(s) — running them now`
+    );
+  }
+
+  // Reliance steps set back with "Only update" while this server was down (or before it restarted): queued now.
+  const startSweep = await sweepRunLater({ jobs: jobQueueCollection, policies: db.collection("onlinePolicy"), when: "start", logger: console });
+  if (startSweep.requeued || startSweep.waiting) {
+    console.log(
+      `[Run later] On start: ${startSweep.requeued} Reliance step(s) queued${startSweep.waiting ? `, ${startSweep.waiting} still waiting (running / on hold)` : ""}`
     );
   }
 

@@ -73,7 +73,7 @@ are in the last column (they are *his* settings, not the code defaults).
 | `RELIANCEMAXWINDOW` / `NATIONALMAXWINDOW` / `KSHEMAMAXWINDOW` / `DEFAULTMAXWINDOW` | `DEFAULTMAXWINDOW` = 1 | parallel windows per insurer (`<NAME>MAXWINDOW`, falls back to the default) | 2 / 2 / 2 / 1 |
 | `QUEUE_POLL_INTERVAL_MS` | 300000 (5 min) | queue poll period (the DB watcher also wakes it) | 300000 |
 | `FLOW_LOG_PREFIX_ENABLED` | true | the Reliance `Reliance TP \|` tag **and** the word in the KSHEMA bracket | true |
-| `BREAKER_ENABLED`, `BREAKER_STOP_AT` | off | debug checkpoints (`breaker.js`): a job stops "on purpose" (nothing submitted, no retry) at a named `Breaker.checkpoint("...")` | **true**, `stopthis-location` — the owner's own debug setup. **`fullPolicycompany/relianceForm.js` (~line 1629, before the State dropdown) and its generated copy `relianceMultiForm.js` still contain an active `Breaker.checkpoint("stopthis-location")`, so with these two lines EVERY Reliance run (full and OD/TP) stops there**; KSHEMA's was removed on 2026-10-16. Set `BREAKER_ENABLED=false` (and restart) to run real Reliance policies. Never leave it on in production. |
+| `BREAKER_ENABLED`, `BREAKER_STOP_AT` | off | debug checkpoints (`breaker.js`): a job stops "on purpose" (nothing submitted, no retry) at a named `Breaker.checkpoint("...")` | **true**, `stopthis-location` — the owner's own debug setup. **Checked 2026-10-19: `relianceForm.js` / `relianceMultiForm.js` no longer contain a `stopthis-location` checkpoint** (the owner removed it; KSHEMA's went on 2026-10-16), so these two lines stop nothing today. Never leave the Breaker on in production. |
 | `RECORDING_ENABLED`, `RECORDING_FOLLOW_TAB_ENABLED`, `RECORDING_MAX_MS`, `RECORDING_RETENTION_DAYS` | off, true, job timeout + 2 min, — | job video (section 4) | false, true, —, 10 |
 | `KSHEMA_TP_FORM_ENABLED`, `KSHEMA_TP_PRODUCT_TYPE` | true, "" | KSHEMA TP-only form and its exact Product Type text (`multiCompany/README.md` §13) | true, `Two Wheeler-Long term Liability only` |
 | `KSHEMA_FIELD_RECHECK_ENABLED` | true | second try / read-back of every field (§19) | true |
@@ -135,14 +135,14 @@ Not tested with a real KYC run. One continuous video was chosen over a separate 
 
 ## 5. Reliance additions (2026-10-15 / 16)
 
-- **CDT balance popup** (`fullPolicycompany/relianceWalletCdt.js`, `RELIANCE_WALLET_CDT_ENABLED`; `multiCompany/README.md` §15.7). The step never saw Reliance's "Your CDT Account Does not have
+- **CDT balance popup** (`fullPolicycompany/reliance/relianceWalletCdt.js`, `RELIANCE_WALLET_CDT_ENABLED`; `multiCompany/README.md` §15.7). The step never saw Reliance's "Your CDT Account Does not have
   sufficient balance to make payment" popup: it is a plain `div` (`closePopUp()`, the red `critical.png`, the sentence in a span), not a `.ui-dialog` / `.k-window`, and the words
   "does not have sufficient" did not match the error words. Now the popup is read after typing the amount and after **Add** (popups already on the page before typing are
   ignored), "not sufficient / not enough / sufficient balance" count as errors, the step waits up to 4 more seconds after Add when the grid did not grow and nothing was said, Add is still
   pressed once only, typing scrolls to and focuses the box first and retries once before the script fallback. The failure quotes the page's words and, for a balance error, adds "The CDT balance of
   this Reliance login is lower than the payable amount - top it up, then run the policy again."; the screenshot is taken while the popup is open. Shared by the Reliance OD/TP copy.
   Tests: `test/relianceWalletCdt.test.js`. **Unverified:** the popup is found by a page-wide search for its markers — inside an iframe it would be missed; why typing was "not interactable".
-- **KYC name check** (`fullPolicycompany/relianceKycName.js`, `RELIANCE_KYC_NAME_CHECK_ENABLED`). After SUBMIT is accepted and the result page opens, the disabled `#result_name` box (fallbacks by
+- **KYC name check** (`fullPolicycompany/reliance/relianceKycName.js`, `RELIANCE_KYC_NAME_CHECK_ENABLED`). After SUBMIT is accepted and the result page opens, the disabled `#result_name` box (fallbacks by
   name / `ng-model`) is read and compared with the policy's **Full Name + Surname**: the same words in any order, case and punctuation ignored, **no fuzzy matching** ("Anmol Arora" = "Arora Anmol" =
   "ANMOL, ARORA."; an extra word, another person, or a missing surname is a mismatch). Mismatch: the box gets a red outline and "KYC NAME MISMATCH - policy: ...", the job fails with
   `KYC name mismatch - Reliance's KYC shows "..." but the policy has Full Name "..." and Surname "...". Correct the name on the policy, or use the customer's own Aadhaar, then run the policy again.
@@ -217,7 +217,7 @@ Detail for the first four is in `multiCompany/README.md`: §13 (TP-only flow; §
 - **Known failing / flaky (not caused by recent work):** `the captcha file is named per job and is gone afterwards` (`test/multiCompanyRelianceLogin.test.js`) fails while a stray
   `reliance_captcha_VASANTHI_*.png` from a real run sits in this folder — it is the owner's file, delete it to make the test pass; `download: a file over the size ceiling is refused and not kept`
   (`test/kshemaKycDocument.test.js`) is a timing flake under load (passes alone). On 2026-10-16: 798 tests, 782 pass, 1 fail, 15 skipped.
-- **Shell tips:** parallel tool calls that `cd` race each other (use absolute paths); `Breaker.checkpoint("stopthis-location")` lines (still in `relianceForm.js`) are the owner's debug marks — leave them unless asked, and remember they stop Reliance runs while `BREAKER_ENABLED=true`.
+- **Shell tips:** parallel tool calls that `cd` race each other (use absolute paths); `Breaker.checkpoint("stopthis-location")` lines are the owner's debug marks — leave them unless asked (none is in `relianceForm.js` any more, checked 2026-10-19).
 
 ## 8. Open items for this repo
 
@@ -246,7 +246,7 @@ fails and says so). Tests: `test/briskV2Automation.test.js` (10, fake fetch only
 
 ## Reliance KYC name — the owner's four combinations (2026-10-17)
 
-`fullPolicycompany/relianceKycName.js`, switch `RELIANCE_KYC_NAME_COMBINATIONS_ENABLED` (ON unless false / 0 / no / off).
+`fullPolicycompany/reliance/relianceKycName.js`, switch `RELIANCE_KYC_NAME_COMBINATIONS_ENABLED` (ON unless false / 0 / no / off).
 The name Reliance read from the Aadhaar (CKYC result box) must be one of: **Full Name** · **Full Name + Surname** ·
 **Full Name + Father Name** · **Full Name + Surname + Father Name** (words in any order; case, spacing, punctuation ignored;
 Father Name = the policy's `fatherName`). Anything else → "KYC name mismatch …" and the run **stops on the KYC page**:
@@ -254,3 +254,72 @@ PROCEED is not pressed, Pending Quotes / Pay are **not** opened, no links are sa
 error only — `skipsKycFallback`); the screenshot is of the KYC page with the name box marked red. Off = the old rule (Full
 Name + Surname only) and the fallback as before. Applies to the full-company flow and its generated [MC] copy. Tests in
 `test/relianceKycName.test.js`; 6 deliberate breaks caught.
+
+## Hold pressed while a policy is running (2026-10-17)
+
+`lib/holdRequest.js`, switch `JOB_HOLD_REQUEST_ENABLED` (ON unless false / 0 / no / off). The backend records Hold on a
+running job as `holdRequested: { at, by }` (it cannot stop an attempt half way). Every queue scan and claim (server.js
+legacy jobs, `partRunner.claimPart`) skips a job with a request, and each queue pass turns such a job — once its attempt
+has put it back to "pending" (retry backoff, timeout recovery, unexpected error) — into a real **hold**, with a timeline
+entry. A job that ended for good just has the request dropped. Release (backend) withdraws it. Tests:
+`test/holdRequest.test.js` (6).
+
+## Reliance in three stages: proposal, KYC, payment (2026-10-19)
+
+The owner's request: a Reliance run is three stages, each remembered, so a re-run does only what is left.
+
+| Stage | What it is | Done when | Skipped next time when |
+|---|---|---|---|
+| 1 Proposal | login, fill, Save, the proposal ("referral") number `R…` | `saveProposalNumber` ran | stage 1 is completed **and** has its number |
+| 2 KYC | Utility, View Policy, search the saved number, DO KYC, KYC | Reliance accepted the document (`kycAccepted`) | stages 1 and 2 are completed |
+| 3 Payment | Pending Quotes, Pay, then link (Yes / SendMail clicked) or wallet CDT issued | the link was sent / the policy was issued | never (a re-run of a link policy sends the link again) |
+
+- **Where it is stored**: `onlinePolicy.relianceStages.<part>` (`motor` = bundled part, `od` / `tp` = portal parts):
+  `{ proposal: { status, at, proposalNumber }, kyc: { status, at, error }, payment: { status, at, mode, error } }`.
+  `status` is `pending` / `completed` / `failed`. A new proposal, or a stage set back to pending, puts every later stage back to pending (the cascade).
+- **The rules**: `lib/relianceStagesCore.js`, byte-identical with the backend's `shared/relianceStagesCore.js` (checked by `test/sharedCore.test.js`).
+- **The automation side**: `fullPolicycompany/reliance/relianceStages.js` (`loadResumePlan`, `markStage`, `stopAtKycFailure`, the operator sentences). Its database writes never throw.
+- **The form** (`relianceForm.js`): the stage-1 blocks are guarded by `if (!resume.skipProposal)` and the KYC block by `if (!resume.skipKyc)`. They are not re-indented (the same style as `if (!issuedRecovery)`).
+  - The payment block (Pending Quotes → Pay → link / CDT) was **moved out of the KYC block** to run after it as stage 3. It runs only when the KYC was accepted in this run, or by an earlier run.
+  - KYC accepted but PROCEED never appeared: stage 2 stays completed, stage 3 is not started, and the error says to Re-submit.
+- **A failed KYC stops at the KYC** (the owner's decision 2026-10-19). That means screenshot, KYC note, stage 2 = failed, and **no** Pending Quotes / Pay / links: `rescueAfterKycFailure` is no longer used by the form. The policy ends `failed_post_submission` (no automatic retry). **Re-submit runs only the KYC again, with the same proposal.**
+- **Stage 3 not done** (link Yes button missing, proposal not in Pending Quotes, Pay step error ...): an error that names the reason. Before, a few of these were only logged and the policy "completed" without a link.
+  - The one exception is wallet hold + CDT both switched off, which still carries on as before.
+- **A resumed run** whose saved proposal has no DO KYC link says: *"Proposal R… saved by an earlier run has no DO KYC link in Reliance's View Policy. Check it on the portal, or set stage 1 Proposal back to Pending in History to make a new proposal."*
+- **An edit of the policy clears the stages** (backend), so the next run makes a new proposal, unless the part was paid from the wallet at Reliance.
+- **Operators** see the stages in the Online Policy **History** dialog. A Completed / Failed stage can be set back to Pending there ("Only update" or "Update and run now"). A Pending stage cannot be clicked.
+- **No `.env` switch** (the owner: no new switches). A policy without `relianceStages` (every older one) is never skipped anywhere.
+- **Folder**: the Reliance helper files moved into `fullPolicycompany/reliance/` (the owner: "like the kshema folder"); `relianceForm.js` stays in `fullPolicycompany/`.
+- **Tests**: `test/relianceStages.test.js` (19, including the real `relianceForm.js` after login with a fake browser: a fresh run goes to the form, a resumed run straight to View Policy or Pending Quotes). The older structure tests were updated to the new layout. **12 deliberate breaks in a copy were all caught.**
+- **Not proven on the live portal**:
+  - opening Utility › View Policy straight after login (it was only ever reached after Save);
+  - the DO KYC link of an older proposal;
+  - Pending Quotes with no KYC tab open;
+  - how long Reliance keeps a saved proposal searchable.
+
+## Coloured status in the queue line (2026-10-19)
+`[Reliance Queue][motor] success -> completed (job now completed)`: both statuses are coloured.
+- **Colours**: green = completed; red = failed (any `failed_*`); amber = pending / completed_with_errors / hold.
+- **Where**: `lib/consoleColor.js`, used in `lib/partRunner.js`.
+- **When**: no `.env` switch. Colour only when the console is a terminal (nodemon / node in a shell); a pipe or file gets plain text. `NO_COLOR` turns it off and `FORCE_COLOR=1` forces it.
+- **Tests**: `test/consoleColor.test.js`.
+
+## "Only update" runs later: on start and when the queue is idle (2026-10-19)
+In the History dialog, **Update & run** queues the part now. **Only update** sets the step back to Pending and leaves a mark on the policy (`relianceStages.<part>.runLater = { stage, at, by }`, written by the backend).
+- **This server turns the mark into a run** (`lib/relianceRunLater.js`):
+  - **on start / restart**, after the stuck-job recovery;
+  - **when the queue is idle** (nothing processing, nothing ready to start), at most once a minute.
+- **Requeue**: only that part of the policy's job is queued again, with the same fresh state Re-submit gives it, under the job's `rev` lock. The job gets a history line, and the mark is removed, so each mark is used **once**.
+- **Kept for a later sweep**: while the job runs, is on hold, or that part runs. Old-shape jobs (no parts) also keep it; use Re-submit for those.
+- **Dropped with a log line**: when the step is no longer pending (it ran meanwhile), when the part is already queued, or when the part was paid from the wallet at Reliance.
+- **Log**: `[Run later] ▶ OP… MOTOR: KYC queued (set back with Only update; automation free)`.
+- No `.env` switch.
+- Tests: `test/relianceRunLater.test.js`. **8 deliberate breaks were all caught.**
+
+## Only the proposal cascades; a KYC redo does not pay again (2026-10-19)
+The owner's rule (`lib/relianceStagesCore.js`, shared with the backend):
+- **Proposal** set back to Pending → KYC and Payment go back to Pending too: a new referral number means a new KYC and a new payment.
+- **KYC** set back to Pending → only the KYC. On a policy whose payment is done, the run redoes **only the KYC** and ends there (`planResume.skipPayment`). It logs `▶ … Only the KYC of proposal R… was redone - its payment was done by an earlier run`, returns `{ success: true, kycOnly: true }`, and nothing is paid, sent, certified or merged again.
+- **Payment** set back to Pending → only the payment.
+- With every step completed the payment still runs: a re-submitted payment-link policy sends the link again.
+- A finished KYC no longer puts the payment back to Pending.

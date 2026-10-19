@@ -806,7 +806,9 @@ saved" rule of `lib/partRunner.js` covers it (`savesProposalPart`): a job timeou
 
 ### 15.5 When the KYC does not work (shared with the full-company flow)
 
-`fullPolicycompany/relianceKycFallback.js` (switch `RELIANCE_KYC_FALLBACK_ENABLED`, default on) — used by `relianceForm.js` and, being
+> **Changed 2026-10-19:** a failed KYC now **stops at the KYC** — no Pending Quotes, no Pay, no links (the rescue below is no longer called by the form). See §15.10 and the repo README "Reliance in three stages".
+
+`fullPolicycompany/reliance/relianceKycFallback.js` (switch `RELIANCE_KYC_FALLBACK_ENABLED`, default on) — used by `relianceForm.js` and, being
 shared, by this copy. Any way the KYC step can fail (a refusal toast, an upload problem, no answer / timeout, the DO KYC link
 missing, no Aadhaar on the policy):
 
@@ -839,7 +841,7 @@ opens the list and the operator picks the proposal named on the card; whether th
 
 ### 15.7 Wallet payment with the CDT option (shared with the full-company flow)
 
-`fullPolicycompany/relianceWalletCdt.js` (switch `RELIANCE_WALLET_CDT_ENABLED`, default on) — a wallet policy no longer only holds on
+`fullPolicycompany/reliance/relianceWalletCdt.js` (switch `RELIANCE_WALLET_CDT_ENABLED`, default on) — a wallet policy no longer only holds on
 the payment page after Pay. In order, on the panel Pay opens:
 
 1. the login's payment options are read; **no CDT option** (`#rdbtnPaymentOptionCDT`: missing, hidden or disabled) is an **error**
@@ -862,7 +864,7 @@ copy). Not proven: how Reliance's currency widget takes the typed value, what Ad
 
 ### 15.8 Pending Quotes has pages (shared with the full-company flow)
 
-`fullPolicycompany/relianceQuotesPaging.js` (switch `RELIANCE_QUOTES_PAGING_ENABLED`, default on). Pending Quotes is a Kendo grid,
+`fullPolicycompany/reliance/relianceQuotesPaging.js` (switch `RELIANCE_QUOTES_PAGING_ENABLED`, default on). Pending Quotes is a Kendo grid,
 10 rows to a page, so with more than 10 pending proposals the one being paid can be on page 2. Every lookup used to read only the page
 that was open (2026-10-14: R141026119597 on page 2 of "11 - 14 of 14 items" → "not listed"); the link path then ticked the **first
 checkbox** — another customer's proposal.
@@ -880,7 +882,7 @@ the page, the mask and the rows, stop on the page it is on. Used by STEP 8 for w
 
 ### 15.9 Submit Details, the policy number and the policy PDF (shared with the full-company flow)
 
-`fullPolicycompany/relianceWalletIssue.js` (switch `RELIANCE_WALLET_SUBMIT_ENABLED`, default on; off = the wait after Add of §15.7).
+`fullPolicycompany/reliance/relianceWalletIssue.js` (switch `RELIANCE_WALLET_SUBMIT_ENABLED`, default on; off = the wait after Add of §15.7).
 After the CDT row is added the run issues the policy. It really pays, so every step refuses rather than guesses:
 
 1. **Gate** (start of the run, before any browser or proposal): `onlinePolicy.walletPayment.state` of `submit-pressed`, `issued` or
@@ -932,6 +934,12 @@ markup beyond the schedule link, the View Policy search option dropdown's DOM be
 Found on the way, not touched: `briskCertificate.js` filters `policy` documents by `onlinePolicyId` / `policyId`, fields that do not
 exist on `policy` records, so its policyFile update never matches.
 
+
+### 15.10 Three stages: proposal, KYC, payment (shared with the full-company flow, 2026-10-19)
+The OD / TP copy is generated from `relianceForm.js`, so it has the same three stages. They are stored per part as `onlinePolicy.relianceStages.od` / `.tp`, and the bundled flow uses `.motor` (`data._partKey`).
+A re-run skips a proposal and a KYC an earlier run finished, and the payment runs only after the KYC.
+A failed KYC stops at the KYC, and Re-submit redoes only the KYC with the same proposal. Operators set a stage back to Pending from the History dialog.
+Full description: repo README "Reliance in three stages". This also closes part of §15.4 "single fields shared by OD and TP": the stages are per part; `proposalNumber` / `kycStatus` on the policy still are not.
 
 ## 16. KSHEMA slow portal — the IDV box and the PA year dropdown
 
