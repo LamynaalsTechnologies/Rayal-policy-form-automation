@@ -335,3 +335,8 @@ Hold pressed while the automation runs a Reliance policy used to apply only afte
 - **Switch**: `JOB_HOLD_REQUEST_ENABLED` (no new switch). Only jobs with parts are checked. National / KSHEMA have no stop points (they keep the old "after the attempt").
 - **Not stopped inside one long wait** (for example the up-to-5-minute KYC PROCEED wait). It stops at the step after it.
 - **Tests**: `test/holdStop.test.js` (the real form with a fake browser stops after the login, and the window closes with no error flag). 7 deliberate breaks were all caught.
+
+## Server Control agent (2026-10-19)
+`serverControlAgent/agent.js` is a small separate pm2 process (`server-control`, port 3001). It lets the super admin's Server Control page start / stop / restart **only pm2 process 3 `server`**, and read its status, logs and the masked `.env`. **Install it once by hand: `serverControlAgent/README.md`.**
+- **Safety**: it acts only on id 3 + name `server` (checked in `pm2 jlist` before every action), with a fixed `execFile` command (no shell), a key on every request, a lockout after 5 wrong keys, and optional `SERVER_CONTROL_ALLOWED_IPS`.
+- **Tests**: `test/serverControlAgent.test.js` (10, a fake pm2). 10 deliberate breaks were all caught.
