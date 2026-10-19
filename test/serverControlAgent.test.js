@@ -204,14 +204,49 @@ test("over HTTP (a local test server): JSON in, JSON out, the key header checked
   try {
     const bad = await fetch(`${base}/status`);
     assert.equal(bad.status, 401);
+    assert.equal((await bad.json()).service, "rayal-server-control", "every answer says it is this agent");
     const ok = await fetch(`${base}/action`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-server-control-key": KEY },
       body: JSON.stringify({ action: "stop" }),
     });
     assert.equal(ok.status, 200);
+    assert.equal((await ok.json()).service, "rayal-server-control");
     assert.deepEqual(pm2.calls.filter((c) => c[0] !== "jlist"), [["stop", "3"]]);
   } finally {
     await new Promise((r) => server.close(r));
   }
 });
+
+test("a port already used by another program: the agent says so plainly and exits (it never shares the port)", async () => {
+  const { spawn } = require("child_process");
+  const busy = require("http").createServer(() => {});
+  await new Promise((r) => busy.listen(0, "127.0.0.1", r));
+  const port = busy.address().port;
+  try {
+    const child = spawn(process.execPath, [path.join(__dirname, "..", "serverControlAgent", "agent.js")], {
+      env: { ...process.env, SERVER_CONTROL_KEY: KEY, SERVER_CONTROL_PORT: String(port), PM2_BIN: "/nonexistent-pm2" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let err = "";
+    child.stderr.on("data", (d) => (err += d));
+    const code = await new Promise((r) => child.on("exit", r));
+    assert.equal(code, 1);
+    assert.match(err, new RegExp(`Not started - port ${port} is already used by another program`));
+  } finally {
+    await new Promise((r) => busy.close(r));
+  }
+});
+
+test("status says which database the automation uses — host and name only, never the user or password", async () => {
+  const db = agentLib.databaseOf("mongodb+srv://royal:Sup3rS3cret@Royal-Product-Cluster.yxwbz.mongodb.net/Rayal_Brokers?retryWrites=true");
+  assert.equal(db.label, "royal-product-cluster.yxwbz.mongodb.net/Rayal_Brokers");
+  assert.match(db.id, /^[0-9a-f]{16}$/);
+  assert.equal(agentLib.databaseOf("mongodb://localhost:27017").label, "localhost:27017/(default)");
+  assert.equal(agentLib.databaseOf(""), null);
+  const agent = agentLib.createAgent({ config: config(), runPm2: fakePm2().run, sleep: async () => {}, mongoUri: "mongodb+srv://u:p@h.net/db1" });
+  const r = await agent.handle(req());
+  assert.equal(r.json.data.database.label, "h.net/db1");
+  assert.equal(JSON.stringify(r.json).includes("u:p"), false);
+});
+

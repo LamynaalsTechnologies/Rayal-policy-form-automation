@@ -31,6 +31,8 @@ const crypto = require("crypto");
 const { execFile } = require("child_process");
 
 const ACTIONS = ["start", "stop", "restart"];
+/** Every answer carries this, so the backend knows it reached THIS agent and not some other program on the port. */
+const SERVICE_ID = "rayal-server-control";
 const MAX_FAILS = 5;
 const LOCK_MS = 15 * 60 * 1000;
 const MAX_LOG_BYTES = 256 * 1024;
@@ -134,6 +136,21 @@ function machineInfo(dir, { osImpl = os, fsImpl = fs } = {}) {
   };
 }
 
+/* ---------------------------------------------------------------- database ---------------------------------------------------------------- */
+
+/**
+ * Which database a MongoDB URI points at, WITHOUT its user / password: { label: "host/db", id: short hash }. The backend
+ * compares it with its own, because a stop that holds the running windows must look at the automation's database.
+ */
+function databaseOf(uri) {
+  const m = String(uri || "").trim().match(/^mongodb(?:\+srv)?:\/\/(?:[^@/]*@)?([^/?]+)\/?([^?]*)/i);
+  if (!m) return null;
+  const host = m[1].toLowerCase();
+  const db = decodeURIComponent(m[2] || "").trim() || "(default)";
+  const label = `${host}/${db}`;
+  return { label, id: crypto.createHash("sha256").update(label).digest("hex").slice(0, 16) };
+}
+
 /* ------------------------------------------------------------------ logs -------------------------------------------------------------------- */
 
 const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
@@ -232,7 +249,7 @@ const normIp = (ip) => String(ip || "").replace(/^::ffff:/, "");
  * The request handler, without HTTP: handle({ method, path, query, headers, ip, body }) -> { status, json }.
  * Every dependency can be replaced in tests (runPm2 especially — tests never run the real pm2).
  */
-function createAgent({ config = loadConfig(), runPm2, fsImpl = fs, osImpl = os, now = () => Date.now(), sleep } = {}) {
+function createAgent({ config = loadConfig(), runPm2, fsImpl = fs, osImpl = os, now = () => Date.now(), sleep, mongoUri = process.env.MONGODB_URI } = {}) {
   const pm2 = runPm2 || defaultRunPm2(config);
   const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   const fails = new Map(); // ip -> { count, until }
@@ -246,6 +263,8 @@ function createAgent({ config = loadConfig(), runPm2, fsImpl = fs, osImpl = os, 
       expected: { id: Number(config.pm2Id), name: config.pm2Name },
       process: p ? describeProcess(p, now()) : null,
       machine: machineInfo(p && p.pm2_env ? p.pm2_env.pm_cwd : path.dirname(config.envFile), { osImpl, fsImpl }),
+      // the database the automation works on (its .env MONGODB_URI, no password) — the backend checks it is its own
+      database: databaseOf(mongoUri),
       checkedAt: new Date(now()).toISOString(),
     };
   };
@@ -350,13 +369,14 @@ function createServer(agent) {
         body,
       });
       res.writeHead(out.status, { "content-type": "application/json", "cache-control": "no-store" });
-      res.end(JSON.stringify(out.json));
+      res.end(JSON.stringify({ service: SERVICE_ID, ...out.json }));
     });
   });
 }
 
 module.exports = {
   ACTIONS,
+  SERVICE_ID,
   loadConfig,
   configProblem,
   parseJlist,
@@ -368,6 +388,7 @@ module.exports = {
   isSecret,
   parseEnvForView,
   sameKey,
+  databaseOf,
   createAgent,
   createServer,
   defaultRunPm2,
@@ -382,6 +403,14 @@ if (require.main === module) {
     process.exit(1);
   }
   const server = createServer(createAgent({ config }));
+  server.on("error", (e) => {
+    console.error(
+      e && e.code === "EADDRINUSE"
+        ? `[server-control] Not started - port ${config.port} is already used by another program. Set SERVER_CONTROL_PORT to a free port (and the same port in the backend's AUTOMATION_SERVER_URL)`
+        : `[server-control] Not started - ${(e && e.message) || e}`
+    );
+    process.exit(1);
+  });
   server.listen(config.port, () => {
     console.log(`[server-control] Listening on ${config.port}; controls only pm2 process ${config.pm2Id} "${config.pm2Name}"`);
   });
