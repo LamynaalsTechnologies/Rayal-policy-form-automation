@@ -22,8 +22,18 @@ function stageKeyFor(data) {
   return core.stageKeyOf(data && data._partKey);
 }
 
+/** The policy id as stored (an ObjectId); a 24-hex string from the job data is turned into one, or nothing matches. */
 function policyIdOf(data) {
-  return (data && (data._id || data.policyId)) || null;
+  const id = (data && (data._id || data.policyId)) || null;
+  if (typeof id === "string" && /^[0-9a-f]{24}$/i.test(id)) {
+    try {
+      const { ObjectId } = require("mongodb");
+      return new ObjectId(id);
+    } catch (e) {
+      return id;
+    }
+  }
+  return id;
 }
 
 async function withPolicies(MongoClient, work) {
@@ -43,7 +53,7 @@ async function withPolicies(MongoClient, work) {
  *
  * @returns {Promise<{skipProposal:boolean, skipKyc:boolean, proposalNumber:string|null, startAt:string, key:string}>}
  */
-async function loadResumePlan(data, { jobId = "", MongoClient } = {}) {
+async function loadResumePlan(data, { jobId = "", MongoClient, insurer = "Reliance" } = {}) {
   const key = stageKeyFor(data);
   const fromStart = { ...core.planResume(null), key };
   const policyId = policyIdOf(data);
@@ -54,7 +64,7 @@ async function loadResumePlan(data, { jobId = "", MongoClient } = {}) {
     );
     return { ...core.planResume(core.stagesFor(policy, key)), key };
   } catch (error) {
-    console.warn(`[${jobId}] ⚠️ Could not read the Reliance stages (${error && error.message}) — starting from the proposal.`);
+    console.warn(`[${jobId}] ⚠️ Could not read the ${insurer} stages (${error && error.message}) — starting from the proposal.`);
     return fromStart;
   }
 }
@@ -67,10 +77,10 @@ async function loadResumePlan(data, { jobId = "", MongoClient } = {}) {
  * @param {string} status  "pending" | "completed" | "failed"
  * @param {Object} [extra] proposalNumber, mode, error ...
  */
-async function markStage(data, stage, status, extra = {}, { jobId = "", MongoClient, now = new Date() } = {}) {
+async function markStage(data, stage, status, extra = {}, { jobId = "", MongoClient, now = new Date(), insurer = "Reliance" } = {}) {
   const policyId = policyIdOf(data);
   if (!policyId) {
-    console.warn(`[${jobId}] ⚠️ No policy id on the job — Reliance stage ${stage} = ${status} not saved.`);
+    console.warn(`[${jobId}] ⚠️ No policy id on the job — ${insurer} stage ${stage} = ${status} not saved.`);
     return false;
   }
   try {
@@ -79,10 +89,10 @@ async function markStage(data, stage, status, extra = {}, { jobId = "", MongoCli
     const result = await withPolicies(MongoClient, (onlinePolicy) =>
       onlinePolicy.updateOne({ _id: policyId }, { $set: { ...set, updatedAt: now } })
     );
-    console.log(`[${jobId}] 📌 Reliance stage ${core.STAGE_LABEL[stage]} = ${status} (${key}, matched ${result.matchedCount})`);
+    console.log(`[${jobId}] 📌 ${insurer} stage ${core.STAGE_LABEL[stage]} = ${status} (${key}, matched ${result.matchedCount})`);
     return result.matchedCount > 0;
   } catch (error) {
-    console.warn(`[${jobId}] ⚠️ Could not save Reliance stage ${stage} = ${status}: ${error && error.message}`);
+    console.warn(`[${jobId}] ⚠️ Could not save ${insurer} stage ${stage} = ${status}: ${error && error.message}`);
     return false;
   }
 }
@@ -202,6 +212,8 @@ async function stopAtKycFailure({
 
 module.exports = {
   stageKeyFor,
+  policyIdOf,
+  withPolicies,
   loadResumePlan,
   markStage,
   RelianceStageError,

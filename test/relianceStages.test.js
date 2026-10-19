@@ -58,6 +58,7 @@ test("planResume: an old policy (no stages) starts from the proposal, exactly as
     skipKyc: false,
     skipPayment: false,
     proposalNumber: null,
+    proposalLink: null,
     startAt: "proposal",
   });
   assert.equal(core.planResume(null).startAt, "proposal");
@@ -65,11 +66,21 @@ test("planResume: an old policy (no stages) starts from the proposal, exactly as
 
 test("planResume: stage 1 done WITH its number -> the KYC; without a number -> the proposal again", () => {
   const atKyc = core.planResume(core.stagesFor(policyWith({ proposal: { status: "completed", proposalNumber: " R141026119597 " } }), "motor"));
-  assert.deepEqual(atKyc, { skipProposal: true, skipKyc: false, skipPayment: false, proposalNumber: "R141026119597", startAt: "kyc" });
+  assert.deepEqual(atKyc, { skipProposal: true, skipKyc: false, skipPayment: false, proposalNumber: "R141026119597", proposalLink: null, startAt: "kyc" });
   const noNumber = core.planResume(core.stagesFor(policyWith({ proposal: { status: "completed" } }), "motor"));
   assert.equal(noNumber.startAt, "proposal");
   const failed = core.planResume(core.stagesFor(policyWith({ proposal: { status: "failed", proposalNumber: "R1" } }), "motor"));
   assert.equal(failed.startAt, "proposal");
+});
+
+test("planResume: KSHEMA - stage 1 done WITH its saved page link (no number) -> the KYC; a blank link -> the proposal again", () => {
+  const link = "https://portal.example/Proposal/Edit/77";
+  const atKyc = core.planResume(core.stagesFor(policyWith({ proposal: { status: "completed", link: ` ${link} ` } }), "motor"));
+  assert.deepEqual(atKyc, { skipProposal: true, skipKyc: false, skipPayment: false, proposalNumber: null, proposalLink: link, startAt: "kyc" });
+  const atPay = core.planResume(core.stagesFor(policyWith({ proposal: { status: "completed", link }, kyc: { status: "completed" } }), "motor"));
+  assert.equal(atPay.startAt, "payment");
+  assert.equal(core.planResume(core.stagesFor(policyWith({ proposal: { status: "completed", link: "  " } }), "motor")).startAt, "proposal");
+  assert.equal(core.planResume(core.stagesFor(policyWith({ proposal: { status: "failed", link } }), "motor")).startAt, "proposal");
 });
 
 test("planResume: KYC done -> the payment; a failed KYC is done again (same proposal); everything done -> the payment again", () => {
@@ -83,6 +94,7 @@ test("planResume: KYC done -> the payment; a failed KYC is done again (same prop
     skipKyc: false,
     skipPayment: false,
     proposalNumber: "R1",
+    proposalLink: null,
     startAt: "kyc",
   });
   assert.equal(core.planResume(core.stagesFor(policyWith(paid), "motor")).skipPayment, false, "all done: the link is sent again");
@@ -98,6 +110,7 @@ test("planResume: KYC set back on a PAID policy -> only the KYC runs (skipPaymen
     skipKyc: false,
     skipPayment: true,
     proposalNumber: "R1",
+    proposalLink: null,
     startAt: "kyc",
   });
   const notPaid = { ...kycOnly, payment: { status: "pending" } };
@@ -593,4 +606,68 @@ test("relianceForm.js: stage 3 starts only after the KYC block, behind the KYC-f
   // the link counts as sent only after the Yes (SendMail) click
   const yes = at('console.log("✅ Clicked Yes (Send Mail) button");');
   assert.match(src.slice(yes, yes + 160), /paymentDone = "link";/);
+});
+
+/* ------------------------- set by hand: Edit -> Status (2026-10-19) ------------------------- */
+
+test("whyNotSetByHand: Proposal Completed only with a referral number (typed or saved); KSHEMA with its page link", () => {
+  const none = { relianceStages: {} };
+  assert.match(core.whyNotSetByHand({ policy: none, key: "motor", stage: "proposal", to: "completed" }), /only with its referral number/);
+  assert.equal(core.whyNotSetByHand({ policy: none, key: "motor", stage: "proposal", to: "completed", proposalNumber: " r141026119597 " }), null);
+  assert.match(core.whyNotSetByHand({ policy: none, key: "motor", stage: "proposal", to: "completed", proposalNumber: "141026" }), /not a referral number/);
+  assert.equal(core.whyNotSetByHand({ policy: { proposalNumber: "R1234567" }, key: "motor", stage: "proposal", to: "completed" }), null, "the saved number counts");
+  const done = policyWith({ proposal: { status: "completed", proposalNumber: "R1234567" } });
+  assert.match(core.whyNotSetByHand({ policy: done, key: "motor", stage: "proposal", to: "completed", proposalNumber: "R1234567" }), /already completed/);
+  assert.equal(core.whyNotSetByHand({ policy: done, key: "motor", stage: "proposal", to: "completed", proposalNumber: "R7654321" }), null, "a new number is a new proposal");
+  const k = { relianceStages: {} };
+  assert.match(core.whyNotSetByHand({ policy: k, key: "tp", stage: "proposal", to: "completed", company: "KSHEMA", proposalNumber: "R1234567" }), /page link/);
+  assert.equal(core.whyNotSetByHand({ policy: k, key: "tp", stage: "proposal", to: "completed", company: "KSHEMA", link: "https://k.example/p/1" }), null);
+  for (const s of [
+    core.whyNotSetByHand({ policy: none, key: "motor", stage: "proposal", to: "completed" }),
+    core.whyNotSetByHand({ policy: none, key: "motor", stage: "proposal", to: "completed", proposalNumber: "x:1" }),
+  ]) assert.doesNotMatch(s.replace(/"[^"]*"/, ""), /:/, "operator sentences have no colon");
+});
+
+test("whyNotSetByHand: KYC needs the Proposal completed (already or in the same save); Payment never for a wallet; never while running", () => {
+  const fresh = { relianceStages: {} };
+  assert.match(core.whyNotSetByHand({ policy: fresh, key: "motor", stage: "kyc", to: "completed" }), /only after the Proposal/);
+  assert.equal(core.whyNotSetByHand({ policy: fresh, key: "motor", stage: "kyc", to: "completed", proposalDone: true }), null);
+  const p = policyWith({ proposal: { status: "completed", proposalNumber: "R1234567" }, kyc: { status: "failed" } });
+  assert.equal(core.whyNotSetByHand({ policy: p, key: "motor", stage: "kyc", to: "completed" }), null);
+  assert.equal(core.whyNotSetByHand({ policy: p, key: "motor", stage: "payment", to: "completed", paymentMethod: "link" }), null);
+  assert.match(core.whyNotSetByHand({ policy: p, key: "motor", stage: "payment", to: "completed", paymentMethod: "wallet" }), /wallet payment cannot be marked/);
+  assert.equal(core.whyNotSetByHand({ policy: p, key: "motor", stage: "payment", to: "completed", paymentMethod: "wallet", company: "KSHEMA" }), null, "KSHEMA pays by QR");
+  assert.match(core.whyNotSetByHand({ policy: p, key: "motor", stage: "kyc", to: "completed", processing: true }), /running this policy/);
+  const paid = policyWith({ proposal: { status: "completed", proposalNumber: "R1" } }, { walletPayment: { state: "issued" } });
+  assert.match(core.whyNotSetByHand({ policy: paid, key: "motor", stage: "kyc", to: "completed" }), /paid from the wallet/);
+  assert.match(core.whyNotSetByHand({ policy: p, key: "motor", stage: "kyc", to: "failed" }), /only be set to Pending or Completed/);
+  assert.equal(core.whyNotSetByHand({ policy: p, key: "motor", stage: "kyc", to: "pending" }), null, "a failed KYC may go back to pending");
+  assert.match(core.whyNotSetByHand({ policy: p, key: "motor", stage: "payment", to: "pending" }), /already pending/);
+});
+
+test("manualSet: Completed by hand keeps the later steps; a NEW referral number resets them; Pending cascades from the proposal", () => {
+  const same = core.manualSet("motor", "proposal", "completed", { by: "u1", reason: "made at Reliance", proposalNumber: "r1234567", previous: { status: "pending" } }, NOW);
+  assert.deepEqual(Object.keys(same), ["relianceStages.motor.proposal"], "no KYC / payment reset");
+  assert.deepEqual(same["relianceStages.motor.proposal"], {
+    by: "u1",
+    reason: "made at Reliance",
+    manual: true,
+    note: "marked completed by hand",
+    proposalNumber: "R1234567",
+    status: "completed",
+    at: NOW,
+  });
+  const changed = core.manualSet("motor", "proposal", "completed", { proposalNumber: "R7654321", previous: { status: "completed", proposalNumber: "R1234567" } }, NOW);
+  assert.equal(changed["relianceStages.motor.proposal"].previousProposalNumber, "R1234567");
+  assert.equal(changed["relianceStages.motor.kyc"].status, "pending");
+  assert.equal(changed["relianceStages.motor.payment"].status, "pending");
+  const pay = core.manualSet("tp", "payment", "completed", { mode: "LINK" }, NOW);
+  assert.equal(pay["relianceStages.tp.payment"].mode, "link");
+  assert.deepEqual(Object.keys(pay), ["relianceStages.tp.payment"]);
+  const back = core.manualSet("motor", "proposal", "pending", { by: "u1", previous: { proposalNumber: "R1" } }, NOW);
+  assert.equal(back["relianceStages.motor.proposal"].previousProposalNumber, "R1");
+  assert.equal(back["relianceStages.motor.kyc"].status, "pending");
+  assert.throws(() => core.manualSet("motor", "kyc", "failed"), /pending or completed/);
+  assert.equal(core.firstOpenStage({ proposal: "completed", kyc: "completed" }), "payment");
+  assert.equal(core.firstOpenStage({ proposal: "completed", kyc: "completed", payment: "completed" }), null);
 });

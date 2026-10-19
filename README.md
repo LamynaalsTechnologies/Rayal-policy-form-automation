@@ -332,9 +332,40 @@ Hold pressed while the automation runs a Reliance policy used to apply only afte
 - **The window is closed and the job's browser profile deleted** (`hadError = !isHoldStop(e)`, even with `KEEP_BROWSER_OPEN_ON_ERROR`), so Release starts with a fresh login and a fresh session.
 - **The part goes back to pending without counting an attempt and without an error entry** (new `jobPartsCore` outcome `held`, the same in the backend copy). `lib/holdRequest.js` then turns the job into **hold**.
 - **Release continues from the step it stopped at**, because finished steps stay finished (relianceStages): same proposal / referral number, unless it stopped before Save.
-- **Switch**: `JOB_HOLD_REQUEST_ENABLED` (no new switch). Only jobs with parts are checked. National / KSHEMA have no stop points (they keep the old "after the attempt").
+- **Switch**: `JOB_HOLD_REQUEST_ENABLED` (no new switch). Only jobs with parts are checked. KSHEMA has its own 5 stop points since 2026-10-19 (next section); National has none (it keeps the old "after the attempt").
 - **Not stopped inside one long wait** (for example the up-to-5-minute KYC PROCEED wait). It stops at the step after it.
 - **Tests**: `test/holdStop.test.js` (the real form with a fake browser stops after the login, and the window closes with no error flag). 7 deliberate breaks were all caught.
+
+## KSHEMA in three steps, with Hold and resume from the saved page (2026-10-19)
+The owner: KYC and payment split into three steps like Reliance, Hold works, a re-run continues from the finished step, and a resumed run logs in again and opens the already saved KSHEMA page. For both `fullPolicycompany/kshemaForm.js` and the TP copy `multiCompany/tpCompany/kshemaTP/kshemaTPForm.js` (byte-identical change, drift guard green).
+- **The steps**:
+  1. **Proposal**: login, quote, add-ons, proposal PDF, nominee, the 2nd Save and Finalize. Done when the proposal page shows the KYC button. Its address is saved **at that moment** (`proposalLink`, and the step's `link`). Before, it was saved only after the KYC.
+  2. **KYC**: on that page. A failure stops there, as before.
+  3. **Payment**: Make Payment, Razorpay, the QR. Done = the payment page was reached (the owner's rule). A missing QR picture is noted on the step; a run that did not reach the page marks it Failed with the reason.
+- **Where it is stored**: the same `onlinePolicy.relianceStages.<part>` as Reliance (a part key belongs to one insurer). KSHEMA has no proposal number, so `lib/relianceStagesCore.js planResume` (both copies) now also skips the proposal when step 1 is completed with its saved `link`.
+- **Resume**: `fullPolicycompany/kshema/kshemaStages.js openSavedProposal`. A fresh login (an empty profile every run), then `driver.get(saved page)`. It then waits up to 60 s for the KYC button or an enabled Make Payment.
+  - If neither shows, the run stops (not retried) with *"The saved KSHEMA proposal page did not open after the new login. Set Proposal back to Pending in History to make a new quote"*.
+  - If the page shows Make Payment while our record says KYC pending, KSHEMA has it done: the KYC is recorded, not redone.
+  - If the page shows the KYC button while our record says KYC done, the KYC is done again.
+- **Hold stop points** (top level of `runKshemaFlow` only, so no helper's try/catch can swallow them):
+  - after the login;
+  - before the quote form;
+  - before the nominee and Save and Finalize;
+  - before the KYC;
+  - before the payment (also before the Brisk certificate).
+  - Never after the payment has started. A Hold closes the window and deletes the profile (`isHoldStop` makes `hadError` false).
+- **Brisk**: a resumed run never buys a second certificate (the part runner already sets `briskCertificateExists`).
+- **Shared helper**: `fullPolicycompany/reliance/relianceStages.js` gained an `insurer` word for its log lines. It also turns a 24-hex string policy id into an ObjectId (a string id matched nothing before).
+- **No `.env` switch.**
+- **Tests**: `test/kshemaStages.test.js` (16: a fake page for the saved-page check, the one-write save, the order of the steps in both copies, Hold only at top level) and `test/relianceStages.test.js` (+1, the link). **12 deliberate breaks in a copy were all caught.**
+- **Not proven live**: whether KSHEMA opens the saved page after a new login, and which button the page shows once the KYC is done. See root README §4.2.
+
+## Steps set by hand: Edit → Status / KYC files (2026-10-19)
+The backend and the web app can now set steps by hand: a Proposal with its referral number, KYC done by hand at the portal, a payment link sent. They can also give new KYC files that redo only the KYC (backend README §12).
+
+The automation needs no change. A run starts from the saved steps (`planResume`), and the new files reach it through the job's refreshed `formData`.
+
+Only the shared core changed: `lib/relianceStagesCore.js` gained `whyNotSetByHand`, `manualSet` and `firstOpenStage` (byte-identical with the backend copy; tests in `test/relianceStages.test.js`).
 
 ## Server Control agent (2026-10-19)
 `serverControlAgent/agent.js` is a small separate pm2 process (`server-control`, port 3001). It lets the super admin's Server Control page start / stop / restart **only pm2 process 3 `server`**, and read its status, logs and the masked `.env`. **Install it once by hand: `serverControlAgent/README.md`.**

@@ -677,6 +677,9 @@ the original fails the test until it is ported.
 5. Frontend/backend: nothing changed. Possible follow-ups: `partChanges.js` `isNationalPart` nominee group for a KSHEMA TP, and whether a KSHEMA TP should force a "No of Year" pick as National's does.
 6. **PARTLY OPEN (2026-10-16): "System Error More than one rate found for rate" after Save and Continue of a KSHEMA TP-only policy.** The detection is fixed (§13.5, not run live yet); *why* KSHEMA's rater answers that for this quote is still unknown. Evidence, candidates and next steps: root README "OPEN ITEMS", item 1 (`../../README.md`).
 
+### 13.3a Three steps, Hold and resume (2026-10-19)
+`kshemaTPForm.js` has the same three steps, Hold points and saved-page resume as the full-company form, with no `[TP]` line added: the requires map through the drift guard's depth normaliser. Its steps are stored as `onlinePolicy.relianceStages.tp`. Details: repo README "KSHEMA in three steps".
+
 ### 13.4 Telling the two KSHEMA flows apart in the log (2026-10-16)
 
 The KSHEMA helpers (`kshemaLog`, `kshemaFields`, `kshemaSection` ...) are shared by both flows, and the log bracket was a fixed

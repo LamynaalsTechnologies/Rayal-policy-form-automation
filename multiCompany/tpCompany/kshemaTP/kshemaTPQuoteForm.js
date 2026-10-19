@@ -1935,6 +1935,8 @@ async function proceedToPayment(driver, capture = null, jobId = "") {
     
     let qrScreenshotUrl = null;
     let qrScreenshotKey = null;
+    // Why the Razorpay / QR part did not finish (the payment page itself was reached) — noted on the payment step.
+    let qrError = null;
 
     // 3. Select Razorpay option
     //
@@ -2119,12 +2121,13 @@ async function proceedToPayment(driver, capture = null, jobId = "") {
       }
     } catch (paymentErr) {
       log(`   ⚠️ Could not select Razorpay option or interact with QR flow: ${paymentErr.message}`);
+      qrError = paymentErr.message;
     }
     
     const paymentUrl = await driver.getCurrentUrl();
     log(`   ✓ Payment Link captured: ${paymentUrl}`);
 
-    return { ok: true, paymentUrl, qrScreenshotUrl, qrScreenshotKey };
+    return { ok: true, paymentUrl, qrScreenshotUrl, qrScreenshotKey, qrError };
   } catch (e) {
     return { ok: false, error: `Could not proceed to payment: ${e.message}` };
   }
