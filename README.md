@@ -323,3 +323,15 @@ The owner's rule (`lib/relianceStagesCore.js`, shared with the backend):
 - **Payment** set back to Pending → only the payment.
 - With every step completed the payment still runs: a re-submitted payment-link policy sends the link again.
 - A finished KYC no longer puts the payment back to Pending.
+
+## Hold on a RUNNING policy: stop now, close the window, continue later (2026-10-19)
+Hold pressed while the automation runs a Reliance policy used to apply only after the attempt ended. Now:
+- **The form stops at its next safe step.** `relianceForm.js` (and the generated OD/TP copy) calls `await stopIfHeld(data, "<where>")` at 8 points: after the login, before Form 60, before the vehicle details, before Save, before the KYC, before DO KYC, before the payment, and before Pay.
+- **Never after Pay is pressed**: a wallet payment in flight finishes and is recorded first.
+- **What `lib/holdStop.js` does**: it reads this job's `holdRequested` and stops the run on purpose with the stage `operator-hold`.
+- **The window is closed and the job's browser profile deleted** (`hadError = !isHoldStop(e)`, even with `KEEP_BROWSER_OPEN_ON_ERROR`), so Release starts with a fresh login and a fresh session.
+- **The part goes back to pending without counting an attempt and without an error entry** (new `jobPartsCore` outcome `held`, the same in the backend copy). `lib/holdRequest.js` then turns the job into **hold**.
+- **Release continues from the step it stopped at**, because finished steps stay finished (relianceStages): same proposal / referral number, unless it stopped before Save.
+- **Switch**: `JOB_HOLD_REQUEST_ENABLED` (no new switch). Only jobs with parts are checked. National / KSHEMA have no stop points (they keep the old "after the attempt").
+- **Not stopped inside one long wait** (for example the up-to-5-minute KYC PROCEED wait). It stops at the step after it.
+- **Tests**: `test/holdStop.test.js` (the real form with a fake browser stops after the login, and the window closes with no error flag). 7 deliberate breaks were all caught.

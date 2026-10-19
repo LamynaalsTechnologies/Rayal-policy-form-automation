@@ -125,6 +125,8 @@ const {
   saveCurrentPageLink,
   findProposalCheckboxInPage,
 } = require("../../../fullPolicycompany/reliance/relianceKycFallback");
+// "Hold" pressed while this runs: stop at the next safe step, close the window, Release continues from the step
+const { stopIfHeld, isHoldStop } = require("../../../lib/holdStop");
 // Reliance in three stages — proposal, KYC, payment — each remembered on the policy, so a later run does not redo a
 // finished one; the payment only after the KYC is finished; a failed KYC stops at the KYC.
 const {
@@ -1384,6 +1386,7 @@ async function fillRelianceMultiForm( // [MC] 6
       30000
     );
     console.log("Motors menu detected!");
+    await stopIfHeld(data, "after the login");
 
     // === Policy already issued: only its PDF is left ===
     // The payment was made by an earlier run (its note says issued). No form, no Pay, no Submit Details — the PDF is fetched
@@ -1599,6 +1602,7 @@ async function fillRelianceMultiForm( // [MC] 6
     // === STEP 6: Checkbox + iframe form ===
     try {
       if (!resume.skipProposal) { // stage 1 - the proposal (part B, Form 60 and the customer)
+      await stopIfHeld(data, "before Form 60");
       const ispCheckbox = await driver.wait(
         until.elementLocated(By.id("ISPANNotAvailable")),
         5000
@@ -1796,6 +1800,7 @@ async function fillRelianceMultiForm( // [MC] 6
       } // end of: stage 1 part B
       try {
         if (!resume.skipProposal) { // stage 1 - the proposal (part C, vehicle, covers, Calculate Premium)
+        await stopIfHeld(data, "before the vehicle details");
         // // Wait for the Vertical Code dropdown
         // console.log("Waiting for Vertical Code dropdown...");
         // const verticalCodeDropdown = await driver.wait(
@@ -3153,6 +3158,7 @@ async function fillRelianceMultiForm( // [MC] 6
         try {
           let proposalNumber = resume.proposalNumber || null; // a resumed run already has it
           if (!resume.skipProposal) { // stage 1 - the proposal (part D, Save and the proposal number)
+          await stopIfHeld(data, "before Save (nothing is saved at Reliance yet)");
           // Click Save button
           console.log("Looking for Save button...");
           const saveButton = await driver.wait(
@@ -3216,6 +3222,7 @@ async function fillRelianceMultiForm( // [MC] 6
 
           // === Stage 2 — the KYC (relianceStages.js): skipped when an earlier run finished it for this proposal ===
           stageNow = "kyc";
+          await stopIfHeld(data, "before the KYC");
           if (!resume.skipKyc) {
 
           // === NEW FLOW: Navigate to View Policy ===
@@ -3555,6 +3562,7 @@ async function fillRelianceMultiForm( // [MC] 6
             // a new attempt is a new proposal: an earlier attempt's saved pages (on this portal) are stale now
             await clearStaleProcessLinks({ portalUrl: kycProposalPageUrl }, data, jobId);
           }
+          await stopIfHeld(data, "before DO KYC");
           console.log("Clicking DO KYC link...");
           kycWindowHandle = null;
           try {
@@ -4821,6 +4829,7 @@ async function fillRelianceMultiForm( // [MC] 6
               ? new KycIncompleteError(`KYC did not complete - ${why}`, { reason: why })
               : new RelianceStageError(kycNotDoneMessage(proposalNumber, why), { stage: "kyc" });
           }
+          await stopIfHeld(data, "before the payment (the KYC is done)");
           // KYC set back to pending on a policy whose payment is done: only the KYC was to be redone — nothing is paid or
           // sent again, and the Brisk / PDF steps after the payment were done by that earlier run too (relianceStagesCore)
           if (resume.skipPayment) {
@@ -5053,6 +5062,7 @@ async function fillRelianceMultiForm( // [MC] 6
 
                                 await driver.sleep(1500);
 
+                                await stopIfHeld(data, "before Pay (nothing is paid)");
                                 // [MC] 5: last look before Pay — the proposal is saved and KYC done (no-op unless the Breaker is on)
                                 Breaker.checkpoint(`${mcLabel}/payment`); // [MC] 5
 
@@ -5874,7 +5884,9 @@ async function fillRelianceMultiForm( // [MC] 6
     // stop: no error screenshot, no retry, and (KEEP_BROWSER_OPEN_ON_ERROR) the
     // browser stays on the page where it stopped.
     if (isAutomationStop(e)) {
-      hadError = true;
+      // a hold-stop closes the window and deletes this job's browser profile (a fresh session on Release); any other
+      // stop keeps the window when KEEP_BROWSER_OPEN_ON_ERROR says so, as before
+      hadError = !isHoldStop(e);
       console.log(`[${jobId}] ⏸️  ${e.message}`);
       const stopped = stoppedResult(e);
       stopped.pageUrl = driver ? await driver.getCurrentUrl().catch(() => null) : null;

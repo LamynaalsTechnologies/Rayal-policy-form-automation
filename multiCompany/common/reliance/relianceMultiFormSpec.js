@@ -37,6 +37,7 @@ const CHANGES = [
   { tag: "1", from: ["} = require(\"./reliance/relianceWalletIssue\");"], to: ["} = require(\"../../../fullPolicycompany/reliance/relianceWalletIssue\");"] },
   { tag: "1", from: ["} = require(\"./reliance/relianceQuotesPaging\");"], to: ["} = require(\"../../../fullPolicycompany/reliance/relianceQuotesPaging\");"] },
   { tag: "1", from: ["} = require(\"./reliance/relianceStages\");"], to: ["} = require(\"../../../fullPolicycompany/reliance/relianceStages\");"] },
+  { tag: "1", from: ["const { stopIfHeld, isHoldStop } = require(\"../lib/holdStop\");"], to: ["const { stopIfHeld, isHoldStop } = require(\"../../../lib/holdStop\");"] },
   { tag: "5", from: ["                                      checkpoint: (name) => Breaker.checkpoint(`Reliance/${name}`),"], to: ["                                      checkpoint: (name) => Breaker.checkpoint(`${mcLabel}/${name}`), // [MC] 5"] },
   { tag: "1", from: ["const { uploadToS3 } = require(\"../s3Uploader\");"], to: ["const { uploadToS3 } = require(\"../../../s3Uploader\");"] },
   { tag: "1", from: ["const { captureAndLogError } = require(\"../errorLogger\");"], to: ["const { captureAndLogError } = require(\"../../../errorLogger\");"] },
