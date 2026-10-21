@@ -12,6 +12,7 @@ const { uploadScreenshotToS3, generateScreenshotKey } = require("../s3Uploader")
 const { beautifyError } = require("../lib/errorHandler");
 // A deliberate stop — stopper(), or a Breaker.checkpoint() that .env switched on — must
 // reach the top-level catch below as a stop, not be dressed up as a failure and retried.
+const { armLiveHold, disarmLiveHold, liveHoldStopOf, isHoldStop } = require("../lib/holdStop");
 const { isAutomationStop, stoppedResult } = require("../automationStopper");
 require("../breaker"); // defines the global `Breaker` for a standalone run of this file
 // Shared with Reliance — National previously had NO Brisk handling at all, so
@@ -1655,6 +1656,8 @@ async function fillNationalForm(
     // Screen-record this job's own window (no-op unless RECORDING_ENABLED).
     // The server stops it and ships the video in runPolicyJob's finally.
     startRecording(driver, data._jobId, data._attemptNumber || 1, { label: jobId });
+    // Hold pressed while a step runs stops it at once; never cuts the Brisk certificate, which is not a browser step (lib/holdStop.js armLiveHold).
+    armLiveHold(driver, data);
 
     console.log(`✅ [${jobId}] National browser ready!`);
 
@@ -5432,7 +5435,10 @@ async function fillNationalForm(
 
     return { success: true, briskCertificateError };
   } catch (error) {
-    hadError = true;
+    // A Hold that stopped a running step (armLiveHold) is a stop, whatever a helper made of the error on its way up.
+    if (!isAutomationStop(error) && liveHoldStopOf(data)) error = liveHoldStopOf(data);
+    // A hold-stop closes the window and deletes its profile (a fresh login on Release); a failure keeps its window rules.
+    hadError = !isHoldStop(error);
 
     // stopper() / Breaker.checkpoint() ended the run on purpose. Hand it back as a
     // stop: no error screenshot, no retry, and (KEEP_BROWSER_OPEN_ON_ERROR) the
@@ -5487,6 +5493,7 @@ async function fillNationalForm(
       postSubmissionFailed: isValidationError, // Stop retries for these critical errors
     };
   } finally {
+    disarmLiveHold(data); // before the cleanup: the window must close
     // Cleanup: Always close browser and delete cloned profile
     if (jobBrowser) {
       console.log(`[${jobId}] Cleaning up browser and session data...`);

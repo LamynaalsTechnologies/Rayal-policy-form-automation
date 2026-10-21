@@ -15,6 +15,7 @@
  * Every database helper here NEVER throws: a bookkeeping write must not fail a run that did real work at Reliance.
  */
 const core = require("../../lib/relianceStagesCore");
+const { liveHoldStopOf } = require("../../lib/holdStop");
 const { PortalRejectedError, plain, saveKycStatus, kycGenericReasonText } = require("./relianceKycSubmit");
 
 /** The part these stages belong to — the part runner sets data._partKey ("motor" / "od" / "tp"); none = "motor". */
@@ -78,6 +79,8 @@ async function loadResumePlan(data, { jobId = "", MongoClient, insurer = "Relian
  * @param {Object} [extra] proposalNumber, mode, error ...
  */
 async function markStage(data, stage, status, extra = {}, { jobId = "", MongoClient, now = new Date(), insurer = "Reliance" } = {}) {
+  // A step cut short by Hold (lib/holdStop.js armLiveHold) did not fail: its "failed" is not written, Release redoes it.
+  if (status === "failed" && liveHoldStopOf(data)) return false;
   const policyId = policyIdOf(data);
   if (!policyId) {
     console.warn(`[${jobId}] ⚠️ No policy id on the job — ${insurer} stage ${stage} = ${status} not saved.`);

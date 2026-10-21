@@ -19,6 +19,7 @@
  * browser, database or S3 call exists to clean up.
  */
 const { startRecording } = require("../../lib/jobRecorder");
+const { armLiveHold, disarmLiveHold, liveHoldStopOf, isHoldStop } = require("../../lib/holdStop");
 const { stopper, isAutomationStop, stoppedResult } = require("../../automationStopper");
 require("../../breaker"); // defines the global `Breaker`, usable in any handler body
 const { assertMultiCompanyEnabled } = require("./featureGate");
@@ -55,6 +56,7 @@ async function runHandler({ company, policyType, data = {}, body }) {
 
     // No-op unless RECORDING_ENABLED.
     startRecording(driver, data._jobId, attempt, { label: jobId });
+    armLiveHold(driver, data); // Hold stops a running step at once (lib/holdStop.js)
 
     await login(
       driver,
@@ -82,7 +84,8 @@ async function runHandler({ company, policyType, data = {}, body }) {
     if (outcome.success === false || outcome.inProgress === true) hadError = true;
     return outcome;
   } catch (error) {
-    hadError = true;
+    if (!isAutomationStop(error) && liveHoldStopOf(data)) error = liveHoldStopOf(data);
+    hadError = !isHoldStop(error);
     if (isAutomationStop(error)) {
       return stoppedResult(error, { _jobBrowser: jobBrowser });
     }
@@ -92,6 +95,7 @@ async function runHandler({ company, policyType, data = {}, body }) {
     console.error(`❌ [${jobId}] ${company} ${policyType.toUpperCase()} failed: ${error.message}`);
     return failureResult(error, shot);
   } finally {
+    disarmLiveHold(data);
     if (jobBrowser) await closeJobBrowser(company, jobBrowser, { hadError });
   }
 }

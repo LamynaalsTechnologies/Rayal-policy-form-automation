@@ -54,7 +54,7 @@ const {
 const { isAutomationStop, stoppedResult } = require("../../../automationStopper");
 const { shouldKeepBrowserOpen } = require("../../../debugRetention");
 // The three steps (proposal -> KYC -> payment), Hold at a safe step and the resume from the saved proposal page
-const { stopIfHeld, isHoldStop } = require("../../../lib/holdStop");
+const { stopIfHeld, isHoldStop, armLiveHold, disarmLiveHold, liveHoldStopOf } = require("../../../lib/holdStop");
 const {
   loadKshemaResume,
   markStage,
@@ -602,6 +602,7 @@ async function fillKshemaForm(data = {}) {
     }
     return result;
   } finally {
+    disarmLiveHold(data); // before the cleanup: the window must close
     // The browser used to be left open on EVERY path. That was right while the
     // job was to look at a login page; it is a leak now that real jobs run —
     // KSHEMAMAXWINDOW=2 means two Chrome processes and two profile directories
@@ -648,6 +649,8 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     // Screen-record this job's own window (no-op unless RECORDING_ENABLED).
     // The server stops it and ships the video in runPolicyJob's finally.
     startRecording(driver, data._jobId, data._attemptNumber || 1, { label: jobId });
+    // Hold pressed while a step runs stops it at once; switched off at the payment point (lib/holdStop.js armLiveHold).
+    armLiveHold(driver, data);
 
     debug(`🌐 Opening ${loginUrl}`);
     await driver.get(loginUrl);
@@ -1626,6 +1629,8 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
       toastText: toast ? toast.text : null,
     };
   } catch (error) {
+    // A Hold that stopped a running step (armLiveHold) is a stop, whatever a helper made of the error on its way up.
+    if (!isAutomationStop(error) && liveHoldStopOf(data)) error = liveHoldStopOf(data);
     // stopper() was called somewhere above. Hand it back as a stop rather than
     // letting the error handling below dress it up as a crash.
     if (isAutomationStop(error)) {

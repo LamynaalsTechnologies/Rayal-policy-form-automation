@@ -126,7 +126,7 @@ const {
   findProposalCheckboxInPage,
 } = require("../../../fullPolicycompany/reliance/relianceKycFallback");
 // "Hold" pressed while this runs: stop at the next safe step, close the window, Release continues from the step
-const { stopIfHeld, isHoldStop } = require("../../../lib/holdStop");
+const { stopIfHeld, isHoldStop, armLiveHold, disarmLiveHold, liveHoldStopOf } = require("../../../lib/holdStop");
 // Reliance in three stages — proposal, KYC, payment — each remembered on the policy, so a later run does not redo a
 // finished one; the payment only after the KYC is finished; a failed KYC stops at the KYC.
 const {
@@ -1311,6 +1311,8 @@ async function fillRelianceMultiForm( // [MC] 6
     // Screen-record this job's own window (no-op unless RECORDING_ENABLED).
     // The server stops it and ships the video in runPolicyJob's finally.
     startRecording(driver, data._jobId, data._attemptNumber || 1, { label: jobId });
+    // Hold pressed while a step runs stops it at once; switched off at the payment point (lib/holdStop.js armLiveHold).
+    armLiveHold(driver, data);
 
     // THIS job's portal URL — the hardcoded address is only the fallback for a
     // credential saved without one.
@@ -5880,6 +5882,8 @@ async function fillRelianceMultiForm( // [MC] 6
       };
     }
   } catch (e) {
+    // A Hold that stopped a running step (armLiveHold) is a stop, whatever a helper made of the error on its way up.
+    if (!isAutomationStop(e) && liveHoldStopOf(data)) e = liveHoldStopOf(data);
     // stopper() / Breaker.checkpoint() ended the run on purpose. Hand it back as a
     // stop: no error screenshot, no retry, and (KEEP_BROWSER_OPEN_ON_ERROR) the
     // browser stays on the page where it stopped.
@@ -5921,6 +5925,7 @@ async function fillRelianceMultiForm( // [MC] 6
       ...(e && e.nonRetryable === true ? { retryable: false } : {}),
     };
   } finally {
+    disarmLiveHold(data); // before the cleanup: the window must close
     // Cleanup: Always close browser and delete cloned profile
     if (jobBrowser) {
       await cleanupJobBrowser(jobBrowser, { hadError });
