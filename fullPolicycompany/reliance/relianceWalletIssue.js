@@ -514,6 +514,26 @@ function createIssueStore({ MongoClient, field = "walletPayment", policyId } = {
       });
     },
 
+    /**
+     * The amount Reliance asked for and the CDT box was given, kept on its own field for the View page
+     * (`insurerPayable.<part>`, the part being the one this note belongs to). Bookkeeping only: never throws, and the run
+     * never waits on its answer — {ok:false, error} is logged by the caller and Submit Details goes on.
+     */
+    async savePayable(entry) {
+      const part = field === "walletPayment" ? "motor" : String(field).replace(/^walletPayment_/, "");
+      try {
+        return await withDb(MongoClient, async ({ onlinePolicy }) => {
+          const result = await onlinePolicy.updateOne(
+            { _id: policyId },
+            { $set: { [`insurerPayable.${part}`]: entry, updatedAt: new Date() } }
+          );
+          return { ok: result.matchedCount === 1 };
+        });
+      } catch (e) {
+        return { ok: false, error: (e && e.message) || String(e) };
+      }
+    },
+
     /** The note as it is now: {found, marker}. */
     async readNote() {
       return withDb(MongoClient, async ({ onlinePolicy }) => {
@@ -1298,6 +1318,17 @@ const noteFor = (ctx, extra) => ({
   ...extra,
 });
 
+/** What `insurerPayable.<part>` holds. Whole paise (integer) and the same amount as text; Reliance only for now. */
+const payableEntry = (ctx) => ({
+  insurer: "Reliance",
+  method: "CDT",
+  amountPaise: ctx.paise,
+  amount: formatPaise(ctx.paise),
+  proposalNumber: ctx.proposalNumber || "",
+  jobId: String(ctx.data._jobId || ctx.data._jobIdentifier || ctx.jobId || ""),
+  at: new Date(),
+});
+
 /**
  * After the CDT row is added: check the row, write the note, press Submit Details once, read the answer, save the policy
  * number, get the PDF, store it. Returns normally only for an issued policy whose PDF is stored; every other end is a
@@ -1450,6 +1481,14 @@ async function payWithCdtAndIssue(o = {}) {
     );
   }
   log(`note ${field}.state = ${STATES.PRESSED} saved — pressing Submit Details`);
+
+  // The amount typed into the CDT box, on its own field for the View page. Only once THIS run owns the note (a run that
+  // finds a payment already submitted pays nothing and must not overwrite the amount that was paid). Best effort: a failed
+  // write is only told, it never holds Submit Details back.
+  if (typeof store.savePayable === "function") {
+    const saved = await store.savePayable(payableEntry(ctx));
+    if (!saved || !saved.ok) log(`the CDT amount ${amount} could not be saved on the policy for the View page (${plain((saved && saved.error) || "the policy was not found")})`);
+  }
 
   // 4. Submit Details — once
   let pressedAlert = "";

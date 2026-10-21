@@ -1099,6 +1099,65 @@ const indexOf = (order, needle, from = 0) => {
 /* The happy paths                                                            */
 /* -------------------------------------------------------------------------- */
 
+/* ---- the CDT amount on its own field (insurerPayable) — for the View page ---- */
+
+test("insurerPayable: the CDT amount is saved in whole paise right after the note and BEFORE the press, on the part's own key", async () => {
+  for (const [part, key] of [[undefined, "motor"], ["motor", "motor"], ["od", "od"], ["tp", "tp"]]) {
+    const w = makeWorld();
+    const r = await runFlow(w, { data: part ? { _partKey: part } : {} });
+    assert.ok(!r.error, r.error && r.error.message);
+    const op = r.mongo.data.onlinePolicy[0];
+    const saved = op.insurerPayable[key];
+    assert.equal(saved.amountPaise, PAISE, key);
+    assert.ok(Number.isInteger(saved.amountPaise));
+    assert.equal(saved.amount, "6,268.00");
+    assert.equal(saved.insurer, "Reliance");
+    assert.equal(saved.method, "CDT");
+    assert.equal(saved.proposalNumber, PROPOSAL);
+    assert.equal(saved.jobId, "job-1");
+    assert.deepEqual(Object.keys(op.insurerPayable), [key], "no other part is touched");
+    const o = w.order;
+    const at = o.findIndex((x) => x === `db:onlinePolicy:insurerPayable.${key}`);
+    const note = o.findIndex((x) => x.startsWith("db:onlinePolicy:walletPayment"));
+    assert.ok(at >= 0 && note >= 0, o.join(" > "));
+    assert.ok(note < at, "the amount is saved once the note is owned");
+    assert.ok(at < indexOf(o, "submit-click"), "and before Submit Details is pressed");
+  }
+});
+
+test("insurerPayable: a failed write is only told — Submit Details is still pressed, once", async () => {
+  const w = makeWorld();
+  const r = await runFlow(w, {
+    mongo: { updateError: (name, filter, update) => (Object.keys(update.$set || {}).some((k) => k.startsWith("insurerPayable")) ? new Error("write failed") : undefined) },
+  });
+  assert.ok(!r.error, r.error && r.error.message);
+  assert.equal(r.result.ok, true);
+  assert.equal(w.submitClicks, 1);
+  assert.equal(r.mongo.data.onlinePolicy[0].insurerPayable, undefined);
+  assert.equal(r.mongo.data.onlinePolicy[0].walletPayment.state, "issued");
+});
+
+test("insurerPayable: a run that finds a payment already submitted writes nothing — the paid amount stays", async () => {
+  const w = makeWorld();
+  const seed = seedPolicy({
+    onlinePolicy: {
+      walletPayment: { state: "issued", proposalNumber: PROPOSAL, amountPaise: PAISE, at: new Date(), policyNumber: NUMBER },
+      insurerPayable: { motor: { insurer: "Reliance", amountPaise: 111 } },
+    },
+  });
+  const r = await runFlow(w, { seed });
+  assert.equal(r.error.code, "ALREADY_SUBMITTED");
+  assert.equal(r.mongo.data.onlinePolicy[0].insurerPayable.motor.amountPaise, 111);
+});
+
+test("insurerPayable: a re-run that pays again keeps the amount of the latest Add (one entry per part)", async () => {
+  const w = makeWorld();
+  const seed = seedPolicy({ onlinePolicy: { insurerPayable: { motor: { insurer: "Reliance", amountPaise: 1 } } } });
+  const r = await runFlow(w, { seed });
+  assert.ok(!r.error, r.error && r.error.message);
+  assert.equal(r.mongo.data.onlinePolicy[0].insurerPayable.motor.amountPaise, PAISE);
+});
+
 test("issued, PDF by the policy number link: the note BEFORE the press, the press once, the number BEFORE the PDF, the file stored and set", async () => {
   const w = makeWorld();
   const r = await runFlow(w);
