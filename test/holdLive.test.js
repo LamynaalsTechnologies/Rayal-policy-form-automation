@@ -95,11 +95,13 @@ test("passing the payment point disarms it: a hold asked later never cuts a paym
   await assert.rejects(() => stopIfHeld(data, "before Pay (nothing is paid)", { collection: q, log: silent, env: {} }), isAutomationStop);
 });
 
-test("JOB_HOLD_REQUEST_ENABLED off: nothing is armed", async () => {
+test("JOB_HOLD_REQUEST_ENABLED off: no hold is armed (only the stuck-step watch, lib/stallWatch.js), and disarm gives execute back", async () => {
   const q = queue();
   const driver = fakeDriver();
   const original = driver.execute;
   assert.equal(armLiveHold(driver, { _jobId: "j1" }, { ...opts(q), env: { JOB_HOLD_REQUEST_ENABLED: "false" } }), false);
+  assert.equal(await driver.findElement(), "ok", "commands still go through");
+  disarmLiveHold({ _jobId: "j1" });
   assert.equal(driver.execute, original);
 });
 

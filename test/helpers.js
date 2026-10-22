@@ -84,6 +84,40 @@ const silentLogger = { log() {}, warn() {}, error() {} };
  * the runner uses. `beforeUpdate` lets a test change the document right before
  * a write, i.e. simulate an edit that lands mid-run.
  */
+/**
+ * $set on a dotted path, with `$[name]` resolved by arrayFilters of the form { "name.field": value } (the run-history
+ * writes: "runHistory.$[run].steps.kyc"). An identifier that matches nothing changes nothing, as in MongoDB.
+ */
+function setPath(doc, path, value, arrayFilters = []) {
+  const parts = path.split(".");
+  const walk = (node, i) => {
+    if (node == null) return;
+    const p = parts[i];
+    const last = i === parts.length - 1;
+    const m = p.match(/^\$\[(\w+)\]$/);
+    if (m) {
+      if (!Array.isArray(node)) return;
+      const f = (arrayFilters || []).find((af) => Object.keys(af).some((k) => k.startsWith(`${m[1]}.`)));
+      const [fk, fv] = f ? Object.entries(f)[0] : [null, null];
+      const field = fk ? fk.slice(m[1].length + 1) : null;
+      node.forEach((el, idx) => {
+        if (!field || (el && el[field] === fv)) {
+          if (last) node[idx] = value;
+          else walk(el, i + 1);
+        }
+      });
+      return;
+    }
+    if (last) {
+      node[p] = value;
+      return;
+    }
+    if (node[p] == null) node[p] = {};
+    walk(node[p], i + 1);
+  };
+  walk(doc, 0);
+}
+
 function fakeCollection(initial) {
   const state = { doc: structuredClone(initial), writes: [], beforeUpdate: null };
   const matches = (filter) =>
@@ -95,7 +129,7 @@ function fakeCollection(initial) {
     async findOne(filter) {
       return matches({ _id: filter._id }) ? structuredClone(state.doc) : null;
     },
-    async updateOne(filter, update) {
+    async updateOne(filter, update, options) {
       if (state.beforeUpdate) {
         const hook = state.beforeUpdate;
         state.beforeUpdate = null;
@@ -103,12 +137,16 @@ function fakeCollection(initial) {
       }
       if (!matches(filter)) return { matchedCount: 0, modifiedCount: 0 };
       const d = state.doc;
-      for (const [k, v] of Object.entries(update.$set || {})) d[k] = structuredClone(v);
+      for (const [k, v] of Object.entries(update.$set || {})) {
+        if (k.includes(".")) setPath(d, k, structuredClone(v), options && options.arrayFilters);
+        else d[k] = structuredClone(v);
+      }
       for (const k of Object.keys(update.$unset || {})) delete d[k];
       for (const [k, v] of Object.entries(update.$inc || {})) d[k] = (d[k] || 0) + v;
       for (const [k, v] of Object.entries(update.$push || {})) {
         d[k] = d[k] || [];
         d[k].push(...(v && v.$each ? structuredClone(v.$each) : [structuredClone(v)]));
+        if (v && typeof v.$slice === "number" && v.$slice < 0) d[k] = d[k].slice(v.$slice);
       }
       state.writes.push(update);
       return { matchedCount: 1, modifiedCount: 1 };

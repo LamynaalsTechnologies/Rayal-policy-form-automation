@@ -6,6 +6,14 @@ require("dotenv").config();
 // it is created, and has to capture the wrapped one.
 const flowLog = require("./lib/flowLogPrefix");
 flowLog.install();
+// A run that prints nothing for 1.5 minutes is stuck and is stopped with an error (lib/stallWatch.js): it counts each
+// job's lines, so it wraps console too.
+const stallWatch = require("./lib/stallWatch");
+stallWatch.install();
+// One record per run on the job (who started it, which login, step times) - lib/runHistory.js
+const runHistory = require("./lib/runHistory");
+// legacy (no-parts) runs in progress: job id -> { runId, startedAt } - closed by runPolicyJob's wrapper
+const legacyRuns = new Map();
 
 const http = require("http");
 const fs = require("fs");
@@ -1196,7 +1204,7 @@ const runQueuePass = async () => {
       const heartbeat = startJobHeartbeat(job._id);
 
       // Run job in parallel (don't await). Everything it prints — and everything it awaits prints — carries `flow`.
-      inFlow(() => (part ? partRunner.runPartJob(partRunnerDeps, job) : runPolicyJob(job)))
+      inFlow(() => stallWatch.run(String(job._id), () => (part ? partRunner.runPartJob(partRunnerDeps, job) : runPolicyJob(job))))
         .catch((unexpectedError) => {
           // Safety net: Catch any unhandled errors
           inFlow(() => {
@@ -1461,7 +1469,31 @@ const dispatchBundled = async (
   return { run };
 };
 
+/**
+ * A legacy (no-parts) job's run, with its run record (lib/runHistory.js): runPolicyJobOnce opens the record; this closes
+ * it with the job's status after the run, whichever of the many outcome writes below set it.
+ */
 const runPolicyJob = async (rawJob) => {
+  try {
+    return await runPolicyJobOnce(rawJob);
+  } finally {
+    const run = legacyRuns.get(String(rawJob._id));
+    legacyRuns.delete(String(rawJob._id));
+    if (run) {
+      const doc = await jobQueueCollection
+        .findOne({ _id: rawJob._id }, { projection: { status: 1, lastError: 1 } })
+        .catch(() => null);
+      const status = (doc && doc.status) || "ended";
+      await runHistory.endRun(jobQueueCollection, rawJob._id, run.runId, {
+        outcome: status,
+        error: /^completed/.test(status) ? null : doc && doc.lastError,
+        startedAt: run.startedAt,
+      });
+    }
+  }
+};
+
+const runPolicyJobOnce = async (rawJob) => {
   // Backend-created jobs carry only a thin payload — fill it in before any
   // of the code below reads job.formData.
   let job;
@@ -1510,6 +1542,19 @@ const runPolicyJob = async (rawJob) => {
   const processingStartTime = Date.now();
   const companyName = (job.formData.Companyname || job.formData.company || "reliance").toLowerCase();
   const queueName = `${companyLabel(companyName)} Queue`;
+
+  // This run's record (lib/runHistory.js): a legacy job is one part - its policyType (od / tp) or the whole policy.
+  const legacyType = String(job.formData.policyType || "").toLowerCase();
+  const runStartedAt = new Date(processingStartTime);
+  const runId = await runHistory.startRun(
+    jobQueueCollection,
+    job,
+    { key: legacyType === "od" || legacyType === "tp" ? legacyType : "motor", company: companyName },
+    { attempt: job.attempts + 1, now: runStartedAt }
+  );
+  legacyRuns.set(String(job._id), { runId, startedAt: runStartedAt });
+  job.formData._runId = runId; // the step times of this run are written against it
+  job.formData._runStartedAt = runStartedAt;
 
   // Log processing start
   await logAuditEntry('JOB_PROCESSING_STARTED', {
@@ -1575,6 +1620,7 @@ const runPolicyJob = async (rawJob) => {
         },
       }
     );
+    await runHistory.setRunLogin(jobQueueCollection, job._id, runId, resolved);
 
     // Stamp the row that actually ran. Nothing wrote this field before, so
     // "when was this login last used?" had no answer.
@@ -1644,7 +1690,11 @@ const runPolicyJob = async (rawJob) => {
     );
 
     // Race between job completion and timeout
-    const result = await Promise.race([fillFormPromise, timeoutPromise]);
+    // stallWatch: a run stuck for 1.5 minutes is stopped with an error, and its result says so (lib/stallWatch.js)
+    const result = stallWatch.applyToResult(
+      job._id,
+      await Promise.race([stallWatch.guard(job._id, fillFormPromise), timeoutPromise])
+    );
 
     const processingTimeMs = Date.now() - processingStartTime;
 

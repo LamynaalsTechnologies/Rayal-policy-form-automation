@@ -378,3 +378,43 @@ Only the shared core changed: `lib/relianceStagesCore.js` gained `whyNotSetByHan
 `serverControlAgent/agent.js` is a small separate pm2 process (`server-control`, port 3001). It lets the super admin's Server Control page start / stop / restart **only pm2 process 3 `server`**, and read its status, logs and the masked `.env`. **Install it once by hand: `serverControlAgent/README.md`.**
 - **Safety**: it acts only on id 3 + name `server` (checked in `pm2 jlist` before every action), with a fixed `execFile` command (no shell), a key on every request, a lockout after 5 wrong keys, and optional `SERVER_CONTROL_ALLOWED_IPS`.
 - **Tests**: `test/serverControlAgent.test.js` (10, a fake pm2). 10 deliberate breaks were all caught.
+
+### A stuck step is stopped after 1.5 minutes - every insurer (2026-10-22)
+
+`lib/stallWatch.js`. A run that prints nothing for **1.5 minutes** is stuck: a frozen portal page, or a wait that never ends. Every flow prints a line per step, and the long legitimate waits print while they wait (the Reliance KYC waits say "still waiting" every 15 s, so they keep their own 2-minute limit).
+
+- **How lines are counted:** each job runs inside `stallWatch.run(jobId)` (server.js, the one place every job starts), and `console.*` is wrapped once, so parallel runs never count each other's lines.
+- **When a run is stuck:**
+  1. A picture of the page is taken (`screenshots/stalled/...`, at most 15 s).
+  2. Every further browser command fails with `[E309]` (closing the window, a picture, and URL/title reads still pass), so a wait loop unwinds at once.
+  3. A command that is itself frozen is broken after 20 s by closing the tabs through Chrome's DevTools port, then quit. chromedriver's own quit waits behind the frozen command; this was seen on a real Chrome.
+  4. `guard()` gives up after a further 45 s if even that did not end the run.
+- **Retries:** `[E309]` is retryable, so the queue tries again later. A stuck run **after the proposal was saved** becomes `failed_post_submission` and is not re-run automatically, the same rule as the job timeout (partRunner).
+- **Never after the payment point:** `stopIfHeld("before the payment" / "before Pay")` pauses the watch for the rest of the run, whatever the hold switch.
+- **Where it is armed:** `armLiveHold` / `disarmLiveHold` arm and disarm it, so every browser flow has it with no change of its own. It is a fixed rule, with no `.env` switch.
+- **Tests:** `test/stallWatch.test.js` (12) and `test/partRunnerTimeout.test.js` (+3). 9 deliberate breaks were caught.
+- **Checked on a real headless Chrome** (scratch, 5 s limit):
+  - a never-ending wait loop stopped in 6 s with a picture;
+  - a page frozen by `while(true)` stopped in about 40 s;
+  - no Chrome was left running.
+- **Not run on a live portal yet.**
+
+### Run history (2026-10-22)
+
+`lib/runHistory.js` keeps one record per run on the job (`runHistory[]`, newest 100).
+
+**When it writes**
+- When a run starts: `startRun`, in `partRunner` and in the legacy wrapper in `server.js`.
+- When the login is resolved: `setRunLogin`, with the username, whose login it is and how it was matched. Never the password.
+- When each step ends: `markRunStep`.
+  - Reliance and KSHEMA call it through `relianceStages.markStage`.
+  - National calls it at Convert Quote (proposal), Create Customer (KYC) and Send Payment Link (payment).
+- When the run ends: in the same write as its outcome (`writePartOutcome`).
+
+**Who started it:** the job's `pendingTrigger` for the first run after it; any later run of the same part is an automatic retry.
+
+**Other**
+- Outcome entries now carry `kind: "part-result"`.
+- The hold-on-finish entry carries `kind: "held"` and `by`.
+
+**Tests:** `test/runHistory.test.js` (9).

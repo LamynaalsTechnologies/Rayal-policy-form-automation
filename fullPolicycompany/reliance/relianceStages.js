@@ -81,6 +81,10 @@ async function loadResumePlan(data, { jobId = "", MongoClient, insurer = "Relian
 async function markStage(data, stage, status, extra = {}, { jobId = "", MongoClient, now = new Date(), insurer = "Reliance" } = {}) {
   // A step cut short by Hold (lib/holdStop.js armLiveHold) did not fail: its "failed" is not written, Release redoes it.
   if (status === "failed" && liveHoldStopOf(data)) return false;
+  // how long this step took in THIS run, on the job's run record (lib/runHistory.js) - best-effort, never throws
+  if (status === "completed" || status === "failed") {
+    require("../../lib/runHistory").markRunStep(data, stage, { status, mode: extra && extra.mode, now }).catch(() => {});
+  }
   const policyId = policyIdOf(data);
   if (!policyId) {
     console.warn(`[${jobId}] ⚠️ No policy id on the job — ${insurer} stage ${stage} = ${status} not saved.`);

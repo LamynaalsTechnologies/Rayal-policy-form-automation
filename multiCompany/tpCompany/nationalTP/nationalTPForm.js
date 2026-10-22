@@ -43,6 +43,8 @@ const { beautifyError } = require("../../../lib/errorHandler");
 // A deliberate stop — stopper(), or a Breaker.checkpoint() that .env switched on — must
 // reach the top-level catch below as a stop, not be dressed up as a failure and retried.
 const { armLiveHold, disarmLiveHold, liveHoldStopOf, isHoldStop } = require("../../../lib/holdStop");
+// the time each step took in this run, on the job's run record (History -> Runs)
+const runHistory = require("../../../lib/runHistory");
 const { isAutomationStop, stoppedResult } = require("../../../automationStopper");
 require("../../../breaker"); // defines the global `Breaker` for a standalone run of this file
 // Shared with Reliance — National previously had NO Brisk handling at all, so
@@ -2664,6 +2666,7 @@ async function fillNationalForm(
       if (clickableConvertBtn) {
         await scrollAndClickResolved(driver, clickableConvertBtn);
         console.log("✅ Clicked Convert Quote button");
+        runHistory.markRunStep(data, "proposal").catch(() => {}); // the quote is now the proposal
         await waitForPortalIdle(driver);
       } else {
         throw new Error("Convert Quote button never became clickable (still disabled after waiting)");
@@ -3479,6 +3482,7 @@ async function fillNationalForm(
       }
 
       console.log("Successfully clicked Create Customer button");
+      runHistory.markRunStep(data, "kyc").catch(() => {}); // the customer is created with the manual KYC
       // Customer creation is a server round-trip — wait for it, not a flat 3s.
       await waitForPortalIdle(driver, 40000, 600);
 
@@ -5194,6 +5198,7 @@ async function fillNationalForm(
             await scrollAndClick(driver, locator, 10000);
             sendLinkClicked = true;
             console.log(`[${jobId}] ✅ Clicked Send Payment Link using: ${locator.toString()}`);
+            runHistory.markRunStep(data, "payment", { mode: "link" }).catch(() => {});
             break;
           } catch (e) {
             console.log(`[${jobId}] Send Payment Link locator failed: ${locator.toString()}: ${e.message}`);

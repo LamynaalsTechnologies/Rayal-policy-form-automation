@@ -286,7 +286,8 @@ test("server.js: the part run and the legacy run are BOTH started inside the flo
   const label = at("const flow = flowLog.flowLabel({");
   assert.ok(label < inFlowDef);
 
-  const run = at("inFlow(() => (part ? partRunner.runPartJob(partRunnerDeps, job) : runPolicyJob(job)))");
+  // 2026-10-22: also inside stallWatch.run (lib/stallWatch.js counts each run's lines) - still inside the flow tag
+  const run = at("inFlow(() => stallWatch.run(String(job._id), () => (part ? partRunner.runPartJob(partRunnerDeps, job) : runPolicyJob(job))))");
   assert.ok(inFlowDef < run);
   // and nothing starts them outside it
   assert.equal(serverSrc.split("partRunner.runPartJob(").length - 1, 1, "runPartJob is started in one place");

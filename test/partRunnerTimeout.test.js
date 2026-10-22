@@ -227,3 +227,55 @@ test("the timeout-after-proposal sentence is plain words that survive beautifyEr
   assert.ok(!o.error.slice("[Reliance] ".length).includes(":"));
   assert.equal(beautifyError(o.error.replace(/^\[Reliance\] /, ""), "Reliance"), o.error);
 });
+
+/* ---------------- a run stopped as STUCK (lib/stallWatch.js, 2026-10-22) - the same rules as the timeout ---------------- */
+
+const stallWatch = require("../lib/stallWatch");
+const STALL = '[E309] The step did not finish in 1.5 minutes after "Clicking Get Coverage Details" - the portal stopped responding, so this run was stopped. It will be tried again';
+
+test("stuck BEFORE any proposal: retried with backoff, the stall named (E309)", async () => {
+  const claimed = claimedFrom(jobDoc(singleParts()), "motor");
+  const col = fakeCollection(claimed);
+  const { deps } = makeDeps(col, { policy: [{ _id: "policy1" }, { _id: "policy1" }], run: () => Promise.reject(new Error(STALL)) });
+  deps.jobTimeoutMs = 60000;
+  await runner.runPartJob(deps, claimed);
+  const motor = partOf(col.state.doc, "motor");
+  assert.equal(motor.status, "pending");
+  assert.equal(motor.lastErrorCode, "E309");
+  assert.ok(motor.nextRetryAt, "a retry is scheduled");
+  assert.match(motor.lastError, /did not finish in 1\.5 minutes/);
+});
+
+test("stuck AFTER the proposal was saved: failed_post_submission, not re-run automatically", async () => {
+  const claimed = claimedFrom(jobDoc(singleParts()), "motor");
+  const col = fakeCollection(claimed);
+  const { deps } = makeDeps(col, { policy: [{ _id: "policy1" }, SAVED], run: () => Promise.reject(new Error(STALL)) });
+  deps.jobTimeoutMs = 60000;
+  await runner.runPartJob(deps, claimed);
+  const motor = partOf(col.state.doc, "motor");
+  assert.equal(motor.status, "failed_post_submission");
+  assert.equal(motor.nextRetryAt == null, true);
+  assert.match(motor.lastError, /stopped responding/);
+  assert.match(motor.lastError, /R14102628432/);
+});
+
+test("the window was closed under a stuck run: its 'invalid session id' result is reported as the stall, with the picture", async () => {
+  const claimed = claimedFrom(jobDoc(singleParts()), "motor");
+  const col = fakeCollection(claimed);
+  const { deps } = makeDeps(col, {
+    policy: [{ _id: "policy1" }, { _id: "policy1" }],
+    run: () => Promise.resolve({ success: false, error: "invalid session id", stage: "login-form" }),
+  });
+  deps.jobTimeoutMs = 60000;
+  await stallWatch.run(String(claimed._id), async () => {
+    const state = stallWatch._runs.get(String(claimed._id));
+    state.fired = new Error(STALL);
+    state.photo = { screenshotUrl: "https://s3/stalled.png", screenshotKey: "screenshots/stalled/k.png" };
+    await runner.runPartJob(deps, claimed);
+  });
+  const motor = partOf(col.state.doc, "motor");
+  assert.equal(motor.status, "pending");
+  assert.match(motor.lastError, /did not finish in 1\.5 minutes/);
+  const log = (col.state.doc.errorLogs || []).at(-1) || {};
+  assert.equal(log.screenshotUrl, "https://s3/stalled.png");
+});
