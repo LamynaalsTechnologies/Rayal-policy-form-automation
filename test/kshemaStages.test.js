@@ -272,3 +272,55 @@ for (const file of [
     assert.match(fill, /hadError = !\(outcome && outcome\.success === true\);\s*(?:\/\/[^\n]*\n\s*)*if \(isHoldStop\(outcome\)\) hadError = false;/);
   });
 }
+
+/* ------------------- an error toast on the saved page (2026-10-22) ------------------- */
+
+test("openSavedProposal: 'Policy not assigned to you/team' stops the run at once with the portal's words, no colon", async () => {
+  const driver = fakePage({ kyc: 0 });
+  const r = await quiet(() =>
+    ks.openSavedProposal(driver, { proposalLink: LINK }, {
+      ...clock(),
+      loaderVisible: async () => false,
+      readStep: async () => null,
+      readToast: async () => ({ text: "Policy not assigned to you/team", isError: true }),
+    })
+  );
+  assert.equal(r.ok, false, "even though the KYC button is on the page");
+  assert.equal(r.toast, "Policy not assigned to you/team");
+  assert.match(r.error, /^KSHEMA refused the saved proposal page and said "Policy not assigned to you\/team"/);
+  assert.match(r.error, /another KSHEMA user or team/);
+  assert.match(r.error, /Set Proposal back to Pending in History to make a new quote$/);
+  assert.doesNotMatch(r.error, /:/);
+});
+
+test("openSavedProposal: a toast that shows up a few seconds in is caught too; a harmless one is ignored", async () => {
+  let polls = 0;
+  const c = clock();
+  const late = await quiet(() =>
+    ks.openSavedProposal(fakePage({}), { proposalLink: LINK }, { // a page still without buttons
+      ...c,
+      loaderVisible: async () => false,
+      readStep: async () => null,
+      readToast: async () => (++polls >= 4 ? { text: "Something went wrong", isError: true } : null),
+    })
+  );
+  assert.equal(late.ok, false);
+  assert.ok(c.now() < 10000, "it did not wait out the whole minute");
+  assert.doesNotMatch(late.error, /another KSHEMA user/, "the user hint is only for an 'assigned' message");
+
+  const fine = await quiet(() =>
+    ks.openSavedProposal(fakePage({ kyc: 0 }), { proposalLink: LINK }, {
+      ...clock(),
+      loaderVisible: async () => false,
+      readStep: async () => null,
+      readToast: async () => ({ text: "Welcome back", isError: false, isSuccess: true }),
+    })
+  );
+  assert.equal(fine.ok, true);
+});
+
+test("the toast reader counts 'not assigned' as an error", () => {
+  const { classifyToast } = require(path.join(ROOT, "fullPolicycompany", "kshema", "kshemaToast.js"));
+  assert.equal(classifyToast("Policy not assigned to you/team").isError, true);
+  assert.equal(classifyToast("Quote saved successfully").isError, false);
+});

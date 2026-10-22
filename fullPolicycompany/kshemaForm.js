@@ -487,13 +487,14 @@ async function waitForLoginOutcome(driver, timeoutMs, pollMs = 400) {
  *   the path alone (login_rejected / dashboard / exception ...)
  * @returns {Promise<{screenshotUrl: string|null, screenshotKey: string|null}>}
  */
-async function captureScreenshot(driver, name, data = {}, stage = "error") {
+async function captureScreenshot(driver, name, data = {}, stage = "error", readyImage = null) {
   const result = { screenshotUrl: null, screenshotKey: null };
   if (!driver) return result;
 
   let image;
   try {
-    image = await driver.takeScreenshot();
+    // readyImage: a picture the caller already made (the payment QR card) - uploaded as is, no screenshot of the page
+    image = readyImage || (await driver.takeScreenshot());
   } catch (e) {
     warn(`Could not take a screenshot: ${e.message}`);
     return result;
@@ -910,8 +911,8 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     // The capture hook fires while a failing dropdown is STILL OPEN. For an
     // empty locality list that is the whole of the evidence — closed, the
     // screenshot shows an ordinary-looking form and says nothing about why.
-    const capture = (name, stage) =>
-      captureScreenshot(driver, `${name}_${jobId}`, data, stage);
+    const capture = (name, stage, image) =>
+      captureScreenshot(driver, `${name}_${jobId}`, data, stage, image);
 
     if (resume.skipProposal) { // step 1 done by an earlier run - log in again (done above) and open its saved page
     proposalPage = await openSavedProposal(driver, resume);
@@ -1553,6 +1554,9 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
                         fileName: `payment_qr_${jobId}.png`,
                         key: paymentResult.qrScreenshotKey,
                         location: paymentResult.qrScreenshotUrl || null,
+                        // When the QR stops being usable (5 minutes after it was made). The View page counts down to it and the
+                        // server stops handing the picture out after it. Missing on older policies = shown as before.
+                        expiresAt: paymentResult.qrExpiresAt ? new Date(paymentResult.qrExpiresAt) : null,
                       },
                     }
                   : {}),

@@ -203,6 +203,13 @@ Detail for the first four is in `multiCompany/README.md`: §13 (TP-only flow; §
 - **Payment QR screenshot saved.** The Razorpay QR screenshot reached S3 but nothing recorded it. Both KSHEMA forms now save it (`{ fileName, key, location }`) as `paymentQrScreenshot` next to the payment link; the backend model
   has the field and the single-policy API makes a fresh presigned link; the View page has a "Payment QR" card (view + download PNG). **Policies that ran before this have no key**, so no card for them
   (their images are still in S3 under `screenshots/kshema_payment_qr_...`; a one-time attach script was offered, not written).
+- **Payment QR is now the QR alone, on its own card, with a 5-minute expiry (2026-10-22).** `fullPolicycompany/kshema/kshemaPaymentQr.js` (shared by both
+  KSHEMA flows) finds the QR inside the Razorpay iframe (a candidate must carry a sign it is the QR: "scan ... qr" text, a canvas, a data: image or "qr" in its
+  class/alt/id; the elephant artwork is refused), takes its own pixels (else a crop), draws a card (company name, QR, "Valid for 5 minutes", expiry clock in IST)
+  in a throw-away Chrome tab and photographs that. No image library, no `.env` switch. If the QR cannot be found or the card cannot be drawn, the old whole-popup
+  picture is stored instead (the operator still gets a QR). `capture(name, stage, image)` now takes a ready-made picture. Both forms save
+  `paymentQrScreenshot.expiresAt` (QR made + 5 min). Tests: `test/kshemaPaymentQr.test.js` (+ `kshemaPaymentQrSaved`); deliberate breaks caught.
+  **Not run on the portal yet** - the real element inside Razorpay's iframe is unverified: after the first run read the log line "Found the QR: ..." and check the card.
 - **Policy dates are India time** (`lib/policyDates.js`): DOB, nominee DOB and registration date were one day early on a UTC server; `formatPolicyDate` exists in both repos — deploy both.
 
 ## 7. Tests, mutation checks and drift guards

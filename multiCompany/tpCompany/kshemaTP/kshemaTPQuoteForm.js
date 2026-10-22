@@ -4,6 +4,7 @@
  * from the original anywhere else, so a portal fix made in the original has to be ported here.
  *
  *   [TP] 1  require depth: the shared helpers are required from fullPolicycompany/kshema/, the form from ./kshemaTPForm.
+ *           (kshemaPaymentQr.js, the payment QR card, is another shared helper - same require-depth change.)
  *   [TP] 3  the Product Type is not the hard-coded "Two Wheeler-Bundled": it is chosen by tpProduct.js (exact text from
  *           KSHEMA_TP_PRODUCT_TYPE, read back), at the same place in the order. While that text is not set, or
  *           KSHEMA_TP_FORM_ENABLED is false, the run stops there and lists the portal's options (stopBeforeProduct.js).
@@ -1935,6 +1936,7 @@ async function proceedToPayment(driver, capture = null, jobId = "") {
     
     let qrScreenshotUrl = null;
     let qrScreenshotKey = null;
+    let qrExpiresAt = null;
     // Why the Razorpay / QR part did not finish (the payment page itself was reached) — noted on the payment step.
     let qrError = null;
 
@@ -2107,10 +2109,13 @@ async function proceedToPayment(driver, capture = null, jobId = "") {
 
       // Capture screenshot
       if (capture) {
-        log("   📸 Capturing Payment QR Code screenshot...");
-        const shot = await capture("payment_qr", `kshema_payment_qr_${jobId}`);
+        log("   📸 Capturing Payment QR Code...");
+        // Only the QR, on a card with the company name and its 5-minute expiry (kshemaPaymentQr.js, shared by both flows).
+        const qr = await require("../../../fullPolicycompany/kshema/kshemaPaymentQr").captureQrCard(driver, capture, jobId); // [TP] 1
+        const shot = qr.shot;
+        qrExpiresAt = qr.expiresAt;
         if (shot && shot.screenshotUrl) {
-          log(`   ✓ Saved Payment QR Code screenshot: ${shot.screenshotUrl}`);
+          log(`   ✓ Saved Payment QR Code picture: ${shot.screenshotUrl}`);
           qrScreenshotUrl = shot.screenshotUrl;
           qrScreenshotKey = shot.screenshotKey;
         }
@@ -2127,7 +2132,7 @@ async function proceedToPayment(driver, capture = null, jobId = "") {
     const paymentUrl = await driver.getCurrentUrl();
     log(`   ✓ Payment Link captured: ${paymentUrl}`);
 
-    return { ok: true, paymentUrl, qrScreenshotUrl, qrScreenshotKey, qrError };
+    return { ok: true, paymentUrl, qrScreenshotUrl, qrScreenshotKey, qrExpiresAt, qrError };
   } catch (e) {
     return { ok: false, error: `Could not proceed to payment: ${e.message}` };
   }

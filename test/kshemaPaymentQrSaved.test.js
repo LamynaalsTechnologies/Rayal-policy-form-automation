@@ -18,8 +18,9 @@ for (const file of FORMS) {
   test(`${path.basename(file)}: the payment QR screenshot is saved on the policy with its S3 key, next to the payment link`, () => {
     const src = fs.readFileSync(file, "utf8");
     const set = src.slice(src.indexOf("paymentLink: paymentResult.paymentUrl"));
-    const block = set.slice(0, 900);
+    const block = set.slice(0, 1500);
     assert.match(block, /paymentQrScreenshot:\s*{/);
+    assert.match(block, /expiresAt:\s*paymentResult\.qrExpiresAt\s*\?\s*new Date\(paymentResult\.qrExpiresAt\)\s*:\s*null/, "the QR's expiry is saved with it");
     assert.match(block, /key:\s*paymentResult\.qrScreenshotKey/);
     assert.match(block, /fileName:\s*`payment_qr_\$\{jobId\}\.png`/);
     assert.match(block, /paymentResult\.qrScreenshotKey\s*\?/, "only when there is a key (an upload that failed saves nothing)");

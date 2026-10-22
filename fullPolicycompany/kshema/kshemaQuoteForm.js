@@ -1852,6 +1852,7 @@ async function proceedToPayment(driver, capture = null, jobId = "") {
     
     let qrScreenshotUrl = null;
     let qrScreenshotKey = null;
+    let qrExpiresAt = null;
     // Why the Razorpay / QR part did not finish (the payment page itself was reached) — noted on the payment step.
     let qrError = null;
 
@@ -2024,10 +2025,13 @@ async function proceedToPayment(driver, capture = null, jobId = "") {
 
       // Capture screenshot
       if (capture) {
-        log("   📸 Capturing Payment QR Code screenshot...");
-        const shot = await capture("payment_qr", `kshema_payment_qr_${jobId}`);
+        log("   📸 Capturing Payment QR Code...");
+        // Only the QR, on a card with the company name and its 5-minute expiry (kshemaPaymentQr.js, shared by both flows).
+        const qr = await require("./kshemaPaymentQr").captureQrCard(driver, capture, jobId);
+        const shot = qr.shot;
+        qrExpiresAt = qr.expiresAt;
         if (shot && shot.screenshotUrl) {
-          log(`   ✓ Saved Payment QR Code screenshot: ${shot.screenshotUrl}`);
+          log(`   ✓ Saved Payment QR Code picture: ${shot.screenshotUrl}`);
           qrScreenshotUrl = shot.screenshotUrl;
           qrScreenshotKey = shot.screenshotKey;
         }
@@ -2044,7 +2048,7 @@ async function proceedToPayment(driver, capture = null, jobId = "") {
     const paymentUrl = await driver.getCurrentUrl();
     log(`   ✓ Payment Link captured: ${paymentUrl}`);
 
-    return { ok: true, paymentUrl, qrScreenshotUrl, qrScreenshotKey, qrError };
+    return { ok: true, paymentUrl, qrScreenshotUrl, qrScreenshotKey, qrExpiresAt, qrError };
   } catch (e) {
     return { ok: false, error: `Could not proceed to payment: ${e.message}` };
   }

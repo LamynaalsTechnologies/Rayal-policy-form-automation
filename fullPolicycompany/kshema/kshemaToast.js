@@ -67,7 +67,10 @@ const ERROR_WORDS = [
   "limits", "please provide",
   // 2026-10-16: "The Liability product type is not available for the selected RTO state." after Save and Continue
   // was read as harmless ("unavailable" is in the list, "not available" was not) and the run went on. [TP] 12
-  "not available", "not allowed", "not eligible", "not permitted", "not supported", "not valid"
+  "not available", "not allowed", "not eligible", "not permitted", "not supported", "not valid",
+  // 2026-10-22: "Policy not assigned to you/team" when a resumed run opens the saved proposal page of a proposal that is
+  // not this KSHEMA user's. It was read as harmless, so the run waited a minute for buttons that never came.
+  "not assigned"
 ];
 
 /** Words that clearly mean it worked — checked first so "logged in successfully" is not caught by "success"-adjacent noise. */

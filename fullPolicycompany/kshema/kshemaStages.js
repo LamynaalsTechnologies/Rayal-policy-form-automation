@@ -138,8 +138,19 @@ function savedPageNotOpenMessage(title = "") {
   );
 }
 
+/** The sentence when KSHEMA answered the saved address with an error toast (no colon, no address). */
+function savedPageRefusedMessage(toastText = "") {
+  const said = noColon(toastText);
+  return (
+    `KSHEMA refused the saved proposal page and said "${said}"` +
+    (/assigned/i.test(said) ? ". The proposal may belong to another KSHEMA user or team, so check it in KSHEMA" : "") +
+    ". Set Proposal back to Pending in History to make a new quote"
+  );
+}
+
 /**
  * A resumed run, after the new login: open the saved proposal page and check it really is that page.
+ * An error toast on the way (for example "Policy not assigned to you/team") stops the run at once with the portal's words.
  *
  * @param {Object} resume  loadKshemaResume's plan (proposalLink, skipKyc)
  * @returns {Promise<{ok:boolean, url?:string, landedOn?:"kyc"|"payment", step?:string|null, error?:string, pageUrl?:string}>}
@@ -150,6 +161,7 @@ async function openSavedProposal(driver, resume, deps = {}) {
   const waitMs = deps.waitMs || SAVED_PAGE_WAIT_MS;
   const loaderVisible = deps.loaderVisible || (() => require("./kshemaAfterFinalize").isLoaderVisible(driver));
   const readStep = deps.readStep || require("./kshemaSaveVerify").readActiveStep;
+  const readToast = deps.readToast || require("./kshemaToast").readToast;
   const link = String((resume && resume.proposalLink) || "").trim();
 
   if (!link) return { ok: false, landedOn: null, error: savedPageNotOpenMessage() };
@@ -158,6 +170,16 @@ async function openSavedProposal(driver, resume, deps = {}) {
 
   const started = now();
   for (;;) {
+    // KSHEMA answers a saved address it will not show with a toast, which goes away after a few seconds - read it on every poll.
+    const toast = await readToast(driver).catch(() => null);
+    if (toast && toast.text && toast.isError) {
+      let pageUrl = "";
+      try {
+        pageUrl = await driver.getCurrentUrl();
+      } catch (e) { }
+      warn(`   ✖ KSHEMA refused the saved proposal page - "${noColon(toast.text)}"`);
+      return { ok: false, landedOn: null, pageUrl, toast: toast.text, error: savedPageRefusedMessage(toast.text) };
+    }
     const landedOn = await readLanding(driver, resume, { loaderVisible });
     if (landedOn) {
       const step = await readStep(driver);
@@ -213,5 +235,6 @@ module.exports = {
   readLanding,
   openSavedProposal,
   savedPageNotOpenMessage,
+  savedPageRefusedMessage,
   paymentStageOf,
 };
