@@ -168,7 +168,7 @@ test("form copy: checkpoints, no inline Brisk, own stage label and the multiComp
   const source = codeOf(read(FORM_COPY));
   const submit = at(source, "await submitQuoteForm(driver)");
   const quoteCrumb = at(source, 'Breaker.checkpoint("KSHEMA TP/quote")');
-  const pay = at(source, "await proceedToPayment(driver, capture, jobId)");
+  const pay = at(source, "await proceedToPayment(driver, capture, jobId, { paymentMethod: data.Paymentmethod })");
   const payCrumb = at(source, 'Breaker.checkpoint("KSHEMA TP/payment")');
   assert.ok(quoteCrumb < submit, "the quote checkpoint is before the quote is submitted");
   assert.ok(payCrumb < pay, "the payment checkpoint is before the payment starts");

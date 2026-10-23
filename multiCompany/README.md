@@ -489,7 +489,8 @@ The CLI sets `MULTI_COMPANY_AUTOMATION_ENABLED=true` for its own process only (i
   not known, so until `KSHEMA_TP_PRODUCT_TYPE` is set a run lists the portal's options and stops. What the TP quote page hides
   (IDV, the add-ons page) is learnt from the Breaker runs (`KSHEMA TP/product`, `/quote`, `/payment`) — nothing here is proven on
   the live portal yet.
-- **TP → OD hand-off** (the TP policy's number and dates reaching the OD form) — **not built**, see §12.2. Ordering is (§4.0); the data
+- **TP → OD hand-off** (the TP policy's number and dates reaching the OD form) — **entered by hand since 2026-10-22** (Reliance OD waits
+  for them), read automatically from the TP portal **not built**, see §12.2. Ordering is (§4.0); the data
   is not passed yet, and National's flow reads no number or date from the portal at all.
 - **Multi-company Brisk PA waits for the OD part** to succeed (same as the bundled flows, which buy Brisk only after the
   portal part). Until the OD handler can finish (Reliance OD is held at its product, §15; National OD and KSHEMA OD are login-only), that PA stays "waiting for OD".
@@ -558,6 +559,11 @@ That is the whole rule: **TP first, OD waits for it** (§4.0). TP and OD never r
 "Waiting for TP to finish" and starts by itself once the TP has been fixed and bought.
 
 ### 12.2 The hand-off — what the TP has to give the OD, and what exists today  *(NOT BUILT YET)*
+
+> **2026-10-22 — entered BY HAND for now.** The four values are saved on the policy (`existingTpPolicyNumber`, `existingTpInsurer`,
+> `existingTpStartDate`, `existingTpEndDate`): typed on the form for OD only, entered in Edit → Status (when the TP part's three steps are all Completed) or
+> Edit → TP policy details for two insurers. A Reliance OD part **never starts without all four** (`lib/existingTpGate.js`, see the
+> automation README "Reliance OD waits for the existing TP policy"). Reading them from the TP portal automatically is still not built.
 
 | OD form needs | Where it comes from | State |
 |---|---|---|
@@ -664,6 +670,7 @@ the original fails the test until it is ported.
   held browser. Copy the liability-only option's text into `.env`, restart, run the policy again.
 - **With the text set:** chooses it (exact, read back), fills the rest, submits the quote, proposal, nominee, KYC, and ends at the
   Razorpay QR with the payment link saved — like the full-company flow. The job is then `completed` and the OD is released.
+- **Link vs wallet (2026-10-22)**: the TP copy follows the full flow — a link policy ends at the Razorpay QR as above, a **wallet** policy chooses KSHEMA's **CD Balance** card and is **paid from it** (premium vs balance, note first, one press, the policy page within 40 s, the number and the PDF; errors for "not enabled" / no balance) — see the automation README "KSHEMA link and wallet are separate, and a wallet policy is PAID". A failed or blocked TP keeps the Reliance OD waiting. The TP's own policy number is kept on the part (`parts[tp].result.policyNumber`); it is NOT copied into the Reliance OD's existing-TP fields yet (Reliance OD is paused).
 - The **Mongo writes** (`proposalPdf`, `kycLink`, `paymentLink`) are kept so the app still shows the payment link. They write the
   *policy* document, not the part. Harmless while the Reliance OD is login-only; they **must become per-part** before the OD form is
   built, or the OD will overwrite the TP's link.

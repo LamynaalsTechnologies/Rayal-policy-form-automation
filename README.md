@@ -348,7 +348,7 @@ The owner: KYC and payment split into three steps like Reliance, Hold works, a r
 - **The steps**:
   1. **Proposal**: login, quote, add-ons, proposal PDF, nominee, the 2nd Save and Finalize. Done when the proposal page shows the KYC button. Its address is saved **at that moment** (`proposalLink`, and the step's `link`). Before, it was saved only after the KYC.
   2. **KYC**: on that page. A failure stops there, as before.
-  3. **Payment**: Make Payment, Razorpay, the QR. Done = the payment page was reached (the owner's rule). A missing QR picture is noted on the step; a run that did not reach the page marks it Failed with the reason.
+  3. **Payment**: Make Payment, Razorpay, the QR. Done = the payment page was reached (the owner's rule). A missing QR picture is noted on the step; a run that did not reach the page marks it Failed with the reason. **This is the LINK policy. A wallet policy takes a different road after Make Payment — see "KSHEMA link and wallet" below.**
 - **Where it is stored**: the same `onlinePolicy.relianceStages.<part>` as Reliance (a part key belongs to one insurer). KSHEMA has no proposal number, so `lib/relianceStagesCore.js planResume` (both copies) now also skips the proposal when step 1 is completed with its saved `link`.
 - **Resume**: `fullPolicycompany/kshema/kshemaStages.js openSavedProposal`. A fresh login (an empty profile every run), then `driver.get(saved page)`. It then waits up to 60 s for the KYC button or an enabled Make Payment.
   - If neither shows, the run stops (not retried) with *"The saved KSHEMA proposal page did not open after the new login. Set Proposal back to Pending in History to make a new quote"*.
@@ -418,3 +418,40 @@ Only the shared core changed: `lib/relianceStagesCore.js` gained `whyNotSetByHan
 - The hold-on-finish entry carries `kind: "held"` and `by`.
 
 **Tests:** `test/runHistory.test.js` (9).
+
+### Reliance OD waits for the existing TP policy (2026-10-22)
+Reliance's "Two Wheeler Own Damage" product asks for the customer's existing third-party policy: number, insurer (KSHEMA / National),
+start date, end date. They are saved on the policy (`existingTpPolicyNumber`, `existingTpInsurer`, `existingTpStartDate`,
+`existingTpEndDate`) and come in the job data as text (dates `DD-MM-YYYY`, India time; `server.js buildFormDataFromPolicy` and the
+backend's job builder).
+- **The rule (the owner's):** a Reliance `od` portal part (OD only, or the OD half of a two-insurer policy) **never starts without all
+  four**. `lib/partRunner.js` reads them from the POLICY right before the run (they are often saved after the job was queued — the
+  policy wins over the job's copy) and `lib/existingTpGate.js` stops the part before any login or browser: `stopped`, code E101, stage
+  `waiting-tp-details`, *"Reliance OD is waiting for the TP policy details (missing …). Enter them in Edit then TP policy details, and
+  the OD runs again"*. No retry loop. The backend queues the OD part again when the details are saved.
+- Not gated: the TP part, the bundled full-company flow, other insurers' OD parts.
+- **Not built yet:** filling these four on Reliance's own-damage form (the next step; the owner's step list is `plan-OD-Relience.txt`
+  at the repo root).
+- Tests: `test/existingTpGate.test.js` (9; the fake policy read honours the projection like MongoDB). `test/helpers.js formData()` now
+  carries TP details, since every two-insurer test job runs Reliance OD. 5 of 5 deliberate breaks in a copy were caught.
+
+## KSHEMA link and wallet are separate, and a wallet policy is PAID from CD Balance (2026-10-22 / 23)
+KSHEMA's "Choose Payment Method" page (what Make Payment opens) has two cards: **Razorpay** ("Secure payment via Razorpay", the customer's QR) and **CD Balance** ("Pay directly from your CD account", the broker's own deposit = the wallet). For both `fullPolicycompany/kshemaForm.js` (KSHEMA OD+TP) and the TP copy `multiCompany/tpCompany/kshemaTP/kshemaTPForm.js` (byte-identical change, drift guard green; the full flow's Brisk line is the only difference, as before).
+- **Link** (`Paymentmethod` = "link"): exactly as it was — Razorpay, Show QR, Continue & Pay, the QR card, the step completed.
+- **Wallet** ("wallet", or blank = the backend default; `isWalletPayment` of `fullPolicycompany/reliance/relianceWalletHold.js`). **It really pays.**
+  1. **The CD Balance card** (`fullPolicycompany/kshema/kshemaWalletPayment.js chooseCdBalance`, called from both `proceedToPayment`): the page address is read first, the cards settle, CD Balance is chosen. KSHEMA's red line ("Account not found. Username and broker code combination does not exist") or a switched-off card = **error** "The CD Balance option is not enabled for this KSHEMA account …"; no card, no "Available balance", zero or less, a click that does not take = errors too. Nothing is paid in this part.
+  2. **Pay with CD Balance** (`fullPolicycompany/kshema/kshemaWalletIssue.js payWithCdBalanceAndIssue`, the owner's steps, built like Reliance's wallet issue and reusing its store / gate / PDF wait):
+     - the premium in KSHEMA's top bar ("INR 6,437") against the CD balance — **lower = error, nothing pressed** (the owner's choice). The premium is kept as `insurerPayable.<part>` {insurer KSHEMA, method "CD Balance"} — the View page shows it beside our calculation as "KSHEMA TP · CD Balance amount". Not readable → logged, KSHEMA checks itself;
+     - the button shown and enabled, no KSHEMA error toast;
+     - **the note FIRST**: `walletPayment` (`walletPayment_od` / `_tp` for a part) `= {state "submit-pressed", insurer KSHEMA, method "CD Balance", amountPaise, paymentPage, jobId, at}`, a guarded write — not saved = not pressed;
+     - **pressed ONCE**, then KSHEMA's policy page (`/app/policy?policy_id=…&err=0&msg=Paymentupdated`) is waited for **40 s at most** (a line every 10 s; a new tab is followed). An error toast (after a 5 s grace), no page, `err≠0` or the login page → the note becomes `unconfirmed`, the run ends `failed_post_submission`: *"Pay with CD Balance was pressed for ₹… and … The payment may have gone through. Check the policy at KSHEMA before running it again - it is marked so that it is not run again by itself"* (**re-runs blocked until checked** — the owner's choice);
+     - the page opens → note `issued` with the page address; the **Policy Number** is read from the Summary table (the cell after "Policy Number") and saved at once on the online policy and the Policy List record (first writer wins; also kept on the part);
+     - the **policy PDF**: the `dnld-download-policy` icon, a NEW PDF in the job's download folder (the proposal PDF already there is not taken), stored in the bucket's `Policy/` folder (no expiry), set as the Policy List `policyFile` and the online policy's `mergedPolicyPdf` (the View page's policy PDF); note gets `pdfStoredAt`;
+     - payment step **completed** (`mode: "wallet"`, steps locked — money moved), the part **completed** with its number. Brisk PA is not made inline for a wallet policy: the Brisk part runs after (it was left pending for that).
+  3. **The gate at the start of every KSHEMA run** (before any browser): `submit-pressed` / `unconfirmed` → refused (never pressed twice); `issued` with number + PDF stored → completed at once; `issued` with its page kept → **recovered**: log in, open the saved policy page, read the number (must be the note's), save it, fetch the PDF (skipped when stored) — never pays again.
+  - **To clear a blocked policy** (after checking at KSHEMA whether the CD account was charged): unset the `walletPayment` (or `walletPayment_od` / `walletPayment_tp`) field on the online policy — the same as Reliance. With the policy really issued, rather set the note to `state: "issued"` with its `policyPageUrl` so a re-run finishes it.
+  - History / Status refusals now name the insurer that took the money ("paid from the wallet at KSHEMA") — `lib/relianceStagesCore.js walletInsurerOf`, byte-identical in the backend.
+  - **No `.env` switch** (the owner's rule).
+- Facts the code is built on, all from the owner's pasted markup and screenshot: the CD card `<button aria-disabled>` / `<p class="font-medium">CD Balance</p>` / dot `bg-primary` / "Available balance ₹65,329"; the red `text-destructive` line; `<button data-slot="button">Pay with CD Balance</button>`; the policy page URL; the Summary grid `.summary-item-cell`; `mat-icon[data-iid="dnld-download-policy"]`. **Run in real Chrome through Selenium** on local replicas (localhost): the card step (9 situations) and the whole pay step (premium read, one press, the page after 3 s, the number, the new PDF downloaded and stored; an error toast → unconfirmed after one press).
+- Tests: `test/kshemaWalletPayment.test.js` (33), `test/kshemaWalletIssue.test.js` (28 — note before press, one press, 40 s, toasts, err flag, new tab, number checks, PDF new-file rule, upload failure, gate, recovery, the core wording); **CD card 23 of 23 and pay step 19 of 19 deliberate breaks in a copy caught**.
+- **Not proven live**: a confirmation dialog after Pay (it would time out → blocked, nothing double-paid); the top-bar premium markup; the download icon on the real page; opening the saved policy page after a fresh login (recovery).

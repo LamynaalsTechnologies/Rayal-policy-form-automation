@@ -104,6 +104,30 @@ async function keepProposalPage(data, url, { jobId = "", MongoClient, now = new 
   }
 }
 
+/**
+ * A WALLET policy's payment page address, kept on the policy as "Make Payment Page" (paymentLink) the moment it was read -
+ * whatever the CD Balance card then showed (kshemaWalletPayment.js). Never throws; false when nothing was saved.
+ */
+async function keepPaymentPage(data, url, { jobId = "", MongoClient, now = new Date() } = {}) {
+  const link = String(url || "").trim();
+  if (!/^https?:\/\//i.test(link)) return false;
+  const policyId = stages.policyIdOf(data);
+  if (!policyId) {
+    warn(`[${jobId}] ⚠️ No policy id on the job - the KSHEMA payment page address was not saved.`);
+    return false;
+  }
+  try {
+    const result = await stages.withPolicies(MongoClient, (onlinePolicy) =>
+      onlinePolicy.updateOne({ _id: policyId }, { $set: { paymentLink: link, updatedAt: now } })
+    );
+    log(`[${jobId}] 📌 KSHEMA payment page saved as the Make Payment Page (matched ${result.matchedCount})`);
+    return result.matchedCount > 0;
+  } catch (error) {
+    warn(`[${jobId}] ⚠️ Could not save the KSHEMA payment page address - ${noColon(error && error.message)}`);
+    return false;
+  }
+}
+
 async function shownButton(driver, xpath, { mustBeEnabled = false } = {}) {
   try {
     const found = await driver.findElements(By.xpath(xpath));
@@ -205,11 +229,28 @@ async function openSavedProposal(driver, resume, deps = {}) {
 /**
  * Step 3's record from proceedToPayment's result. Done = the payment page was reached (the owner's rule): an ok result
  * always carries the page address; the QR picture is noted when it is missing (the Razorpay part did not finish).
+ * A wallet policy never gets here as done: its result stays "pending" (nothing is paid at KSHEMA yet).
  *
- * @returns {{status:"completed"|"failed", extra:Object}}
+ * @returns {{status:"completed"|"failed"|"pending", extra:Object}}
  */
 function paymentStageOf(paymentResult) {
   const r = paymentResult || {};
+  // A WALLET policy: the payment page was reached and the CD Balance card tried (kshemaWalletPayment.js), but nothing is paid,
+  // so the step stays pending - recorded as a wallet payment with the page's address and what happened.
+  if (r.ok && r.wallet) {
+    return {
+      status: "pending",
+      extra: {
+        mode: "wallet",
+        ...(r.paymentUrl ? { link: r.paymentUrl } : {}),
+        note: noColon(r.note || "wallet - stopped on the payment page, nothing paid"),
+      },
+    };
+  }
+  if (r.wallet && !r.ok) {
+    // A wallet policy that cannot use CD Balance (not enabled, no balance ...): the step failed, recorded as a wallet payment.
+    return { status: "failed", extra: { mode: "wallet", error: noColon(r.error || "The CD Balance option could not be used") } };
+  }
   if (!r.ok || !r.paymentUrl) {
     return { status: "failed", extra: { error: noColon(r.error || "The payment page was not reached") } };
   }
@@ -232,6 +273,7 @@ module.exports = {
   markStage,
   awaitProposalPage,
   keepProposalPage,
+  keepPaymentPage,
   readLanding,
   openSavedProposal,
   savedPageNotOpenMessage,

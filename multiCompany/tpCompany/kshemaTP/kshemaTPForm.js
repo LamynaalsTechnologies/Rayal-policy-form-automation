@@ -60,9 +60,14 @@ const {
   markStage,
   awaitProposalPage,
   keepProposalPage,
+  keepPaymentPage,
   openSavedProposal,
   paymentStageOf,
 } = require("../../../fullPolicycompany/kshema/kshemaStages");
+// Link and wallet are separate: a wallet policy tries the CD Balance card and stops there, it never makes the Razorpay QR
+const { isWalletPayment } = require("../../../fullPolicycompany/kshema/kshemaWalletPayment");
+// A wallet policy pays with CD Balance once (a note first), then keeps the policy number and PDF; a re-run never pays again
+const { payWithCdBalanceAndIssue, recoverKshemaIssue, checkKshemaWalletGate, decideKshemaGate, failureResultOf } = require("../../../fullPolicycompany/kshema/kshemaWalletIssue");
 // Shared with Reliance and National — the CPA/RSA certificate is Brisk's, not
 // the insurer's, so the same three calls serve all three companies.
 const {
@@ -640,6 +645,20 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     };
   }
 
+  // A CD Balance payment already pressed for this policy is never pressed again (kshema/kshemaWalletIssue.js) - read before
+  // any browser. An ISSUED one whose number and PDF are stored is simply completed; one whose number or PDF is missing is
+  // finished from its saved policy page after the login (below). No note = the normal run.
+  const walletGate = decideKshemaGate(await checkKshemaWalletGate(data, jobId), data);
+  if (walletGate.action === "refuse") {
+    err(walletGate.message);
+    return { success: false, stage: "post-submission", postSubmissionFailed: true, retryable: false, error: walletGate.message };
+  }
+  if (walletGate.action === "done") {
+    log(`✅ Policy ${walletGate.number} was issued from CD Balance earlier and its PDF is stored - nothing is paid again, the run completes`);
+    await markStage(data, "payment", "completed", { mode: "wallet", link: walletGate.marker.policyPageUrl || null, policyNumber: walletGate.number }, { jobId });
+    return { success: true, stage: "completed", policyId: data.policyId || data._id, policyNumber: walletGate.number, walletAlreadyIssued: true };
+  }
+
   try {
     jobBrowser = await createKshemaJobBrowser(jobId);
     // Hand the browser to fillKshemaForm: ITS finally closes the window and deletes this job's profile. Without this
@@ -909,6 +928,44 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     // A step an earlier run finished is not done again (fullPolicycompany/kshema/kshemaStages.js). Hold stops the
     // run only at these top-level points — a stop thrown inside a helper's try/catch would be swallowed there.
     await stopIfHeld(data, "after the login");
+
+    // An ISSUED CD Balance payment whose number or PDF was not stored: finished from the saved policy page - never paid again.
+    if (walletGate.action === "recover") {
+      disarmLiveHold(data); // past the payment: neither a Hold nor the stuck-step watch may cut it
+      const recovered = await recoverKshemaIssue({
+        driver,
+        data,
+        jobId,
+        marker: walletGate.marker,
+        downloadDir: jobBrowser.profileInfo && jobBrowser.profileInfo.downloadDir,
+      });
+      if (!recovered.ok) {
+        err(recovered.error);
+        const recoverShot = await captureScreenshot(driver, `kshema_wallet_recover_failed_${jobId}`, data, "wallet_recover_failed");
+        return {
+          success: false,
+          ...failureResultOf(recovered),
+          loggedIn: true,
+          browserLeftOpen: true,
+          pageUrl: await driver.getCurrentUrl().catch(() => null),
+          screenshotUrl: recoverShot.screenshotUrl,
+          screenshotKey: recoverShot.screenshotKey,
+          _jobBrowser: jobBrowser,
+        };
+      }
+      await markStage(data, "payment", "completed", { mode: "wallet", link: recovered.policyPageUrl, policyNumber: recovered.policyNumber }, { jobId });
+      log(`🎉 KSHEMA policy ${recovered.policyNumber} finished from its saved policy page - nothing was paid again`);
+      return {
+        success: true,
+        stage: "completed",
+        policyId: data.policyId || data._id,
+        policyNumber: recovered.policyNumber,
+        ...(recovered.warning ? { documentUploadError: recovered.warning } : {}),
+        loggedIn: true,
+        pageUrl: recovered.policyPageUrl,
+      };
+    }
+
     const resume = await loadKshemaResume(data, { jobId });
 
     // Filled by step 1. A resumed run (step 1 finished earlier) leaves them empty.
@@ -1506,13 +1563,15 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
 
     const { proceedToPayment } = require("./kshemaTPQuoteForm");
     Breaker.checkpoint("KSHEMA TP/payment"); // [TP] 8
-    const paymentResult = await proceedToPayment(driver, capture, jobId);
+    const paymentResult = await proceedToPayment(driver, capture, jobId, { paymentMethod: data.Paymentmethod });
     // Done = the payment page was reached (the QR is the customer's to pay); a failure is recorded with its reason.
     const paymentStage = paymentStageOf(paymentResult);
     await markStage(data, "payment", paymentStage.status, paymentStage.extra, { jobId }); // step 3
 
     if (!paymentResult.ok) {
       err(paymentResult.error);
+      // WALLET policy that cannot use CD Balance: the payment page's address is still kept (kshemaWalletPayment.js)
+      if (paymentResult.wallet && paymentResult.paymentUrl) await keepPaymentPage(data, paymentResult.paymentUrl, { jobId });
       const paymentShot = await captureScreenshot(
         driver,
         `kshema_payment_failed_${jobId}`,
@@ -1594,6 +1653,47 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
         // close and leak the connection for the life of the process.
         if (client) await client.close().catch(() => {});
       }
+    }
+
+    // WALLET policy: CD Balance is chosen - Pay with CD Balance ONCE behind a note, KSHEMA's policy page, the policy number and
+    // the policy PDF (kshema/kshemaWalletIssue.js). It really pays: a run that pressed it is never pressed again by itself.
+    if (paymentResult.wallet) {
+      const issued = await payWithCdBalanceAndIssue({
+        driver,
+        data,
+        jobId,
+        choice: paymentResult,
+        downloadDir: jobBrowser && jobBrowser.profileInfo && jobBrowser.profileInfo.downloadDir,
+      });
+      if (!issued.ok) {
+        err(issued.error);
+        await markStage(data, "payment", "failed", { mode: "wallet", error: issued.error }, { jobId });
+        const walletShot = await captureScreenshot(driver, `kshema_wallet_payment_failed_${jobId}`, data, "wallet_payment_failed");
+        return {
+          success: false,
+          ...failureResultOf(issued),
+          ...(issued.policyNumber ? { policyNumber: issued.policyNumber } : {}),
+          loggedIn: true,
+          browserLeftOpen: true,
+          pageUrl: await driver.getCurrentUrl().catch(() => null),
+          pageTitle: quoteTitle,
+          screenshotUrl: walletShot.screenshotUrl,
+          screenshotKey: walletShot.screenshotKey,
+          _jobBrowser: jobBrowser,
+        };
+      }
+      await markStage(data, "payment", "completed", { mode: "wallet", link: issued.policyPageUrl, policyNumber: issued.policyNumber }, { jobId });
+      log(`🎉 KSHEMA policy ${issued.policyNumber} issued from CD Balance - its number and PDF are saved`);
+      return {
+        success: true,
+        stage: "completed",
+        policyId: data.policyId || data._id,
+        policyNumber: issued.policyNumber,
+        ...(issued.warning ? { documentUploadError: issued.warning } : {}),
+        loggedIn: true,
+        pageUrl: issued.policyPageUrl,
+        pageTitle: quoteTitle,
+      };
     }
 
     debug("=".repeat(60));

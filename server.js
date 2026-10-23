@@ -664,6 +664,11 @@ const buildFormDataFromPolicy = async (data) => {
       financierType: data?.financierType,
       financierName: data?.financierName,
       financierAddress: data?.financierAddress,
+      // The customer's existing TP policy — Reliance OD asks it (lib/existingTpGate.js)
+      existingTpPolicyNumber: data?.existingTpPolicyNumber || "",
+      existingTpInsurer: data?.existingTpInsurer || "",
+      existingTpStartDate: formatPolicyDate(data?.existingTpStartDate),
+      existingTpEndDate: formatPolicyDate(data?.existingTpEndDate),
       // Registration address
       isRegistrationAddressSame: data?.isRegistrationAddressSame,
       // Discount mapping (normalize multiple possible fields from Mongo)

@@ -1782,8 +1782,9 @@ module.exports = {
 /**
  * Wait for the loader to finish and click Make Payment on the original page.
  */
-async function proceedToPayment(driver, capture = null, jobId = "") {
+async function proceedToPayment(driver, capture = null, jobId = "", { paymentMethod } = {}) {
   const { clickElement } = require("./kshemaFields");
+  const { isWalletPayment, chooseCdBalance } = require("./kshemaWalletPayment");
   const { By } = require("selenium-webdriver");
 
   log("💳 Proceeding to Payment...");
@@ -1849,6 +1850,12 @@ async function proceedToPayment(driver, capture = null, jobId = "") {
     await clickElement(driver, makePaymentBtn, "Make Payment Button");
     log("   🚀 Clicked Make Payment");
     await driver.sleep(4000); // Wait for transition to payment gateway
+
+    // WALLET policy: not the customer's Razorpay QR. Keep this page's address, try the CD Balance card and hand back - the
+    // form stops here on purpose (kshemaWalletPayment.js). Everything below is the link flow, untouched.
+    if (isWalletPayment(paymentMethod)) {
+      return await chooseCdBalance(driver, { capture, jobId });
+    }
     
     let qrScreenshotUrl = null;
     let qrScreenshotKey = null;

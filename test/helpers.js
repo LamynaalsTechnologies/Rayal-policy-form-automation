@@ -37,6 +37,11 @@ const formData = (extra = {}) => ({
   paCover: true,
   paCoverCompany: "Brisk",
   settings: { isMultipleCompany: true, ODCompany: "Reliance", TPCompany: "National", PACompany: "Brisk" },
+  // Reliance OD never starts without the existing TP policy (lib/existingTpGate.js; test/existingTpGate.test.js)
+  existingTpPolicyNumber: "NIC/TP/0001",
+  existingTpInsurer: "National",
+  existingTpStartDate: "01-10-2026",
+  existingTpEndDate: "30-09-2031",
   ...extra,
 });
 
