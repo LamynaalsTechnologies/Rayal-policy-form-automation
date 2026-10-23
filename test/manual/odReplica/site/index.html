@@ -1,0 +1,213 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Reliance replica - OD flow</title>
+<style>
+  body{font-family:sans-serif;padding:20px}
+  #divMainMotors{display:inline-block;padding:16px 30px;background:#cde;position:relative}
+  #divMainMotors .sub{display:none;position:absolute;left:0;top:50px;background:#eef;list-style:none;margin:0;padding:6px 20px;white-space:nowrap}
+  #divMainMotors:hover .sub{display:block}
+  #ddlMotorProducts_listbox{list-style:none;border:1px solid #999;padding:0;margin:2px 0;width:340px}
+  #ddlMotorProducts_listbox li{padding:6px;cursor:pointer}
+  #divTPDetails{display:none;position:fixed;left:160px;top:100px;width:550px;height:340px;border:1px solid #888;background:#fff;z-index:50}
+  .hdr{background:#2288bb;color:#fff;padding:10px;font-weight:bold} .row{margin:12px 20px} .hidden{display:none}
+  #ClientForm60DetailsWindow{display:none;position:fixed;left:40px;top:20px;width:900px;height:640px;border:2px solid #444;background:#fff;z-index:60}
+  #ClientForm60DetailsWindow iframe{width:100%;height:100%;border:0}
+  .ui-dialog{position:fixed;left:300px;top:200px;width:380px;border:1px solid #333;background:#fff;z-index:70;padding:20px}
+</style></head>
+<body>
+<div id="divMainMotors">Motors
+  <ul class="sub"><li><a href="#" onclick="openTwoWheeler();return false;">Two Wheeler</a></li></ul>
+</div>
+
+<div id="productPanel" style="display:none">
+  <h4>Sub Product</h4>
+  <span class="k-widget k-dropdown" aria-owns="ddlMotorProducts_listbox" role="listbox" onclick="toggleList()">
+    <span unselectable="on" class="k-dropdown-wrap k-state-default"><span unselectable="on" class="k-input" id="productText">Select</span><span unselectable="on" class="k-select"><span unselectable="on" class="k-icon k-i-arrow-s">select</span></span></span>
+  </span>
+  <ul id="ddlMotorProducts_listbox" style="display:none">
+    <li onclick="pick(this)">Two Wheeler Package (Old Veh.)</li>
+    <li onclick="pick(this)">Two Wheeler Own damage Policy</li>
+    <li onclick="pick(this)">Two Wheeler Liability (Old Veh.)</li>
+    <li onclick="pick(this)">Two Wheeler Package Bundled (Only New Veh.)</li>
+    <li onclick="pick(this)">Two Wheeler Package for 5 years (Only New Veh.)</li>
+    <li onclick="pick(this)">Two Wheeler Liability 5 years (Only New Veh.)</li>
+  </ul>
+  <div id="skipPanel" style="display:none"><a href="#" onclick="skipToMain();return false;">Skip To Main Page</a></div>
+</div>
+
+<div id="divTPDetails" class="ui-tp">
+  <div class="hdr">TP Details</div>
+  <div class="row">Existing Third Party / Liability Policy Available :
+    <input type="radio" name="Yes" id="rbIsExistingPolicyLiabilityYes" onclick="OnclickradioYes()"> Yes
+    <input type="radio" name="No" id="rbIsExistingPolicyLiabilityNo" onclick="OnclickradioNo()"> No
+  </div>
+  <div class="row hidden" id="rgiclRow">Is Third Party Policy held With RGICL:
+    <input type="radio" name="Yes" id="rbIsRGICLYes" onclick="ISRGICLPOlicyYES()"> Yes
+    <input type="radio" name="No" id="rbIsRGICLNo" onclick="ISRGICLPOlicyNO()"> No
+  </div>
+  <div class="row hidden" id="proceedRow">
+    <input type="button" name="Yes" value="Proceed" id="btnISNotRGICLPolicy" style="margin-left:280px" onclick="ISNotRGICLPolicy()">
+  </div>
+</div>
+
+<div id="mainForm" style="display:none">
+  <h4>Business Type: New</h4>
+  <div>Vertical Code: <select id="ddlobjBranchDetailAgentsHnin"><option>Select</option><option>GIRNAR FINSERV</option></select></div>
+  <div><label><input type="checkbox" id="ISPANNotAvailable" onclick="panClicked()"> PAN not available</label></div>
+  <div>Email: <input id="txtEmailID" type="text"></div>
+  <div><button id="BtnSaveClientDetails" onclick="validateCustomer()">Validate Customer</button></div>
+  <hr>
+  <h4>Vehicle details</h4>
+  <div>Make/Model <input id="VehicleDetailsMakeModel" oninput="suggest(this,'VehicleDetailsMakeModel_listbox','HONDA DIO 125 SMART OBD2B')" autocomplete="off">
+    <ul class="k-list" id="VehicleDetailsMakeModel_listbox" style="display:none"></ul></div>
+  <div id="fuelRow"></div>
+  <div id="needRow"></div>
+  <div>Purchase date <input id="Date_PurchaseVehicle"> Registration date <input id="Date_RegistrationVehicle"></div>
+  <div>Mfg year <input id="Manufacturing_YearVehicle"> Mfg month <input id="Manufacturing_MonthVehicle"></div>
+  <div><label><input type="checkbox" id="IsNewVehicle" onclick="log('new vehicle ' + (this.checked ? 'ticked' : 'unticked'))"> Is New Vehicle</label></div>
+  <div>RTO <input id="RTOCityLocation" oninput="suggest(this,'RTOCityLocation_listbox','TN18-CENTRAL-REDHILS')" autocomplete="off">
+    <ul class="k-list" id="RTOCityLocation_listbox" style="display:none"></ul></div>
+  <div>Engine <input id="EngineNumberVehicle"> Chassis <input id="ChasisNumberVehicle"></div>
+  <div>IDV <input id="IDVVehicle"></div>
+  <div>Discount <input id="Detariff_Discount_Rate" onblur="void 0"></div>
+  <div><input type="button" id="btnFetchIDV" value="Get Coverage Details" onclick="FetchIDV(this,'InsertMode    ')"></div>
+  <div class="blocks" id="DivCoverDetails" style="display:block"></div>
+  <!-- the existing third party panel (a Kendo PanelBar): open by default, ?panel=collapsed starts it closed -->
+  <ul id="tpPanel" class="k-widget k-panelbar" role="tree">
+    <li class="k-item k-state-default k-first" role="treeitem">
+      <span class="k-link k-header" onclick="togglePanel()">Existing Third Party Details<span id="tpIcon" class="k-icon k-i-arrow-n k-panelbar-collapse"></span></span>
+      <div class="k-content" id="tpContent" style="display:block">
+        <div>Policy number <input id="txtExistingTPPolicyNo" name="objvehicleDetails.ExistingTPPolicyNumber" type="text" onchange="log('tp number ' + this.value)"></div>
+        <div>Insurer
+          <span class="k-widget k-dropdown k-header" role="listbox" aria-haspopup="true" aria-owns="ddlExistingTPInsurer_listbox" aria-disabled="false" tabindex="0" id="wrapInsurer">
+            <span class="k-dropdown-wrap k-state-default"><span class="k-input" id="insurerText">Select Insurer</span><span class="k-select"><span class="k-icon k-i-arrow-s">select</span></span></span>
+            <select id="ddlExistingTPInsurer" style="display:none"><option value="">Select Insurer</option></select></span>
+          <div class="k-animation-container" id="popInsurer" style="display:none;position:absolute"><div class="k-popup"><ul id="ddlExistingTPInsurer_listbox" class="k-list"></ul></div></div>
+        </div>
+        <div>Start date <input id="dpExistingTPPolicyRiskStartDate" type="text" onchange="dateBlur(this);ValidateTpPolicyStartDate()"  onblur="dateBlur(this)"></div>
+        <div>End date <input id="dpExistingTPPolicyRiskEndDate" type="text" onchange="dateBlur(this);ValidateTpPolicyEndate()"  onblur="dateBlur(this)"></div>
+      </div>
+    </li>
+  </ul>
+  <div><label><input type="checkbox" id="IsRegistrationAddresssame" onclick="log('address same ' + (this.checked ? 'ticked' : 'unticked'))"> Is Registration Address Same</label></div>
+  <div><input type="button" id="btnCalculate" value="Calculate Premium" onclick="calculate()"> <span id="premium"></span></div>
+  <div><input type="button" id="btnSave" value="Save" onclick="saveProposal()"></div>
+  <div id="saved"></div>
+  <div id="msgDlg" class="ui-dialog" role="dialog" style="display:none"><span id="msgText"></span> <button type="button" onclick="document.getElementById('msgDlg').style.display='none'">OK</button></div>
+  <div id="paModal" class="ui-dialog" style="display:none">Does the Owner have a valid Driving License?
+    <input type="checkbox" id="OnYesofDL" onclick="paAnswer('Yes')"> Yes <input type="checkbox" id="OnNoofDL" onclick="paAnswer('No')"> No</div>
+</div>
+
+<!-- Reliance's page footer: always there, pinned to the bottom (it must never be taken for a refusal) -->
+<div id="pageFooter" style="position:fixed;left:0;right:0;bottom:0;height:22px;background:linear-gradient(90deg,#c00,#52c);color:#fff;font-size:11px;padding:2px 60px;z-index:5">indusindinsurance.com | 022 4890 3009 (Paid) | 74004 22200 (WhatsApp)</div>
+
+<div id="ClientForm60DetailsWindow"><iframe src="form60.html"></iframe></div>
+<div id="existsDlg" class="ui-dialog" aria-describedby="divCustomerAlreadyExist" style="display:none">
+  <div id="divCustomerAlreadyExist">Customer Already Exists</div>
+  <button type="button"><span>Cancel</span></button>
+</div>
+
+<script>
+  window.__events = []; window.__proceedCount = 0; window.__product = "";
+  var Q = new URLSearchParams(location.search);
+  function log(e){ window.__events.push(e); }
+  function openTwoWheeler(){ log('two wheeler'); document.getElementById('productPanel').style.display='block'; }
+  function toggleList(){ var l=document.getElementById('ddlMotorProducts_listbox'); l.style.display = l.style.display==='none' ? 'block':'none'; }
+  function pick(li){ var t=li.textContent.trim(); window.__product=t; document.getElementById('productText').textContent=t; document.getElementById('ddlMotorProducts_listbox').style.display='none'; log('product: '+t); setTimeout(function(){ document.getElementById('skipPanel').style.display='block'; }, 600); }
+  function showMain(){ document.getElementById('mainForm').style.display='block'; log('main form'); }
+  function skipToMain(){ log('skip'); setTimeout(function(){
+      if (window.__product === 'Two Wheeler Own damage Policy') { document.getElementById('divTPDetails').style.display='block'; log('tp box open'); }
+      else { showMain(); }
+  }, 800); }
+  function OnclickradioYes(){ log('TP Yes'); setTimeout(function(){ document.getElementById('rgiclRow').classList.remove('hidden'); }, 300); }
+  function OnclickradioNo(){ log('TP No (wrong)'); }
+  function ISRGICLPOlicyYES(){ log('RGICL Yes (wrong)'); }
+  function ISRGICLPOlicyNO(){ log('RGICL No'); setTimeout(function(){ document.getElementById('proceedRow').classList.remove('hidden'); }, 300); }
+  function ISNotRGICLPolicy(){ window.__proceedCount++; log('Proceed'); setTimeout(function(){ document.getElementById('divTPDetails').style.display='none'; log('tp box closed'); showMain(); }, 500); }
+  function panClicked(){ log('pan not available'); document.getElementById('ClientForm60DetailsWindow').style.display='block'; }
+  window.jQuery = { active: 0 };                      // what waitForPortalIdle reads (requests in flight)
+  var PA = Q.get('pa') === '1', fetchCalls = 0, DELAYS = [1300, 1800, 2900, 6500];
+  function suggest(input, listId, text){ var ul=document.getElementById(listId); if (input.value.length >= 3) { ul.innerHTML='<li onclick="choose(this,\''+input.id+'\',\''+listId+'\')">'+text+'</li>'; ul.style.display='block'; } else { ul.style.display='none'; } }
+  function choose(li, inputId, listId){ document.getElementById(inputId).value = li.textContent; document.getElementById(listId).style.display='none'; log('picked ' + inputId + ': ' + li.textContent); if (inputId === 'VehicleDetailsMakeModel' && typeof loadFuel === 'function') loadFuel(); }
+  function drawCover(n){
+    // every answer redraws the table: Helmet ticked again, Zero Depreciation reset, (PA ticked again)
+    document.getElementById('DivCoverDetails').innerHTML =
+      '<table border="1"><tr><td>Zero Depreciation <input type="checkbox" id="ChkBox10" onclick="log(\'zero dep \' + (this.checked ? \'ticked\' : \'unticked\'))"></td>' +
+      '<td>Nil Dep Rate <input id="txtNilDepriciationRate" value="" onchange="log(\'nil dep rate \' + this.value)"></td></tr>' +
+      '<tr><td>Helmet Cover <input type="checkbox" id="ChkBox500" checked onclick="log(\'helmet \' + (this.checked ? \'ticked\' : \'unticked\'))"></td></tr>' +
+      (PA ? '<tr><td>PA to Owner Driver <input type="checkbox" id="ChkBox24" checked onclick="paClicked(this)"></td></tr>' : '') +
+      '<tr><td>TPPD <select id="ddlTPPDLimit"><option>Select</option><option>6000</option></select></td></tr>' +
+      // a note inside the cover box that LOOKS like a message (class says info, words say "must be"): the cover box is read on its own, never as a message bar
+      '<tr><td><span class="tip-info">Discount must be between 0 and 50</span></td></tr></table>';
+    log('cover table drawn #' + n);
+  }
+  // a red message bar across the bottom of the page, no class anybody knows (what the first live OD run showed, 2026-10-23)
+  function showBar(text){ var d = document.createElement('div'); d.id = 'relBar';
+    d.setAttribute('style', 'position:fixed;left:76px;right:30px;bottom:24px;background:#d9edf7;color:#d9261c;padding:10px 14px;z-index:6;font-size:15px');
+    d.innerHTML = '<span>(!)</span> <span></span> <span style="float:right">x</span>'; d.children[1].textContent = text; document.body.appendChild(d); }
+  var BAR_TEXT = 'As per entered Registration Number the Vehicle Class is Goods Carrier. The same is not permitted to be booked under Product 2308. Kindly book the same in correct Product or refer to our nearest Branch.';
+  function showMsg(text){ document.getElementById('msgText').textContent = text; document.getElementById('msgDlg').style.display = 'block'; }
+  function FetchIDV(btn, mode){
+    // Reliance validates the required boxes first: an empty one -> a popup, and NO request (so no cover table)
+    var fuelSel = document.getElementById('ddlFuelType'), prevSel = document.getElementById('ddlPrevPolicyType');
+    var problem = '';
+    if (fuelSel && !fuelSel.value) problem = 'Please select Fuel Type';
+    else if (prevSel && !prevSel.value) problem = 'Please select Previous Policy Type';
+    if (problem) { showMsg(problem); log('Get Coverage refused - ' + problem); return; }
+    var n = ++fetchCalls; log('FetchIDV request #' + n); window.jQuery.active++;
+    setTimeout(function(){ drawCover(n); window.jQuery.active--; }, DELAYS[n-1] || 800);
+  }
+  function paClicked(box){ log('PA box clicked (checked=' + box.checked + ')'); if (!box.checked) { document.getElementById('paModal').style.display='block'; } }
+  function paAnswer(a){ log('PA question answered ' + a); document.getElementById('paModal').style.display='none'; var b=document.getElementById('ChkBox24'); if (b) b.checked = (a === 'Yes'); }
+  function validateNildepriciation(){ log('validateNildepriciation()'); }
+  function OnChangeofDiscountLoading(){ log('discount changed'); }
+  // ---- the Fuel Type box (Kendo-like): disabled and empty until the make / model is chosen, its list loads ~1.2 s later ----
+  var FUEL = ['Select Type'].concat(Q.get('fuelopts') ? Q.get('fuelopts').split(',') : ['Petrol','Diesel','Bifuel','Battery','Hybrid Electric Vehicle']);
+  if (Q.get('fuel') !== 'none') {
+    document.getElementById('fuelRow').innerHTML =
+      '<label for="ddlFuelType">Fuel Type *</label> ' +
+      '<span class="k-widget k-dropdown k-header" role="listbox" aria-haspopup="true" aria-owns="ddlFuelType_listbox" aria-disabled="true" tabindex="0" id="wrapFuel">' +
+      '<span class="k-dropdown-wrap k-state-default"><span class="k-input">Select Type</span><span class="k-select"><span class="k-icon k-i-arrow-s">select</span></span></span>' +
+      '<select id="ddlFuelType" style="display:none"><option value="">Select Type</option></select></span>' +
+      '<div class="k-animation-container" id="popFuel" style="display:none;position:absolute"><div class="k-popup"><ul id="ddlFuelType_listbox" class="k-list"></ul></div></div>';
+    var wrapFuel = document.getElementById('wrapFuel'), popFuel = document.getElementById('popFuel'), ulFuel = document.getElementById('ddlFuelType_listbox'), selFuel = document.getElementById('ddlFuelType');
+    wrapFuel.addEventListener('click', function(){ if (wrapFuel.getAttribute('aria-disabled') === 'true') return;
+      popFuel.style.display = popFuel.style.display === 'none' ? 'block' : 'none'; log('fuel list ' + (popFuel.style.display === 'block' ? 'opened' : 'closed')); });
+    ulFuel.addEventListener('click', function(e){ var li = e.target.closest('li'); if (!li) return;
+      wrapFuel.querySelector('.k-input').textContent = li.textContent; selFuel.innerHTML = '<option value="' + li.textContent + '" selected>' + li.textContent + '</option>'; selFuel.value = li.textContent;
+      popFuel.style.display = 'none'; log('fuel picked ' + li.textContent); if (/^select/i.test(li.textContent)) { selFuel.innerHTML = '<option value="">Select Type</option>'; selFuel.value = ''; } });
+  }
+  function loadFuel(){ setTimeout(function(){ var ul = document.getElementById('ddlFuelType_listbox'); if (!ul) return;
+    ul.innerHTML = FUEL.map(function(t){ return '<li class="k-item" role="option">' + t + '</li>'; }).join('');
+    document.getElementById('wrapFuel').setAttribute('aria-disabled', 'false'); log('fuel list loaded'); }, 1200); }
+  if (Q.get('need') === 'previous') {
+    document.getElementById('needRow').innerHTML = '<label for="ddlPrevPolicyType">Previous Policy Type *</label> <select id="ddlPrevPolicyType"><option value="">Select</option><option>Comprehensive</option></select>';
+  }
+  // ---- the existing third party panel ----
+  var INSURERS = Q.get('ins') === 'none' ? ['Select Insurer', 'UNITED INDIA INSURANCE'] : ['Select Insurer', 'KSHEMA General Insurance Limited', 'National Insurance Company Limited'];
+  document.getElementById('ddlExistingTPInsurer_listbox').innerHTML = INSURERS.map(function(t){ return '<li class="k-item" role="option">' + t + '</li>'; }).join('');
+  if (Q.get('panel') === 'collapsed') setPanel(false);
+  if (Q.get('addr') === 'ticked') document.getElementById('IsRegistrationAddresssame').checked = true;
+  function setPanel(open){ var c = document.getElementById('tpContent'), i = document.getElementById('tpIcon');
+    c.style.display = open ? 'block' : 'none'; i.className = open ? 'k-icon k-i-arrow-n k-panelbar-collapse' : 'k-icon k-i-arrow-s k-panelbar-expand'; }
+  function togglePanel(){ var open = document.getElementById('tpContent').style.display === 'none'; setPanel(open); log('panel ' + (open ? 'opened' : 'closed')); }
+  document.getElementById('wrapInsurer').addEventListener('click', function(){ var p = document.getElementById('popInsurer'); p.style.display = p.style.display === 'none' ? 'block' : 'none'; log('insurer list ' + (p.style.display === 'block' ? 'opened' : 'closed')); });
+  document.getElementById('ddlExistingTPInsurer_listbox').addEventListener('click', function(e){ var li = e.target.closest('li'); if (!li) return;
+    document.getElementById('insurerText').textContent = li.textContent; document.getElementById('popInsurer').style.display = 'none'; log('tp insurer ' + li.textContent); });
+  // ?datefmt=reformat: the picker shows what is typed as dd/mm/yyyy; ?datefmt=clear: it only takes dd/mm/yyyy and empties anything else
+  function dateBlur(el){ var m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(el.value); if (m && Q.get('datefmt') === 'reformat') el.value = m[1] + '/' + m[2] + '/' + m[3];
+    else if (Q.get('datefmt') === 'clear' && !/^\d{2}\/\d{2}\/\d{4}$/.test(el.value)) el.value = ''; }
+  function dayOf(t){ var m = /^(\d{2})[-\/](\d{2})[-\/](\d{4})$/.exec(t); return m ? Date.UTC(+m[3], +m[2] - 1, +m[1]) : NaN; }
+  function ValidateTpPolicyStartDate(){ var v = document.getElementById('dpExistingTPPolicyRiskStartDate').value; log('tp start ' + v); }
+  function ValidateTpPolicyEndate(){ var v = document.getElementById('dpExistingTPPolicyRiskEndDate').value; log('tp end ' + v);
+    if (Q.get('rejectend') === '1') { alert('Policy end date should be after: start date'); } }
+  function calculate(){ log('calculate'); window.jQuery.active++; setTimeout(function(){ window.jQuery.active--;
+    if (Q.get('calc') === 'refuse') showMsg('Please select Previous Policy Type'); else document.getElementById('premium').textContent = 'Premium 4321';
+    if (Q.get('calc') === 'bar') showBar(BAR_TEXT);
+    log('premium shown'); }, 1500); }
+  function saveProposal(){ log('save'); setTimeout(function(){
+    if (Q.get('save') === 'refuse') showMsg('Please enter Engine Number');
+    else if (Q.get('save') === 'bar') showBar(BAR_TEXT);
+    else document.getElementById('saved').innerHTML = '<span>Proposal Saved Successfully R1234567890 and Quote No Q987</span>'; }, 800); }
+  function validateCustomer(){ log('validate customer'); if (Q.get('exists')==='1') { var d=document.getElementById('existsDlg'); d.style.display='block'; d.querySelector('button').onclick=function(){ d.style.display='none'; log('exists dialog cancelled'); }; } }
+</script>
+</body></html>

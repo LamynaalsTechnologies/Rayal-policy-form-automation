@@ -1,0 +1,38 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>replica of Reliance TP Details box</title>
+<style>
+  body{font-family:sans-serif} #divTPDetails{display:none;position:fixed;left:160px;top:100px;width:550px;height:380px;border:1px solid #888;background:#fff;box-shadow:0 0 20px #666}
+  .hdr{background:#2288bb;color:#fff;padding:10px;font-weight:bold} .row{margin:12px 20px} .hidden{display:none}
+</style></head>
+<body>
+<h3>Business Type: New</h3>
+<a href="#" id="skip" onclick="openBoxLater();return false;">Skip To Main Page</a>
+<div id="mainForm">Vertical Code: <select id="ddlobjBranchDetailAgentsHnin"><option>Select</option></select></div>
+
+<div id="divTPDetails" class="ui-dialog">
+  <div class="hdr">TP Details</div>
+  <div class="row">Existing Third Party / Liability Policy Available :
+    <input type="radio" name="Yes" id="rbIsExistingPolicyLiabilityYes" onclick="OnclickradioYes()"> Yes
+    <input type="radio" name="No" id="rbIsExistingPolicyLiabilityNo" onclick="OnclickradioNo()"> No
+  </div>
+  <div class="row hidden" id="rgiclRow">Is Third Party Policy held With RGICL:
+    <input type="radio" name="Yes" id="rbIsRGICLYes" onclick="ISRGICLPOlicyYES()"> Yes
+    <input type="radio" name="No" id="rbIsRGICLNo" onclick="ISRGICLPOlicyNO()"> No
+  </div>
+  <div class="row hidden" id="proceedRow">
+    <input type="button" name="Yes" value="Proceed" id="btnISNotRGICLPolicy" style="margin-left:280px" onclick="ISNotRGICLPolicy()">
+  </div>
+  <div style="position:absolute;bottom:10px;right:10px"><button id="closeBtn" onclick="document.getElementById('divTPDetails').style.display='none'">Close</button></div>
+</div>
+<div id="cover" style="display:none;position:fixed;left:0;top:0;width:100%;height:100%;z-index:9999;background:rgba(255,255,255,0.01)"></div>
+<script>
+  window.__events = []; window.__proceedCount = 0;
+  var OPEN_DELAY = parseInt(new URLSearchParams(location.search).get('delay') || '1200', 10);
+  function openBoxLater(){ window.__events.push('skip clicked'); setTimeout(function(){ document.getElementById('divTPDetails').style.display='block'; window.__events.push('box open'); if(new URLSearchParams(location.search).get('cover')==='1'){document.getElementById('cover').style.display='block';} }, OPEN_DELAY); }
+  function OnclickradioYes(){ window.__events.push('Yes'); setTimeout(function(){ document.getElementById('rgiclRow').classList.remove('hidden'); }, 300); }
+  function OnclickradioNo(){ window.__events.push('NO-first (wrong)'); }
+  function ISRGICLPOlicyYES(){ window.__events.push('RGICL Yes (wrong)'); }
+  function ISRGICLPOlicyNO(){ window.__events.push('RGICL No'); setTimeout(function(){ document.getElementById('proceedRow').classList.remove('hidden'); }, 300); }
+  function ISNotRGICLPolicy(){ window.__proceedCount++; window.__events.push('Proceed'); setTimeout(function(){ document.getElementById('divTPDetails').style.display='none'; window.__events.push('box closed'); }, 500); }
+</script>
+</body></html>

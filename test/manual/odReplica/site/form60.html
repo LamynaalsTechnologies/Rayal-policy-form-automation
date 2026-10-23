@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Form 60 replica</title>
+<style>body{font-family:sans-serif;padding:10px} div{margin:4px 0} .k-animation-container{position:relative} ul.k-list{list-style:none;margin:0;padding:0;border:1px solid #999;display:none} ul.k-list li{padding:4px;cursor:pointer}</style></head>
+<body>
+<h4>Form 60</h4>
+<div>Title <select id="proposerTitle1"><option value="">Select</option><option>Mr.</option><option>Ms.</option><option>Mrs.</option><option>M/S</option></select></div>
+<div>First <input id="FirstName"> Last <input id="LastName"> DOB <input id="dob"></div>
+<div>Father <select id="proposerTitle2"><option value="">Select</option><option>Mr.</option><option>Ms.</option></select> <input name="FatherFirstName"></div>
+<div>Flat <input id="flat"> Floor <input id="floor"> Premises <input id="Nameofpremises"> Block <input id="block"> Road <input id="road"> Area <input id="area"></div>
+<div>State <select id="state"><option value="">Select</option><option value="30">KARNATAKA</option><option value="31">TAMIL NADU</option></select></div>
+<div>Pincode <input id="pincodesearch" oninput="suggest(this.value)" autocomplete="off">
+  <div class="k-animation-container"><ul class="k-list" id="sugg"></ul></div></div>
+<div>Mobile <input id="mobileno"></div>
+<div><button id="btnSubmit" type="button" onclick="submitForm60()">Submit</button></div>
+<script>
+  function suggest(v){ var ul=document.getElementById('sugg'); if (v && v.length>=6) { ul.innerHTML='<li onclick="pickPin(this)">'+v+' - REPLICA AREA, REPLICA CITY</li>'; ul.style.display='block'; } else { ul.style.display='none'; } }
+  function pickPin(li){ document.getElementById('pincodesearch').value=li.textContent; document.getElementById('sugg').style.display='none'; }
+  function submitForm60(){
+    var f=function(id){ return document.getElementById(id).value; };
+    window.parent.__events.push('form60 submitted: title=' + f('proposerTitle1') + ' first=' + f('FirstName') + ' last=' + f('LastName') + ' pin=' + f('pincodesearch').split(' ')[0] + ' mobile=' + f('mobileno'));
+    window.parent.document.getElementById('ClientForm60DetailsWindow').style.display='none';
+  }
+</script></body></html>

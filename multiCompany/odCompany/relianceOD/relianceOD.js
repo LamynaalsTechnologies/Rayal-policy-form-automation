@@ -8,8 +8,12 @@
  *   2. RELIANCE_MULTI_FORM_ENABLED set to false -> what this handler did before the form existed: log in (a copy of the
  *      full-company Reliance login, common/reliance/fullCompanyLogin.js, done by common/runHandler), open
  *      Motors -> Two Wheeler (motorsMenu.js) and stop cleanly there. Nothing is chosen or bought.
- *   3. otherwise (the default) -> the duplicated form. With RELIANCE_OD_PRODUCT not set it opens the Sub Product
- *      dropdown, lists the portal's products and stops (common/reliance/stopBeforeProduct.js).
+ *   3. otherwise (the default) -> the duplicated form. It chooses "Two Wheeler Own damage Policy" (the default of
+ *      RELIANCE_OD_PRODUCT, common/reliance/multiConfig.js), answers the TP Details box that opens after Skip To Main Page
+ *      and runs the full-company steps (customer, vehicle — with the Fuel Type box the OD form needs, Get Coverage
+ *      Details, the Helmet cover removed, Nil Depreciation — but not the PA Cover block, the OD form has none), where it
+ *      STOPS on purpose — the steps after them are not built yet (common/reliance/relianceOdSteps.js,
+ *      lib/vehicleFuelType.js, multiCompany/README.md §15.11 and §15.12).
  *
  * The form is loaded when a part runs, not when the server starts: it is a 5,000-line module with a browser behind it.
  */

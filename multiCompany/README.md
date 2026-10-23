@@ -87,7 +87,8 @@ as; the client never supplies it. Policies saved before this have no split and s
 (and pay for a Brisk certificate twice). `jobPaRouting` gives PA to exactly one job — Brisk → the OD job; an
 insurer → the job whose company is `PACompany` (the TP job if both are); the other job gets `paCover:false`.
 `server.js` also tells the fillers when the policy already holds a Brisk certificate
-(`briskCertificateExists`) and `shouldCreateBriskCertificate` then skips it.
+(`briskCertificateExists`) and `shouldCreateBriskCertificate` then skips it. (That is the old two-job fan-out. With one job and
+parts — the default — the PA is bought by exactly one part: the TP part that `carriesPa`, or Brisk's own `pa` part; see §14.1.)
 
 **Bug fixed on the way:** the calculator's `finalPremium` already contains PA + GST (PA is folded into Total B), but
 the payload sent it as the "motor premium" and the wallet then added PA again — PA was double-charged. The payload,
@@ -130,6 +131,7 @@ multiCompany/
     reliance/fullCompanyLogin.js        the Reliance login: a COPY of the full-company one (OD and TP share it)
     reliance/relianceMultiForm.js       DUPLICATE of fullPolicycompany/relianceForm.js + tagged [MC] changes — Reliance OD AND TP, see §15
     reliance/relianceMultiFormSpec.js   the [MC] changes as data; regenerates / checks the duplicate (--write)
+    reliance/relianceOdSteps.js         the steps only the OD part does: the TP Details box after Skip To Main Page, the Fuel Type box, the cover table check, the customer's existing TP policy, "Is Registration Address Same", and the exact words after Calculate Premium / Save ([MC] 7, 10-15; §15.11)
     reliance/multiConfig.js             RELIANCE_MULTI_FORM_ENABLED, RELIANCE_OD_PRODUCT, RELIANCE_TP_PRODUCT
     reliance/stopBeforeProduct.js       the stop taken while the part's product text is not set (lists the options)
     errors.js                     MultiCompanyError(code, message, opts) + failureResult()
@@ -184,7 +186,8 @@ insurer's job has been bought.
 | **One job with parts** | the backend builds `od` with `dependsOn: "tp"` (the mechanism PA already uses): `waitingFor: "tp"` until TP is bought, `blockedBy: "tp"` when it failed. A job saved before this keeps its old order until it is next saved (`mergeJobParts` refreshes `dependsOn`). |
 
 The policy list reads both the same way: the OD part says **Waiting for TP to finish** — also when the TP failed (it is not an
-error of the OD; the hint says to retry TP, and OD then starts by itself). `legacyJobsToParts` gives the two-job OD the same `dependsOn`. PA through Brisk still waits for OD, so the chain is TP → OD → PA.
+error of the OD; the hint says to retry TP, and OD then starts by itself). `legacyJobsToParts` gives the two-job OD the same `dependsOn`. PA through Brisk
+follows the TP only (the owner, 2026-10-23), so the chain is TP → OD and TP → PA: a failed or waiting OD no longer holds the Brisk certificate back.
 
 ### 4.1 Jobs without `parts`
 
@@ -296,8 +299,9 @@ is `failed_login_form`.
 `onlinePolicy.briskCertificate` **immediately**, before anything that can still fail; (4) download and store the PDF.
 After a bundled `motor` run that bought the certificate inline, the PA part is set from the run result
 (`briskCertificate` / `briskCertificateError` / `briskCertificateSkipped`) and `onlinePolicy.briskCertificate`:
-completed, failed, or — if nothing was bought — left pending for the Brisk runner. For multi-company policies the PA
-waits for the OD part (as the bundled flows buy Brisk only after the portal part succeeded).
+completed, failed, or — if nothing was bought — left pending for the Brisk runner. For a two-insurer policy (and TP only) the PA
+waits for the TP part only (since 2026-10-23; it used to wait for the OD). Before buying, the part checks the nominee Brisk takes —
+name, gender, relation from Brisk's eight — and stops with one sentence when one is missing or unknown (§14.1).
 
 **Recovery.** A part is never left `processing` behind a dead run: the zombie reclaim (silent heartbeat), startup
 recovery and the SIGINT / SIGTERM re-queue each run **two** updates — one for jobs without `parts` (as before) and one
@@ -476,10 +480,14 @@ The CLI sets `MULTI_COMPANY_AUTOMATION_ENABLED=true` for its own process only (i
   **Reliance OD / TP** have a form (next bullets, §15). A multi-company policy with a National or KSHEMA OD shows that part as
   "not automated yet" (`failed_login_form`, `stopped`) — the job's per-part status and the retry rules are in place, that portal
   handler is not.
-- **Reliance OD / TP** are built (`common/reliance/relianceMultiForm.js`, §15) but **start held at the Sub Product dropdown**: the
-  OD-only / TP-only product text is not known, so until `RELIANCE_OD_PRODUCT` / `RELIANCE_TP_PRODUCT` is set a run lists the
-  portal's products and stops. Everything after the product is the full-company Reliance flow, unchanged — what an OD-only /
-  TP-only portal does differently (IDV, a previous-policy step, a renewal) is found one stop at a time.
+- **Reliance OD / TP** are built (`common/reliance/relianceMultiForm.js`, §15). **OD** chooses "Two Wheeler Own damage Policy" by
+  default (2026-10-23), answers the TP Details box and runs the full-company steps (customer, vehicle, Get Coverage Details, the
+  Helmet cover removed, Nil Depreciation — without the PA Cover block), enters the customer's existing TP policy (2026-10-23),
+  and goes on with the full flow to the end — financier, address, Calculate Premium, Save, KYC, Pending Quotes, Pay (§15.11;
+  never run on the live OD page, renewal-type fields not built, §15.12). **TP** still **starts held at the Sub Product dropdown**: its product text
+  is not decided, so until `RELIANCE_TP_PRODUCT` is set a run lists the portal's products and stops. Everything else is the
+  full-company Reliance flow, unchanged — what an OD-only / TP-only portal does differently (IDV, a previous-policy step, a
+  renewal) is found one stop at a time.
 - **National TP** is built (`tpCompany/nationalTP/`, §5) and **on by default**: it selects "5 Year Long Term Liability Only" and goes on to
   buy a third-party-only policy and send the payment link. `NATIONAL_TP_FORM_ENABLED=false` holds it at "Your Plan" (the plan list in the message).
   Not proven against the live portal yet: how the TP plan page differs (a field that appears or disappears), whether the portal
@@ -492,8 +500,9 @@ The CLI sets `MULTI_COMPANY_AUTOMATION_ENABLED=true` for its own process only (i
 - **TP → OD hand-off** (the TP policy's number and dates reaching the OD form) — **entered by hand since 2026-10-22** (Reliance OD waits
   for them), read automatically from the TP portal **not built**, see §12.2. Ordering is (§4.0); the data
   is not passed yet, and National's flow reads no number or date from the portal at all.
-- **Multi-company Brisk PA waits for the OD part** to succeed (same as the bundled flows, which buy Brisk only after the
-  portal part). Until the OD handler can finish (Reliance OD is held at its product, §15; National OD and KSHEMA OD are login-only), that PA stays "waiting for OD".
+- **Multi-company Brisk PA follows the TP part** (since 2026-10-23; before, it waited for the OD, which held it back while the
+  Reliance OD could not finish). A job queued before that keeps `dependsOn: "od"` until its policy is saved again (`mergeJobParts`
+  refreshes `dependsOn`); no script re-syncs old jobs.
 - **Single-company policies** (OD insurer = TP insurer) are one `motor` part and go through the **live bundled flows**,
   which buy for real. With `POLICY_JOB_PARTS_ENABLED` on they no longer fan out to login-only stubs.
 - The live bundled flows (`relianceForm.js`, `national.js`, `kshemaForm.js`) still use their own login. Moving them
@@ -742,7 +751,7 @@ For the automation that is simply a job with one portal part — `od` or `tp` �
 | Handlers | National TP, KSHEMA TP and Reliance OD / TP run for real (Reliance's starts held at the product, §15). National OD and KSHEMA OD are login-only stubs: that part stops "not automated yet" (`failed_login_form`, stopped, not retried). |
 | PA — Company | the part `carriesPa` and PA is bought with it: National gets the year (1/5), KSHEMA ticks PA, picks the year and adds the nominee. |
 | PA — Brisk | the part does not carry PA; Brisk is its own `pa` part with `dependsOn` = that part (waits for it, never runs if it failed). National's portal stays "No"; KSHEMA's PA is off with the reason. |
-| PA — off | National: the year as picked; KSHEMA: unchecked + reason, no nominee. |
+| PA — off | National: Compulsory PA "No", no year; KSHEMA: unchecked + reason, no nominee. |
 
 `test/standaloneCover.test.js` walks the whole chain for National and KSHEMA × {off, Company, Brisk}: backend part shape →
 `buildPartFormData` → the handler's own PA rules. **One change in the KSHEMA TP copy** (`[TP] 9`): the nominee entry now uses the
@@ -750,8 +759,44 @@ same `isCompanyPaCover` rule as the PA checkbox (the original tested "PA on and 
 an insurer name only one of them knew left PA unchecked but still added a nominee). The full-company original is untouched.
 
 **Not changed, flagged.** KSHEMA's `paCoverYears` is fuzzy-matched against the portal's text without a 1–5 check and defaults to
-"1" when missing (the form's default is 1 too). National's `settings.PACompany` is what turns Brisk's PA into "No": a job with
-no `settings` would send the year (every current job carries it).
+"1" when missing (the form's default is 1 too). National answers "No" when its part does not carry PA (`paCover` false: Brisk or
+PA off) or `settings.PACompany` is Brisk (`tpPa.js portalPaTerm`); the year only when the part carries PA bought from National.
+
+### 14.1 PA with two insurers or TP only: ONE provider (2026-10-23)
+
+The owner: "the PA is done only with the TP company that is selected; if Brisk is selected do it with Brisk and do not touch the
+other; KSHEMA and National must work the same for multiple company and TP only."
+
+| PA Cover Company | Who buys the PA | Everyone else |
+|---|---|---|
+| Brisk | Brisk's own `pa` part, `dependsOn: "tp"`: right after the TP is bought, whatever the OD does | the TP portal opts out (KSHEMA unticks PA + reason, National "No"); the Reliance OD never has PA |
+| the TP insurer (KSHEMA / National) | the TP part (`carriesPa`), with the nominee, on that portal | no Brisk part, no Brisk certificate |
+| the OD insurer (Reliance) | **refused on save**: "PA Cover cannot be bought with the OD insurer (Reliance). Choose Brisk or KSHEMA, the TP insurer." Reliance's OD form has no PA, so it would be charged and never bought. A policy already sold that way keeps it on an edit that does not change it. | |
+| off | nobody | KSHEMA unticked + reason, National "No" |
+
+Safety nets, in the order a run meets them:
+
+- **Run-time guard** (`lib/paRouting.js`, asked by `lib/partRunner.js` before any login): reads the policy's `paCover` and
+  `settings.PACompany` as they are NOW. A Brisk part runs only if the policy still says Brisk; a part that carries PA only if the
+  policy's PA company is that part's company. Otherwise `E100`, non-retryable, stage `pa-routing`, one sentence ending "Save the
+  policy again so its parts match what it now says." A policy saved before `settings` existed is not checked.
+- **The nominee Brisk takes** (`lib/briskPartRunner.js briskNomineeProblem`, two insurers / TP only): name, gender (Male / Female)
+  and a relation from Brisk's eight (Father, Mother, Wife, Husband, Sister, Son, Daughter, Brother), compared without case (the
+  policy stores them in capitals). Missing or unknown: nothing bought, "Brisk PA: the nominee's gender is missing, so no Brisk
+  certificate was bought. Fix the nominee in Edit, then run the PA again." A single-company policy keeps the older mapping in
+  `briskCertificate.js` (synonyms; "Son", the customer's gender or "FERNANDO" when missing): untouched.
+- **The nominee's gender reaches the automation** (`nomineeGender` in the backend's `buildFullJobFormData` and in
+  `server.js buildFormDataFromPolicy`); before, Brisk always got the customer's gender.
+- **Backend**: an edit cannot change the PA provider once the PA is bought ("PA Cover was already bought with Brisk. It cannot be
+  changed to National once it is bought."); `PATCH /onlinePolicy/:id/briskCertificate` refuses a policy whose PA is not through
+  Brisk; the PA premium leg is charged to the PA company in every split mode (backend README §2).
+- **The form** asks Brisk's nominee for a Brisk PA: Name, Gender *, Relation from Brisk's eight; with a National TP also National's
+  Age and its year box (it sets the TP end date the Reliance OD gets); no DOB, Appointee, Type or Share (frontend README).
+
+Tests: `test/multiCompanyCover.test.js` (KSHEMA / National TP × off / TP company / Brisk, the guard, the nominee check, the guard
+inside the real part runner); backend `test/paRouting.test.js` and `test/jobPartsFlow.test.js`; frontend
+`utils/nomineeFields.test.js` and `components/BasicPolicyDetailsStep.nominee.test.js`. Every rule was also broken on purpose in a
+scratch copy and a test failed each time.
 
 ## 15. Reliance OD and TP — the duplicate of the full-company Reliance flow
 
@@ -767,13 +812,22 @@ exactly like `relianceForm.js`, so it does **not** go through `runHandler`. It i
 |---|---|
 | `[MC] 1` | require paths three folders deeper; the browser / session manager, S3, captcha, error catalogue, Brisk helpers and the cover / KYC modules (`relianceCoverDetails`, `relianceCoverSettle`, `relianceKycSubmit`, `relianceKycUpload`) are **shared**, not copied — so the 2026-10-14 fixes (cover refusal, PA re-tick, KYC upload / SUBMIT / toast) are in both flows by construction |
 | `[MC] 2` | failure screenshots under `screenshots/multiCompany/reliance/` (10-day S3 lifecycle prefix) |
-| `[MC] 3` | the **product** is `RELIANCE_OD_PRODUCT` / `RELIANCE_TP_PRODUCT` (exact match, `multiConfig.js`) instead of "Two Wheeler Package Bundled (Only New Veh.)". Not set → the run opens the dropdown, **lists the portal's products and stops** (`stopBeforeProduct.js`, stage `od-product` / `tp-product`, E100, not retried) |
+| `[MC] 3` | the **product** is `RELIANCE_OD_PRODUCT` / `RELIANCE_TP_PRODUCT` (exact match, `multiConfig.js`) instead of "Two Wheeler Package Bundled (Only New Veh.)". **OD defaults to "Two Wheeler Own damage Policy"** (the 2nd option of the portal's list; `.env` still overrides). TP: not set → the run opens the dropdown, **lists the portal's products and stops** (`stopBeforeProduct.js`, stage `tp-product`, E100, not retried) |
 | `[MC] 4` | no inline Brisk certificate — PA through Brisk is its own `pa` part |
 | `[MC] 5` | an unexpected error is stage `od-form` / `tp-form`; Breaker checkpoints `Reliance OD/product`, `/quote` (before Calculate Premium), `/payment` (before Pay) — and `Reliance TP/…` |
 | `[MC] 6` | the function is `fillRelianceMultiForm`; OD / TP comes from `data.policyType` (set by `buildPartFormData`) |
+| `[MC] 7` | **OD only**: right after Skip To Main Page the **"TP Details" box** is answered — Yes (an existing third party policy), No (not held with RGICL), Proceed (`relianceOdSteps.js answerTpDetailsDialog`, §15.11). Outside the skip-link `try`, so a box that does not open is an error, not "continuing" |
+| `[MC] 8` | **OD only**: the **PA Cover block is skipped** — the PA to Owner Driver click, its "valid Driving License?" opt-out question and the PA re-check; the OD form has no PA Cover and no nominee. `isCompanyPA` is declared above the skip because the nominee block uses it later. The Helmet cover and Nil Depreciation steps after it are the full flow's own lines |
+| `[MC] 9` | *(retired 2026-10-23)* the calm stop after the Nil Depreciation step; the number is not reused. The OD run now goes on to the end |
+| `[MC] 10` | **OD only**: the policy vehicle's **fuel type** is looked up **before any window opens** (`lib/vehicleFuelType.js`) and chosen in the OD form's **Fuel Type box** right after the make / model (`relianceOdSteps.js selectFuelType`), read back. The new-vehicle form fills that box by itself, so the full flow has no such step (§15.11) |
+| `[MC] 11` | **OD only**: after Get Coverage Details the **cover table must be on the page** (`requireCoverTable`; the OD page has no PA box, the one `waitForCoverDetails` counts as "loaded"); when it is not, the error is Reliance's own words — the cover box, an open popup, a field message, the required boxes that look empty — not a later "Helmet box not found" |
+| `[MC] 12` | **OD only**: the customer's **existing third party policy** (number, insurer KSHEMA / National, start and end date). `lib/existingTpDetails.js` checks the four values **before any window opens** (a bad one is a plain, non-retried error); `relianceOdSteps.js fillExistingTpPolicy` enters them right after Nil Depreciation, where the stop used to be: the Kendo panel is opened **only if it is collapsed**, then the number, the insurer (found by its list), the two dates, each read back (§15.11) |
+| `[MC] 13` | **OD only**: the PA leftovers after the cover steps — the **nominee block** and the **last PA opt-out check** before Calculate Premium — are skipped (the OD form has no PA Cover; a PA box left ticked is not touched) |
+| `[MC] 14` | **OD only**: **"Is Registration Address Same"** is ticked **only when it is not ticked** (`ensureAddressSame`); the full flow clicks it blindly, a toggle that would un-tick it |
+| `[MC] 15` | **OD only**: exact words where the full flow reads nothing — an `alert()` and a refusing popup / field message / **message bar** (a strip across the page) **after Calculate Premium** and **after Save**, and what the page shows when Save gives no "Proposal Saved Successfully" (the original throws a bare "Proposal number extraction failed"); the sentences are marked `keepMessage` so the failure catch cannot replace them |
 
-Deliberately **not** changed: IDV, discount, Get Coverage Details, PA / helmet / TPPD, financier, address, Calculate Premium, Save,
-KYC, Pending Quotes, Pay, the wallet hold. A difference of an OD-only / TP-only portal therefore shows up as a clear stop (or a
+Deliberately **not** changed: IDV, discount, Get Coverage Details, helmet / TPPD / Nil Depreciation, financier, address, Calculate Premium, Save,
+KYC, Pending Quotes, Pay, the wallet hold — and PA Cover, except that **OD skips the PA block** (`[MC] 8`, §15.11). A difference of an OD-only / TP-only portal therefore shows up as a clear stop (or a
 portal message) at the first step that differs, and gets its own tagged line when the HTML of that step is known.
 
 **The copy is generated.** `common/reliance/relianceMultiForm.js` is `relianceForm.js` plus the `[MC]` changes listed in
@@ -796,7 +850,7 @@ browser start or S3 call from a unit test throw — the copy is the real flow.
 | Setting | Default | Meaning |
 |---|---|---|
 | `RELIANCE_MULTI_FORM_ENABLED` | on | off → the parts behave as before the form existed (OD: login, Motors → Two Wheeler, stop; TP: login, stop) |
-| `RELIANCE_OD_PRODUCT` / `RELIANCE_TP_PRODUCT` | empty | the exact option text; empty → list the products and stop |
+| `RELIANCE_OD_PRODUCT` / `RELIANCE_TP_PRODUCT` | OD: `Two Wheeler Own damage Policy`; TP: empty | the exact option text; a value in `.env` wins; empty TP → list the products and stop |
 
 `MULTI_COMPANY_AUTOMATION_ENABLED` still comes first. First real run: set the product text from the stop message, then
 `BREAKER_ENABLED=true` + `BREAKER_STOP_AT=Reliance OD/quote` to look at the filled form before anything is saved.
@@ -809,7 +863,7 @@ saved" rule of `lib/partRunner.js` covers it (`savesProposalPart`): a job timeou
 
 ### 15.4 Not proven / open
 
-1. The OD-only / TP-only **product text**, and every step that differs for those products — unknown until run with the Breaker.
+1. The **TP-only product text** (not decided), and every step that differs for an OD-only / TP-only product beyond what §15.11 lists — unknown until run with the Breaker.
 2. `kycStatus`, `kycUrls` and `proposalNumber` are single fields on the policy: with OD at Reliance and TP at another insurer both
    write them. Per-part notes are a later step (same caveat as §13.2).
 3. The real KYC page after a **good** SUBMIT is known from its markup, not from a successful run.
@@ -950,6 +1004,74 @@ The OD / TP copy is generated from `relianceForm.js`, so it has the same three s
 A re-run skips a proposal and a KYC an earlier run finished, and the payment runs only after the KYC.
 A failed KYC stops at the KYC, and Re-submit redoes only the KYC with the same proposal. Operators set a stage back to Pending from the History dialog.
 Full description: repo README "Reliance in three stages". This also closes part of §15.4 "single fields shared by OD and TP": the stages are per part; `proposalNumber` / `kycStatus` on the policy still are not.
+
+### 15.11 Reliance OD: what is built so far (2026-10-23)
+The owner's steps for the own-damage part, from `plan-OD-Relience.txt` and his messages. Everything not listed as OD-only is the full-company flow, copied (`[MC]` lines only; one switch, `mcKind === "od"`, so the TP part never takes these branches). Step by step against the plan: §15.12.
+
+| # | Step | Where |
+|---|---|---|
+| 0 | the vehicle's **fuel type** is read from the policy's own Make & Model master row — **before any window opens**; not found = a plain error, no login, no captcha, not retried | `[MC] 10`, `lib/vehicleFuelType.js` |
+| 1 | login, Motors → Two Wheeler (unchanged) | full flow |
+| 2 | Sub Product = **"Two Wheeler Own damage Policy"** — the portal's 2nd option, chosen by its exact text | `[MC] 3`, `multiConfig.js` `DEFAULT_PRODUCT` |
+| 3 | **Skip To Main Page** (unchanged) | full flow |
+| 4 | the **TP Details** box: *Existing Third Party / Liability Policy Available* = **Yes** (`#rbIsExistingPolicyLiabilityYes`), then *Is Third Party Policy held With RGICL* = **No** (`#rbIsRGICLNo`), then **Proceed** (`#btnISNotRGICLPolicy`) | `[MC] 7`, `relianceOdSteps.js` |
+| 5 | vertical code, PAN not available, Form 60, Submit, e-mail, **Validate Customer** (unchanged; "Customer Already Exists" is cancelled as before) | full flow |
+| 6 | vehicle details — make / model … | full flow |
+| 6a | … then the **Fuel Type** box, right after the make / model and before the dates | `[MC] 10`, `selectFuelType` |
+| 6b | … purchase and registration dates, manufacturing year and month, Is New Vehicle, RTO, engine and chassis numbers, IDV, discount (unchanged) | full flow |
+| 7 | **Get Coverage Details** (unchanged: the four requests, the wait until Reliance has answered them all, and Reliance's own refusal sentence, for example "No Discount available ...", reported as an error exactly as in the full flow) | full flow |
+| 7a | the **cover table must be on the page** — else the exact reason | `[MC] 11`, `requireCoverTable` |
+| 8 | **PA Cover skipped** — the PA to Owner Driver click, its opt-out question and the PA re-check | `[MC] 8` |
+| 9 | the **Helmet cover removed** — the full flow's own click on `#ChkBox500` (ticked by default) | full flow |
+| 10 | TPPD (an OD policy asks none, left as is) and **Nil Depreciation** — `#ChkBox10` ticked when the policy has Zero Depreciation, its rate typed into `#txtNilDepriciationRate`, then the portal's own `validateNildepriciation()` | full flow |
+| 11 | the **existing third party policy** (`#txtExistingTPPolicyNo`, the insurer, `#dpExistingTPPolicyRiskStartDate`, `#dpExistingTPPolicyRiskEndDate`): the panel is opened only if it is collapsed (`span.k-panelbar-expand`; open = `k-panelbar-collapse` = skipped), the number typed, the insurer chosen (KSHEMA General Insurance Limited / National Insurance Company Limited, found by its list), both dates typed like a person and read back; the page's own date validators are heard (`alert()` text) | `[MC] 12`, `fillExistingTpPolicy` |
+| 12 | financier (when the policy has one) — the full flow's block, unchanged | full flow |
+| 13 | **Is Registration Address Same** — ticked only if not ticked | `[MC] 14`, `ensureAddressSame` |
+| 14 | the nominee block and the last PA check — **skipped** for OD | `[MC] 13` |
+| 15 | **Calculate Premium**, the wait, an `alert()` or a refusing popup reported in Reliance's own words | `[MC] 15`, `afterCalculatePremiumClick`, `afterCalculatePremium` |
+| 16 | **Save**, the proposal number read from "Proposal Saved Successfully R…"; no message = what the page shows, and "check View Policy before running again" | `[MC] 15`, `afterSaveClick`, `explainSaveFailure` |
+| 17 | the three stages after the proposal — **KYC upload (OVD)**, Pending Quotes, **Pay** (customer link, or the wallet's CDT option) — the full flow's own lines, saved per part (`relianceStages.od`, `walletPayment_od`). **The payment is real**, exactly like the full flow | full flow |
+
+- **The Fuel Type box** (the owner, 2026-10-23, after a real run: "it miss the fuel type ... I want exact same as, not missing anything, and error handling all thing exact"). The new-vehicle form fills this box by itself; the OD form does not, so the full flow never touched it and the OD run left it empty. The value is the policy vehicle's: the Make & Model master row has a required `fuelType`, the Online Policy keeps only the row's id (`makeModel`), the job data has no fuel type — so `lib/vehicleFuelType.js` reads it at run time from **that exact row** (an old policy whose `makeModel` is not an id: the rows with exactly its make, model, CC and variant, and only when they agree). **The value itself is never guessed.** The box's real markup is **not known**, so it is **found, not assumed**: by an id / name / `aria-owns` with "fuel" in it, or by its "Fuel Type" label (`readFuelTypeInPage`). A Kendo dropdown (a wrapper span with `aria-owns="<id>_listbox"` around a hidden select) is chosen like a person — click the box open, click the item — read back; a visible native select goes through `lib/realSelect.js`; Kendo's own function is the last resort with a warning; a locked box that already holds the right value is fine, a different one is an error. Matching is the exact text, case / spaces / punctuation ignored, nothing fuzzier. **Which item:** exactly the policy's fuel type when Reliance's list has it (Petrol, Diesel, Bifuel, Battery); Reliance's own name when it spells the same fuel differently (ELECTRIC / EV = Battery, HYBRID = Hybrid Electric Vehicle, PETROL+CNG / PETRO/LPG = Bifuel — and **no fallback**: an electric scooter never becomes Petrol); a gas fuel on its own (**LPG, CNG = Petrol, the owner's decision** after the first real run, with a warning line in the log); anything else (the master's typos DESAL, HYPER FULE) stops with an exact sentence quoting both. "Select Type" is Reliance's placeholder, never a fuel type. **First real run (2026-10-23):** the box was found and its list read — `Select Type, Petrol, Diesel, Bifuel, Battery, Hybrid Electric Vehicle` — and the run stopped because the vehicle's **Reliance row** in the Make & Model master carries fuel type **LPG** (the KSHEMA and National rows of the same vehicle say PETROL), which Reliance does not offer; the owner: "select the petrol". Correcting the master row to PETROL also works (exact match).
+- **Error handling, one sentence per way to fail** (all plain, one colon, "Nothing was saved or paid."): no fuel type for the vehicle / the master row is gone / two rows disagree (before the window opens, not retried); the database could not be read (before the window, retried); the Fuel Type box not found within 15 s (**the sentence lists the dropdown boxes that ARE on the page**, so the next run shows the real id without anyone opening DevTools); found but not on screen; more than one; its list stays empty; the list does not offer the fuel type (**both quoted**); a locked box with another value; the box still showing something else after the choice. Get Coverage Details that does not return the cover table: Reliance's own refusal sentence (the full flow's check, unchanged), else `[MC] 11` says what the page shows — cover box, popup (without its OK button), field messages, the required boxes that look empty, the text of a native `alert()`.
+- **The TP Details box.** Each answer is a real click, and each step waits for the next thing to appear (the Yes and No radios have different `name`s, `name="Yes"` / `name="No"`, so the browser does not group them — only the page's own handlers `OnclickradioYes` / `ISRGICLPOlicyNO` / `ISNotRGICLPolicy` say what a click did). An answer that has done nothing for 4 s is given once more with a script click; **Proceed is pressed exactly once**. The box that does not open (20 s), the question or button that does not show (12 s) and a box still open 20 s after Proceed are errors with a plain sentence (retryable like any step that waits for the portal). Searched in the main document only; if Reliance ever puts the box in an iframe the error says the box did not open and the failure screenshot shows the page.
+- **No PA Cover and no nominee on the OD form** (the owner; also his plan note "pa cover details not showed"). The Online Policy form no longer offers PA Cover on OD only (frontend README). `[MC] 8` skips the PA block for OD: only the PA click, its opt-out question and the PA re-check — `const isCompanyPA` stays declared above it, because the nominee block and the last PA check (both after the stop) use it later. The nominee block and that last PA check are skipped for OD too (`[MC] 13`). An OD page without a PA box makes `waitForCoverDetails` (which counts the PA box as "the cover table is loaded") wait its 6 s and carry on.
+- **Helmet cover and Nil Depreciation** (the owner, 2026-10-23: "nil dip and helmet remove that all things are same"): the full flow's own lines, not copied again. The Helmet step is a **blind click** (it assumes the box is ticked by default, as on the full-flow page); if the OD page does not tick it by default that click would TICK it. So the stop sentence **reads the cover table back** — Helmet off or "STILL TICKED", Zero Depreciation on or off with its rate, whether a PA box is on the page (left alone). Reliance's four Get Coverage answers redraw the table (Helmet ticked again); the full flow's own idle wait lets them all land before the Helmet click.
+- **The customer's existing TP policy** (2026-10-23; the owner: "open the expandable panel only if it is collapsed ... enter the TP policy number ... KSHEMA General Insurance Limited / National Insurance Company Limited ... enter the start and end date, then continue the same as the full flow"). The four values are the policy's (`lib/existingTpGate.js` already requires them before an OD part starts; reading them from the TP insurer's portal is a later feature). `lib/existingTpDetails.js` checks them **before any window opens**: number 3-40 letters / digits / `/ - .`, the insurer KSHEMA or National, both dates real `DD-MM-YYYY` days, the end after the start (otherwise one plain, non-retried sentence: "Enter it in Edit then TP policy details, then run the policy again."). On the page: **the panel is opened only if it is collapsed** (the number box is read first; an open panel is not clicked, a click would collapse it; a click that opens nothing is repeated once with a script click; a panel that never opens is an error that lists the panels on the page). The number is typed (click, clear, type, TAB so the page's `onblur` runs) and read back. **The insurer's box id was never seen**, so it is found by what its list offers (exactly one item containing "kshema" / "national insurance"; none or two is an error that lists the dropdowns of the panel and what they offer) and chosen like a person (a Kendo dropdown: click open, click the item; a native select through `lib/realSelect.js`). The dates are **typed** (the picker's `onchange` validators `ValidateTpPolicyStartDate()` / `ValidateTpPolicyEndate()` run) and read back as the **same day however the picker writes it** (`01/10/2026` is accepted for `01-10-2026`); only when typing does not take, Kendo's own `value()` function, then the form's old script way (value + `change`), each with a warning. An `alert()` the page raises (its own validator: "end date must be ...") is the error, in its own words with the colon turned into a dash. Last, the loader is waited for, all four boxes are read back, and a refusing popup or field message ends the run.
+- **FIRST LIVE OD RUN (2026-10-23, 13:15, the owner's policy ANMOL, screenshot `error_ANMOL_…_od_post-calculation-error_….png`):** the run went through the **existing TP step, the address box and Calculate Premium on the real Reliance OD page** — the premium summary was on screen (Basic OD 975.8, Nil Depreciation 716.13, OD Discount −975.8, CGST/SGST 152.28 each, Net Premium 1692, Total Premium 1997) — and then **Reliance refused Save** with a red bar across the bottom of the page: *"As per entered Registration Number the Vehicle Class is Goods Carrier. The same is not permitted to be booked under Product 2308. Kindly book the same in correct Product or refer to our nearest Branch."* The run stopped there (stage `post-calculation`, nothing saved, nothing paid). Reading: the OD form has a **Registration Number** box (plan steps 8-9, "Register number" / "fetch vehicle details" — **not built**; the policy has none) and Reliance looked up whatever was in it. **The bar was a strip with no class the reader knew**, so the failure sentence may not have quoted it; since then message bars are read (class / id says message, alert, error ... or pinned to the top / bottom of the window, innermost, the page's footer left out because it was already there when Calculate Premium was checked) and quoted by every `[MC] 15` sentence. Real Chrome on the replica: a bottom bar after Save / after Calculate Premium is quoted, the footer is not.
+- **After the existing TP policy the run is the full flow, to the end** (the owner: "continue ... address same as communication, calculate premium and wait, save, OVD upload, all things are same, error handling"): financier (the full flow's block), **Is Registration Address Same** (`[MC] 14`: ticked only when it is not ticked), Calculate Premium, Save, then the KYC upload, Pending Quotes and Pay (the customer link, or the wallet's CDT option) — **real, like the full flow**. `[MC] 15` adds only exact words where the full flow reads nothing: an `alert()` after Calculate Premium or Save, a refusing popup / field message after Calculate Premium (Reliance's own words plus the required boxes that look empty), and what the page shows when Save gives no "Proposal Saved Successfully" (and, since the proposal may have been saved anyway, "check View Policy before running again").
+- **Business Type** (New / IGI Renewal / Renewal from other Company / Used Cars) is left as Reliance sets it after Skip To Main Page (it showed "New", greyed). Step 5 of the owner's plan ("Renewal from another company") is **not done** — ask when the next steps are built.
+- **Evidence.** Automated (all with fake pages and a fake clock — no browser): `test/relianceOdSteps.test.js` (17: the TP Details box, the cover table reader), `test/relianceOdFuelType.test.js` (27: the Fuel Type step — late box, late list, disabled box, ignored clicks, every error — and the cover table check), `test/relianceOdExistingTp.test.js` (25: the existing TP panel open / collapsed / ignored click / never opens, the number read back, the insurer found by its list (KSHEMA, National, none, two, disabled, wrong item afterwards), the dates typed / reformatted / Kendo function / script way / refused / an `alert()` early or late, "Is Registration Address Same", the words after Calculate Premium and Save), `test/existingTpDetails.test.js` (7: the data check before any window opens), `test/vehicleFuelType.test.js` (10), `test/relianceMultiForm.test.js` (43: where `[MC] 7`-`15` sit and in which order, the OD-only branches, the declared names, a bad fuel type or bad TP details failing **before any window opens**, the TP part untouched). **Real Chrome, by hand** (`test/manual/odReplica/`, README there; not part of `npm test`): the whole generated copy against a replica site (Motors menu, product list, skip link, TP box, Form 60 iframe, vehicle fields, a Fuel Type box that starts disabled and loads late, Get Coverage Details whose four answers arrive 1.3 / 1.8 / 2.9 / 6.5 s later and each redraw the cover table, Helmet ticked by default, Nil Depreciation, the **existing TP panel (open or collapsed) with a Kendo-like insurer list and two date boxes**, the address box, Calculate Premium, Save and "Proposal Saved Successfully R…") — **17 scenarios, all pass**: OD happy path up to the proposal number, LPG → Petrol, the "Customer Already Exists" popup, a ticked PA box left alone, no Fuel Type box, a list without the fuel type, Reliance refusing Get Coverage Details, a collapsed panel opened by one click, a picker that shows dd/mm/yyyy, a validator that refuses the end date with an `alert()`, a picker that empties the date, no insurer in the list, an already ticked address box, Calculate Premium refused, Save refused, **TP** unchanged (stops at its product list; with a product set it still does the PA opt-out and goes past where OD stops); the Fuel Type step on 14 page shapes; the reader of Reliance's words. **50 deliberate breaks of the new OD code (existing TP step, address, Calculate / Save words, the `[MC] 12`-`15` lines, the data check) in a copy, every one caught** (after 4 first got past the tests and got their own test) on top of the 73 of the Fuel Type work.
+- **Not proven on the live portal**: the Fuel Type box's real **id and markup** (the first real run found it and read its list, but its log line did not name it — the next run's `found the box (id ...)` line does); the TP Details box's real markup beyond the ids and onclick names the owner pasted (looked for in the main document); what Reliance shows after Proceed; whether the OD page's vehicle fields, Get Coverage Details, Helmet and Nil Depreciation boxes carry the same ids as the full form (the owner says all the same); the Helmet box's default state on the OD page; that the equivalents (Electric = Battery, Petrol+CNG = Bifuel) are what Reliance wants — they follow Reliance's own list names.
+
+### 15.12 Reliance OD — the plan, step by step (what is built and what is not)
+`plan-OD-Relience.txt` (the owner's manual steps) against the run as of 2026-10-23 (evening). **Built** = the OD run does it. **Full flow, never run on the OD page** = the OD run now reaches the full flow's lines and runs them; the OD page's own markup for them is unseen. **Not built** = nobody does it yet.
+
+| Plan step | Status |
+|---|---|
+| 1 login · 2 Motor policy · 3 Two wheeler | built (full flow) |
+| 4 select Two Wheeler Own Damage Policy | built (default product) |
+| 5 Renewal from another company | **not built** — Business Type is left as Reliance sets it ("New") |
+| 6 Skip to main page | built (full flow) |
+| 7 Existing third party liability: Yes, then "held with RGICL": No, then Proceed | built (`[MC] 7`) |
+| 8 Register number · 9 fetch vehicle details | **not built** — the policy has no registration number (a new vehicle); the make / model is typed instead |
+| 9 Policy cover from date | not set from the policy — Reliance's own default (today) stays |
+| 10 vertical code | built (full flow: the first option) |
+| 11 verify PAN number | **no step** in the full flow either — ask |
+| 12 PAN not available · 13 Form 60 · 14 Validate customer | built (full flow) |
+| 15 **fuel type** | **built now** (`[MC] 10`) |
+| 15 IDV · 16 detariff discount | built (full flow) |
+| 17-21 previous policy type, period, ownership transfer, start / end dates, last year NCB | **not built** (renewal-type fields) |
+| 22 Helmet cover | built (removed, the full flow's own click) |
+| Nil Dip (the owner's later message) | built (full flow) — no longer a stop |
+| 23-26 existing third party insurance: number, insurer, start, end | **built** (`[MC] 12`, 2026-10-23): panel opened only if collapsed, then the four values from the policy; markup unseen |
+| 23-26 previous insurer details: policy number, document proof, insurer name, branch | **not built** (renewal-type fields) |
+| 27-30 vehicle hypothecated: checkbox, type, financier name, address | **full flow, never run on the OD page** (the financier block runs after the existing TP policy) |
+| 31 registration address same as communication address | **built** (`[MC] 14`: ticked only if not ticked) |
+| 32 calculate premium · save | **full flow + exact words** (`[MC] 15`), never run on the OD page |
+| 33-40 make payment, proposal number, View Policy, KYC | **full flow, never run on the OD page** (the three stages; the payment is real) |
+| note "1. 2nd option" | done (the 2nd Sub Product option) |
+| note "2. pa cover details not showed" | done (no PA Cover, no nominee) |
 
 ## 16. KSHEMA slow portal — the IDV box and the PA year dropdown
 

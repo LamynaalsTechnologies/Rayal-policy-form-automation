@@ -1,4 +1,4 @@
-/**, * [MC] Reliance OD / TP — the full-company Reliance flow, DUPLICATED, for the multiCompany Reliance OD and TP handlers., *, * This file is a copy of fullPolicycompany/relianceForm.js (login, navigation, product, quote form, cover details,, * PA / helmet / TPPD, financier, address, Calculate Premium, Save, KYC, Pending Quotes, Pay, wallet hold, its own error, * mapping and cleanup), made for ../../odCompany/relianceOD/relianceOD.js and ../../tpCompany/relianceTP/relianceTP.js., * fullPolicycompany/relianceForm.js itself is NOT touched and still runs every single-company Reliance policy., *, * GENERATED: this file is relianceForm.js plus the [MC] changes listed in ./relianceMultiFormSpec.js, applied by that, * file. Do not edit it by hand — edit the original (or the spec) and regenerate:, *     node multiCompany/common/reliance/relianceMultiFormSpec.js --write, * test/relianceMultiForm.test.js fails if this file is not exactly what the spec makes of the original, so a portal fix, * made in relianceForm.js cannot be forgotten here., *, * Every line that differs from the original is tagged "[MC]":, *   [MC] 1  require paths are three folders deeper ("../" -> "../../../", "./relianceX" ->, *           "../../../fullPolicycompany/relianceX"). The browser / session manager, S3, captcha, error catalogue, Brisk, *           helpers and the cover / KYC modules stay SHARED with the original, they are not copied., *   [MC] 2  failure screenshots go under screenshots/multiCompany/reliance/ (see captureErrorScreenshot), which has the, *           10-day S3 lifecycle rule., *   [MC] 3  the PRODUCT is the one of the part — RELIANCE_OD_PRODUCT / RELIANCE_TP_PRODUCT (./multiConfig.js), exact, *           match — instead of "Two Wheeler Package Bundled (Only New Veh.)". Not configured: the run opens the, *           dropdown, lists the portal's products and stops (./stopBeforeProduct.js); nothing is chosen or bought., *   [MC] 4  no inline Brisk certificate: PA through Brisk is its own `pa` part in a multi-company policy., *   [MC] 5  an unexpected error carries the stage "od-form" / "tp-form" (the original says "login-form"); Breaker, *           checkpoints "Reliance OD/product", "/quote", "/payment" (and "Reliance TP/...") — no-ops unless .env, *           switches the Breaker on., *   [MC] 6  the function is fillRelianceMultiForm and takes OD / TP from data.policyType (set by the part runner)., * Left exactly as the full flow, on purpose: IDV, discount, Get Coverage Details, PA / helmet / TPPD, financier,, * address, Calculate Premium, Save, KYC, Pending Quotes, Pay and the wallet hold — so a difference of an OD-only /, * TP-only portal shows up as a clear stop at the first step that differs, and gets an own tagged line when the HTML of, * that step is known. The dead helpers and the standalone block at the bottom stay too, so the two files stay diffable., */
+/**, * [MC] Reliance OD / TP — the full-company Reliance flow, DUPLICATED, for the multiCompany Reliance OD and TP handlers., *, * This file is a copy of fullPolicycompany/relianceForm.js (login, navigation, product, quote form, cover details,, * PA / helmet / TPPD, financier, address, Calculate Premium, Save, KYC, Pending Quotes, Pay, wallet hold, its own error, * mapping and cleanup), made for ../../odCompany/relianceOD/relianceOD.js and ../../tpCompany/relianceTP/relianceTP.js., * fullPolicycompany/relianceForm.js itself is NOT touched and still runs every single-company Reliance policy., *, * GENERATED: this file is relianceForm.js plus the [MC] changes listed in ./relianceMultiFormSpec.js, applied by that, * file. Do not edit it by hand — edit the original (or the spec) and regenerate:, *     node multiCompany/common/reliance/relianceMultiFormSpec.js --write, * test/relianceMultiForm.test.js fails if this file is not exactly what the spec makes of the original, so a portal fix, * made in relianceForm.js cannot be forgotten here., *, * Every line that differs from the original is tagged "[MC]":, *   [MC] 1  require paths are three folders deeper ("../" -> "../../../", "./relianceX" ->, *           "../../../fullPolicycompany/relianceX"). The browser / session manager, S3, captcha, error catalogue, Brisk, *           helpers and the cover / KYC modules stay SHARED with the original, they are not copied., *   [MC] 2  failure screenshots go under screenshots/multiCompany/reliance/ (see captureErrorScreenshot), which has the, *           10-day S3 lifecycle rule., *   [MC] 3  the PRODUCT is the one of the part — RELIANCE_OD_PRODUCT / RELIANCE_TP_PRODUCT (./multiConfig.js), exact, *           match — instead of "Two Wheeler Package Bundled (Only New Veh.)". OD chooses "Two Wheeler Own damage Policy" by, *           default. Not configured (TP): the run opens the dropdown, lists the portal's products and stops, *           (./stopBeforeProduct.js); nothing is chosen or bought., *   [MC] 4  no inline Brisk certificate: PA through Brisk is its own `pa` part in a multi-company policy., *   [MC] 5  an unexpected error carries the stage "od-form" / "tp-form" (the original says "login-form"); Breaker, *           checkpoints "Reliance OD/product", "/quote", "/payment" (and "Reliance TP/...") — no-ops unless .env, *           switches the Breaker on., *   [MC] 6  the function is fillRelianceMultiForm and takes OD / TP from data.policyType (set by the part runner)., *   [MC] 7  Reliance OD only: Skip To Main Page opens the "TP Details" box, which is answered Yes (an existing third party, *           policy), No (not held with RGICL), Proceed (./relianceOdSteps.js). The TP part does not do this., *   [MC] 8  Reliance OD only: the PA Cover block — the PA to Owner Driver click, its opt-out question and the PA re-check — is, *           SKIPPED: the OD form has no PA Cover and no nominee. The Helmet cover and Nil Depreciation steps after it are the full, *           flow's own lines, unchanged., *   [MC] 10 Reliance OD only: the policy vehicle's FUEL TYPE (../../../lib/vehicleFuelType.js, looked up before any window opens) is chosen in the, *           OD form's Fuel Type box right after the make / model and read back. The new-vehicle form fills it by itself, so the full flow has no step., *   [MC] 11 Reliance OD only: after Get Coverage Details the cover table must be on the page (the OD page has no PA box); when it is not, the run, *           says why in Reliance's own words (./relianceOdSteps.js requireCoverTable) instead of failing later on a missing Helmet box., *   [MC] 12 Reliance OD only: the customer's EXISTING THIRD PARTY POLICY (number, insurer, start and end date — ../../../lib/existingTpDetails.js checks them, *           before any window opens) is entered after Nil Depreciation: the Kendo panel is opened only if it is collapsed, then the number, the insurer and, *           the two dates, each read back (./relianceOdSteps.js fillExistingTpPolicy). It replaces the stop the OD run had there: the run now goes on to the end., *   [MC] 13 Reliance OD only: the PA leftovers after the cover steps — the nominee block and the last PA opt-out check — are skipped; the OD form has no PA Cover., *   [MC] 14 Reliance OD only: "Is Registration Address Same" is ticked only when it is NOT ticked (the full flow clicks it blindly, a toggle)., *   [MC] 15 Reliance OD only: exact words where the full flow reads nothing — an alert() or a refusing popup after Calculate Premium and after Save, and what, *           the page shows when Save gives no "Proposal Saved Successfully" (the original throws a bare "Proposal number extraction failed")., * Left exactly as the full flow, on purpose: IDV, discount, Get Coverage Details, PA / helmet / TPPD, financier,, * address, Calculate Premium, Save, KYC, Pending Quotes, Pay and the wallet hold — so a difference of an OD-only /, * TP-only portal shows up as a clear stop at the first step that differs, and gets an own tagged line when the HTML of, * that step is known. The dead helpers and the standalone block at the bottom stay too, so the two files stay diffable., */
 const { By, until, Key } = require("selenium-webdriver");
 const { createFreshDriverFromBaseProfile } = require("../../../browser");
 const { startRecording } = require("../../../lib/jobRecorder");
@@ -150,6 +150,10 @@ require("../../../breaker"); // defines the global `Breaker` for a standalone ru
 // [MC] 3: the product of the part (OD / TP) and the stop taken while it is not configured
 const { reliancePartProduct, relianceMultiLabel, xpathLiteral } = require("./multiConfig"); // [MC] 3
 const { stopBeforeProduct } = require("./stopBeforeProduct"); // [MC] 3
+// [MC] 7 + 10 to 15: the steps only the OD part does (the TP Details box, the fuel type, the cover table check, the existing TP policy, address same, the exact words after Calculate Premium / Save)
+const { answerTpDetailsDialog, selectFuelType, requireCoverTable, fillExistingTpPolicy, ensureAddressSame, afterCalculatePremiumClick, afterCalculatePremium, afterSaveClick, explainSaveFailure } = require("./relianceOdSteps"); // [MC] 7
+const { requireVehicleFuelType } = require("../../../lib/vehicleFuelType"); // [MC] 10
+const { requireExistingTpDetails } = require("../../../lib/existingTpDetails"); // [MC] 12
 
 // Configure AWS S3 for presigned URL generation (fallback)
 const s3 = new AWS.S3({
@@ -1305,6 +1309,11 @@ async function fillRelianceMultiForm( // [MC] 6
     // trouble in that invisible step killed the job before the real window
     // ever appeared ("Master session is not active and re-login failed").
     // The login below is the only one that ever mattered.
+    // [MC] 10: Reliance OD only. The vehicle's fuel type (the OD form has a Fuel Type box the new-vehicle form fills by itself) is looked up
+    // HERE, before any window opens: a data problem is reported at once, in a plain sentence, instead of after a login and a captcha.
+    const mcFuelType = mcKind === "od" ? await requireVehicleFuelType(data, { jobId, log: (line) => console.log(line) }) : ""; // [MC] 10
+    // [MC] 12: the customer's existing third party policy (number, insurer, dates) is checked HERE too, for the same reason.
+    const mcTp = mcKind === "od" ? requireExistingTpDetails(data, { jobId, log: (line) => console.log(line) }) : null; // [MC] 12
     jobBrowser = await createRelianceJobBrowser(jobId);
     driver = jobBrowser.driver;
 
@@ -1560,6 +1569,12 @@ async function fillRelianceMultiForm( // [MC] 6
     } catch (err) {
       console.log("No skip link detected, continuing...");
     }
+
+    // [MC] 7: Reliance OD only. Skip To Main Page opens the "TP Details" box (the customer's TP policy is not held with
+    // RGICL): Yes, No, Proceed. Outside the skip-link try above on purpose: a box that does not open is an error, not a "continuing".
+    if (mcKind === "od") { // [MC] 7
+      await answerTpDetailsDialog(driver, { log: (line) => console.log(line), waitLoader: () => waitForLoaderToDisappear(driver) }); // [MC] 7
+    } // [MC] 7
 
     // ==  vertical code dropdown ===
 
@@ -1904,6 +1919,10 @@ async function fillRelianceMultiForm( // [MC] 6
           }
         );
 
+        // [MC] 10: Reliance OD only. The OD form's Fuel Type box — the new-vehicle form fills it by itself, so the full flow never touched it (the owner:
+        // "it miss the fuel type"). Chosen from the policy vehicle's own fuel type, read back; every way it can fail has its own sentence.
+        if (mcKind === "od") await selectFuelType(driver, { fuelType: mcFuelType, log: (line) => console.log(line), waitLoader: () => waitForLoaderToDisappear(driver) }); // [MC] 10
+
         // Purchase Date - use data from MongoDB or today's date
         console.log("Filling purchase date...");
         const purchaseDate = data.purchaseDate || new Date().toLocaleDateString("en-GB").split("/").join("-"); // Convert DD/MM/YYYY to DD-MM-YYYY
@@ -2242,9 +2261,16 @@ async function fillRelianceMultiForm( // [MC] 6
           }
         }
 
+        // [MC] 11: Reliance OD only. The cover table must be on the page — the OD page has no PA box, the one waitForCoverDetails counts as "loaded" —
+        // and when it is not, the run says why in Reliance's own words instead of failing later with a missing Helmet box.
+        if (mcKind === "od") await requireCoverTable(driver, { log: (line) => console.log(line) }); // [MC] 11
+
         // PA to Owner Driver Handling
         const isCompanyPA = data.paCover === true && (String(data.paCoverCompany).toLowerCase() === "company" || String(data.paCoverCompany).toLowerCase() === "reliance");
 
+        // [MC] 8: Reliance OD only. The OD form has no PA Cover (no PA to Owner Driver box, no opt-out question, no nominee), so the
+        // PA block below is skipped. `isCompanyPA` above stays OUTSIDE it: the nominee block and the last PA check use it later.
+        if (mcKind !== "od") { // [MC] 8
         console.log("Checking PA to Owner Driver checkbox state...");
         const paOwnerDriverCheckbox = await driver.wait(
           until.elementLocated(By.id("ChkBox24")),
@@ -2309,6 +2335,7 @@ async function fillRelianceMultiForm( // [MC] 6
           if (!paOff.ok) throw new Error(ownerDriverPaStillOnMessage(paOff));
           if (paOff.redone > 0) console.log(`PA to Owner Driver had to be switched off again (${paOff.redone}x).`);
         }
+        } // [MC] 8: end of the PA block that Reliance OD skips
 
         // Uncheck Helmet Cover checkbox
         console.log("Unchecking Helmet Cover checkbox...");
@@ -2463,6 +2490,11 @@ async function fillRelianceMultiForm( // [MC] 6
         } catch (err) {
           console.log("Could not toggle Zero Depreciation checkbox or set percentage:", err.message);
         }
+
+        // [MC] 12: Reliance OD only. The customer's existing third party policy (plan steps 23-26): the panel is opened only if it is collapsed, then
+        // the number, the insurer and the two dates. The full flow has nothing here; the OD run goes on from it to the end — financier, address,
+        // Calculate Premium, Save, the KYC upload, Pending Quotes, Pay — with the full flow's own lines.
+        if (mcKind === "od") await fillExistingTpPolicy(driver, { tp: mcTp, log: (line) => console.log(line), waitLoader: () => waitForLoaderToDisappear(driver) }); // [MC] 12
 
         // IDV was already set before "Get Coverage Details" - skipping duplicate set
         console.log("Skipping duplicate IDV set (already set before Get Coverage Details)");
@@ -2975,6 +3007,10 @@ async function fillRelianceMultiForm( // [MC] 6
         }
 
         // Now check "Is Registration Address Same" checkbox
+        // [MC] 14: Reliance OD only — ticked ONLY when it is not ticked (the original click is a blind toggle).
+        if (mcKind === "od") { // [MC] 14
+          await ensureAddressSame(driver, { log: (line) => console.log(line) }); // [MC] 14
+        } else { // [MC] 14
         console.log("Checking 'Is Registration Address Same' checkbox...");
         const regAddressSameCheckbox = await driver.wait(
           until.elementLocated(By.id("IsRegistrationAddresssame")),
@@ -2983,12 +3019,14 @@ async function fillRelianceMultiForm( // [MC] 6
         await driver.executeScript("arguments[0].click();", regAddressSameCheckbox);
         console.log("Checked 'Is Registration Address Same' checkbox");
         await driver.sleep(2000);
+        } // [MC] 14
 
         // Click "Calculate Premium" button
 
 
         // === ULTIMATE FINAL STAGE: Fill Nominee Details for PA Cover after Premium Calculation ===
-        if (isCompanyPA) {
+        // [MC] 13: Reliance OD only — the OD form has no PA Cover and no nominee: this block is skipped.
+        if (isCompanyPA && mcKind !== "od") { // [MC] 13
           console.log("PA Cover enabled. Filling nominee details at ULTIMATE final stage (post-calculation)...");
           try {
             // Check if nominee section needs expansion
@@ -3115,7 +3153,8 @@ async function fillRelianceMultiForm( // [MC] 6
 
         // Last look before the premium is calculated: everything above (Helmet, TPPD, Zero Depreciation, financier,
         // address) can make Reliance redraw the cover table, and a redraw re-ticks PA to Owner Driver.
-        if (!isCompanyPA && isCoverSettleEnabled()) {
+        // [MC] 13: Reliance OD only — no PA box to opt out of (and a ticked one is left alone, as the owner said no PA click).
+        if (!isCompanyPA && mcKind !== "od" && isCoverSettleEnabled()) { // [MC] 13
           const paOff = await ensureOwnerDriverPaOff(driver);
           if (!paOff.ok) throw new Error(ownerDriverPaStillOnMessage(paOff));
           if (paOff.redone > 0) console.log(`PA to Owner Driver had to be switched off again (${paOff.redone}x).`);
@@ -3146,12 +3185,16 @@ async function fillRelianceMultiForm( // [MC] 6
           );
         }
         console.log("Clicked 'Calculate Premium' button!");
+        // [MC] 15: Reliance OD only — an alert() raised by the click is the answer (the next command would swallow it).
+        if (mcKind === "od") await afterCalculatePremiumClick(driver); // [MC] 15
 
         // Wait for premium calculation to complete
         await driver.sleep(2000);
         await waitForLoaderToDisappear(driver);
         await driver.sleep(2000);
         console.log("Premium calculation completed!");
+        // [MC] 15: Reliance OD only — a refusal Reliance put on the page (popup / field message) is the answer, in its own words.
+        if (mcKind === "od") await afterCalculatePremium(driver, { log: (line) => console.log(line) }); // [MC] 15
 
         // === STEP 10: Handle post-calculation elements ===
         console.log("Handling post-calculation elements...");
@@ -3181,6 +3224,8 @@ async function fillRelianceMultiForm( // [MC] 6
             await driver.executeScript("arguments[0].click();", saveButton);
           }
           console.log("Clicked Save button!");
+          // [MC] 15: Reliance OD only — an alert() raised by Save is the answer.
+          if (mcKind === "od") await afterSaveClick(driver); // [MC] 15
           await driver.sleep(3000);
 
           // === NEW FLOW: Extract Proposal Number ===
@@ -3212,7 +3257,8 @@ async function fillRelianceMultiForm( // [MC] 6
 
           if (!proposalNumber) {
             console.error("❌ Failed to extract proposal number. Cannot continue with new flow.");
-            throw new Error("Proposal number extraction failed");
+            // [MC] 15: Reliance OD only — say what the page shows instead of the bare sentence.
+            throw (mcKind === "od" ? await explainSaveFailure(driver) : new Error("Proposal number extraction failed")); // [MC] 15
           }
 
           // Store it BEFORE the rest of the flow runs. Everything after this

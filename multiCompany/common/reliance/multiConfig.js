@@ -9,10 +9,15 @@
  *
  * RELIANCE_OD_PRODUCT / RELIANCE_TP_PRODUCT — the EXACT text of the product option in the Sub Product dropdown
  *   (span[aria-owns='ddlMotorProducts_listbox']) for an own-damage-only / third-party-only policy, as the Reliance
- *   portal shows it. Not known when this was written, so both start EMPTY: with the one for this part empty the run
- *   opens the dropdown, lists the portal's products and stops (stopBeforeProduct.js) — nothing is chosen or bought —
- *   so the right text can be copied from the message. The full-company flow's own product
- *   ("Two Wheeler Package Bundled (Only New Veh.)") is never used for a part.
+ *   portal shows it. The portal's products (read from a real run, 2026-10-23): "Two Wheeler Package (Old Veh.)",
+ *   "Two Wheeler Own damage Policy", "Two Wheeler Liability (Old Veh.)", "Two Wheeler Package Bundled (Only New Veh.)",
+ *   "Two Wheeler Package for 5 years (Only New Veh.)", "Two Wheeler Liability 5 years (Only New Veh.)".
+ *   - OD: "Two Wheeler Own damage Policy" is chosen BY DEFAULT (the owner's decision), so nothing has to be set in .env;
+ *     a value in .env still wins, should Reliance ever rename it.
+ *   - TP: not decided yet, so it starts EMPTY: with the one for this part empty the run opens the dropdown, lists the
+ *     portal's products and stops (stopBeforeProduct.js) — nothing is chosen or bought — so the right text can be
+ *     copied from the message.
+ *   The full-company flow's own product ("Two Wheeler Package Bundled (Only New Veh.)") is never used for a part.
  *   Matching is exact (spaces collapsed) — never "contains".
  *
  * MULTI_COMPANY_AUTOMATION_ENABLED (common/featureGate.js) still comes first: with that off nothing here runs at all.
@@ -31,9 +36,12 @@ function isRelianceMultiFormEnabled() {
 /** The env name that holds this part's product text. */
 const productSetting = (kind) => (normaliseKind(kind) === "tp" ? "RELIANCE_TP_PRODUCT" : "RELIANCE_OD_PRODUCT");
 
-/** The configured product text for "od" / "tp", whitespace-collapsed; "" when none is set. */
+/** What a part chooses when .env says nothing: OD = the own-damage product, TP = not decided yet (the run lists and stops). */
+const DEFAULT_PRODUCT = { od: "Two Wheeler Own damage Policy", tp: "" };
+
+/** The product text for "od" / "tp", whitespace-collapsed: the .env value, else the default; "" when there is neither. */
 function reliancePartProduct(kind) {
-  return collapse(process.env[productSetting(kind)]);
+  return collapse(process.env[productSetting(kind)]) || DEFAULT_PRODUCT[normaliseKind(kind)];
 }
 
 /** "Reliance OD" / "Reliance TP" — the label used in the log, the stop and the Breaker checkpoints. */
@@ -55,6 +63,7 @@ function xpathLiteral(text) {
 
 module.exports = {
   isRelianceMultiFormEnabled,
+  DEFAULT_PRODUCT,
   reliancePartProduct,
   productSetting,
   relianceMultiLabel,

@@ -654,6 +654,8 @@ const buildFormDataFromPolicy = async (data) => {
       nomineeShare: data?.nomineeShare,
       nomineeName: data?.nomineeName,
       nomineeRelation: data?.nomineeRelation,
+      // Brisk's certificate takes the NOMINEE's gender (the step used to fall back to the customer's)
+      nomineeGender: data?.nomineeGender,
       nomineeAge: data?.nomineeAge,
       paCoverYears: data?.paCoverYears,
       otherRelationName: data?.otherRelationName,
