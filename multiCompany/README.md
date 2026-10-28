@@ -740,6 +740,20 @@ wording and the old Premium lines, exactly (`test/kshemaSaveVerify.test.js` prov
 Tests: `test/kshemaSaveVerify.test.js` (27: the step reader, the 2026-10-16 regression, the late watch, the guards, the sentences, the real `submitQuoteForm` against a fake page that behaves like that run, the wiring);
 `test/kshemaTP.test.js` (drift guard) updated for `[TP] 11`.
 
+### 13.6 Pin code Locality also tries Block and Premises (2026-10-28, both KSHEMA flows)
+Since 2026-10-28 the frontend's Aadhaar read fills as many address boxes as the card allows. The village / post office / district go into
+the EMPTY Name of Premises and Block Name/No boxes instead of all into Area and Locality (frontend README "Aadhaar upload"). KSHEMA's
+"Pin code Locality" is one post office picked from Area's comma parts, broadest first. So the candidate list is now: Area's parts (broadest
+first) → the whole Area line → **Block Name/No** (`blockName`, else `blockNo`) → **Name of Premises** (`buildingName`, else `premisesName`).
+A value with fewer than 3 letters ("A", "1", "B-2") is never tried, and nothing is tried twice. The match threshold (45) is unchanged.
+- An old policy whose Area matches picks exactly what it did before (its candidates come first, in the same order).
+- Changed in **both** `fullPolicycompany/kshema/kshemaQuoteForm.js` and the TP copy, word for word and untagged, so the drift guard is
+  green. No switch.
+- **Risk, stated:** a policy whose Area matched nothing used to fail honestly at this field. It may now match on its Block / Premises text
+  (a typed "SUNSHINE APARTMENTS" against a "SUNSHINE NAGAR B.O") when the score reaches 45.
+- **Not proven:** the live pick on KSHEMA's portal. Tests: `test/kshemaLocalityCandidates.test.js` (6: an old Area unchanged, the new order,
+  the 3-letter rule, no repeats, in both flows); 10 of 10 deliberate breaks caught (5 breaks x both flows, in a scratch copy).
+
 ## 14. OD only / TP only from one insurer, and PA Company / Brisk on a TP-only policy
 
 A policy can now be sold as **only OD** or **only TP** by ONE insurer (backend `POLICY_COVER_CHOICE_ENABLED`, backend README §8).

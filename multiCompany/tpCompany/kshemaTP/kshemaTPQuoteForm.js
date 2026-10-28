@@ -225,6 +225,9 @@ const CUSTOMER_FIELDS = [
     // specific to the broadest, and the broader name (the town) is the one the
     // portal's list is far more likely to carry. The whole line goes on the end
     // as a fallback for a single-part address.
+    // Since 2026-10-28 an Aadhaar read puts the village / district into the EMPTY Block and Premises boxes instead of
+    // Area, so those two are tried next — after every Area candidate, so a policy whose Area already matches picks
+    // exactly what it did before. A value with fewer than 3 letters ("A", "1", "B-2") is never tried.
     value: (data) => {
       const line = data.areaAndLocality || data.area || data.locality || "";
       const parts = String(line)
@@ -232,7 +235,14 @@ const CUSTOMER_FIELDS = [
         .map((p) => p.trim())
         .filter(Boolean)
         .reverse();
-      return parts.length > 1 ? [...parts, line] : parts;
+      const candidates = parts.length > 1 ? [...parts, line] : parts;
+      for (const box of [data.blockName || data.blockNo, data.buildingName || data.premisesName]) {
+        const extra = String(box || "").trim();
+        if ((extra.match(/[a-z]/gi) || []).length < 3) continue;
+        if (candidates.some((c) => c.toLowerCase() === extra.toLowerCase())) continue;
+        candidates.push(extra);
+      }
+      return candidates;
     },
     required: true,
     // The portal lists India Post offices — "ARANTANGI S.O", "MUSLIM STREET
