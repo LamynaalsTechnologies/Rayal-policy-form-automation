@@ -371,7 +371,42 @@ it("single company: bundled motor part, then the Brisk PA left pending by the bu
 
   // and a second Brisk run on the same policy buys nothing (certificate is on the policy)
   const again = await runBriskPart(formData(), { policies: env.policies, policyId: job.captchaId, brisk: { shouldCreateBriskCertificate: () => ({ create: true }), createBriskCertificate: async () => { throw new Error("must not buy"); } }, log() {}, warn() {} });
-  assert.equal(again.alreadyExisted, true);
+  // (only its number is there in this fake, so it says the PDF is not stored; "must not buy" above proves nothing was bought)
+  assert.equal(again.briskFailed, true);
+  assert.equal(again.certificateNo, "CERT-1");
+});
+
+it("a re-run with only the number: the address comes from the certificate's record, only a CREATED one, and nothing is bought", async () => {
+  const env = newEnv("rerun");
+  const certificates = db.collection(`c_rerun_${counter}`);
+  await env.policies.insertOne({ _id: "policy-rerun", briskCertificate: { certificateNo: "TW1" } });
+  await certificates.insertMany([
+    { certificateNo: "TW1", status: "CREATED", briskUrl: "https://brisk/TW1.pdf" },
+    { certificateNo: "TW2", status: "CANCELLED", briskUrl: "https://brisk/TW2.pdf" },
+  ]);
+  const asked = [];
+  const brisk = {
+    shouldCreateBriskCertificate: () => ({ create: true }),
+    createBriskCertificate: async () => {
+      throw new Error("must not buy");
+    },
+    downloadBriskPDF: async (url, no) => {
+      asked.push([url, no]);
+      return "/tmp/none-brisk.pdf";
+    },
+    uploadBriskCertificate: async () => ({ key: "BriskCertificates/TW1.pdf" }),
+  };
+  const run = () => runBriskPart(formData(), { policies: env.policies, policyId: "policy-rerun", brisk, certificates, log() {}, warn() {} });
+  const first = await run();
+  assert.equal(first.success, true, first.error);
+  assert.equal(first.alreadyExisted, true);
+  assert.deepEqual(asked, [["https://brisk/TW1.pdf", "TW1"]]);
+
+  await env.policies.updateOne({ _id: "policy-rerun" }, { $set: { "briskCertificate.certificateNo": "TW2" } });
+  const cancelled = await run();
+  assert.equal(cancelled.briskFailed, true);
+  assert.equal(cancelled.certificateNo, "TW2");
+  assert.equal(asked.length, 1, "a cancelled certificate's address is not used");
 });
 
 /* -------------------------------- recovery -------------------------------- */

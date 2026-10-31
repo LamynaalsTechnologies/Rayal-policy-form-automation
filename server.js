@@ -319,9 +319,10 @@ const maxParallelEnvKeys = (company) => {
 };
 
 // The Brisk PA part is API-only (no browser), so it has its own window budget
-// under the bucket name "brisk": BRISKMAXWINDOW in .env, default 1.
+// under the bucket name "brisk": BRISKMAXWINDOW in .env, default 3. Every company's certificate
+// comes through here and may wait up to 2 minutes for its PDF (downloadBriskPDF), so one at a time could queue them up.
 const BRISK_BUCKET = "brisk";
-const DEFAULT_BRISK_MAX_PARALLEL_JOBS = 1;
+const DEFAULT_BRISK_MAX_PARALLEL_JOBS = 3;
 
 /** Window budget for a company. Unknown companies use the default. */
 const maxParallelFor = (company) => {
@@ -2191,6 +2192,10 @@ const runPolicyJobOnce = async (rawJob) => {
 const partRunnerDeps = {
   get collection() {
     return jobQueueCollection;
+  },
+  // the server's record of each Brisk certificate: a re-run reads the PDF's address from it (lib/briskPartRunner.js)
+  get certificates() {
+    return db.collection("briskV2Certificate");
   },
   get policies() {
     return db.collection("onlinePolicy");

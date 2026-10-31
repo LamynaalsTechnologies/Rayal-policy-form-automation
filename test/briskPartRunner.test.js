@@ -57,22 +57,77 @@ function fakeBrisk(over = {}) {
 const data = (extra = {}) => ({ paCover: true, paCoverCompany: "Brisk", _jobIdentifier: "j1", ...extra });
 const quiet = { log() {}, warn() {} };
 
-test("a certificate already on the policy -> completes WITHOUT buying", async () => {
+test("a certificate already on the policy -> completes WITHOUT buying or asking for the PDF", async () => {
   const policies = fakePolicies({ briskCertificate: { key: "k", certificateNo: "OLD-1" } });
   const brisk = fakeBrisk();
-  const r = await runBriskPart(data(), { policies, policyId: "p1", brisk, ...quiet });
+  const r = await runBriskPart(data(), { policies, policyId: "p1", brisk, certificates: fakeCertificates({ briskUrl: "https://brisk/x.pdf" }), ...quiet });
+  assert.equal(brisk.calls.download, 0);
   assert.equal(r.success, true);
   assert.equal(r.alreadyExisted, true);
   assert.equal(r.certificateNo, "OLD-1");
   assert.equal(brisk.calls.create, 0);
 });
 
-test("a certificate number alone (saved before a failed download) also blocks a second purchase", async () => {
-  const policies = fakePolicies({ briskCertificate: { certificateNo: "HALF-1" } });
+/* A number on the policy and no PDF: the run before it stopped while waiting for Brisk's file (a restart, ^C). */
+const fakeCertificates = (record) => {
+  const asked = [];
+  return { asked, async findOne(filter) { asked.push(filter); return record; } };
+};
+const numberOnly = () => fakePolicies({ briskCertificate: { certificateNo: "HALF-1" } });
+
+test("number only: it never buys, it fetches the PDF from the saved address and stores it", async () => {
   const brisk = fakeBrisk();
-  const r = await runBriskPart(data(), { policies, policyId: "p1", brisk, ...quiet });
+  const certificates = fakeCertificates({ briskUrl: "https://brisk/HALF-1.pdf" });
+  const r = await runBriskPart(data(), { policies: numberOnly(), policyId: "p1", brisk, certificates, ...quiet });
+  assert.equal(brisk.calls.create, 0, "nothing is bought");
+  assert.deepEqual(brisk.calls.order, ["download", "upload"]);
+  assert.equal(r.success, true);
   assert.equal(r.alreadyExisted, true);
+  assert.equal(r.certificateNo, "HALF-1");
+  assert.deepEqual(certificates.asked, [{ certificateNo: "HALF-1", status: "CREATED" }]);
+});
+
+test("number only, the PDF still not there: never 'completed', the number is reported, nothing is bought", async () => {
+  const brisk = fakeBrisk({ downloadError: "Brisk had not made the PDF after 3 checks" });
+  const r = await runBriskPart(data(), { policies: numberOnly(), policyId: "p1", brisk, certificates: fakeCertificates({ briskUrl: "https://brisk/x.pdf" }), ...quiet });
+  assert.equal(r.success, false);
+  assert.equal(r.briskFailed, true);
+  assert.equal(r.certificateNo, "HALF-1");
+  assert.match(r.error, /Brisk had not made the PDF after 3 checks/);
   assert.equal(brisk.calls.create, 0);
+});
+
+test("number only, the store fails: reported with the number, nothing bought", async () => {
+  const brisk = fakeBrisk({ uploaded: null });
+  const r = await runBriskPart(data(), { policies: numberOnly(), policyId: "p1", brisk, certificates: fakeCertificates({ briskUrl: "https://brisk/x.pdf" }), ...quiet });
+  assert.equal(r.success, false);
+  assert.equal(r.certificateNo, "HALF-1");
+  assert.equal(brisk.calls.create, 0);
+});
+
+test("number only, no record of its address (an older certificate, or a cancelled one): nothing bought, nothing downloaded, and it says so", async () => {
+  for (const certificates of [null, fakeCertificates(null), fakeCertificates({})]) {
+    const brisk = fakeBrisk();
+    const r = await runBriskPart(data(), { policies: numberOnly(), policyId: "p1", brisk, certificates, ...quiet });
+    assert.equal(r.success, false);
+    assert.equal(r.certificateNo, "HALF-1");
+    assert.match(r.error, /is on the policy but its PDF is not stored/);
+    assert.equal(brisk.calls.create, 0);
+    assert.equal(brisk.calls.download, 0);
+  }
+});
+
+test("V2 confirms an existing certificate without a number: complete without another download", async () => {
+  const brisk = fakeBrisk({ created: { success: true, alreadyExisted: true, policyId: "", downloadUrl: "https://brisk/existing.pdf" } });
+  const policies = fakePolicies({});
+  const r = await runBriskPart(data(), { policies, policyId: "p1", brisk, ...quiet });
+  assert.equal(r.success, true);
+  assert.equal(r.alreadyExisted, true);
+  assert.equal(r.certificateNo, null);
+  assert.equal(brisk.calls.create, 1, "the backend was checked once");
+  assert.equal(brisk.calls.download, 0);
+  assert.equal(brisk.calls.upload, 0);
+  assert.equal(policies.state.updates.length, 0, "no unverified number is written");
 });
 
 test("not a Brisk PA (or PA off) -> nothing bought, part completes with the reason", async () => {

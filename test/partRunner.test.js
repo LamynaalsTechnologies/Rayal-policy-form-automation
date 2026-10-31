@@ -969,3 +969,107 @@ test("runPartJob: a job that is processing without a current part is released, n
   assert.equal(await runner.runPartJob(deps, claimed), null);
   assert.equal(col.state.doc.status, "pending");
 });
+
+/* ---------- one Brisk method for every company (the owner, 2026-10-31): the insurer's work finishes, then Brisk is called ---------- */
+
+const { shouldCreateBriskCertificate } = require("../briskCertificate");
+const BRISK_WANTED = { paCover: true, paCoverCompany: "Brisk" };
+
+test("buildPartFormData: a bundled part leaves Brisk to the job's Brisk part; the Brisk part itself is not told to", () => {
+  const job = jobDoc(singleParts(), { formData: formData(BRISK_WANTED) });
+  const motor = runner.buildPartFormData(job, partOf(job, "motor"));
+  assert.equal(motor.briskByPaPart, true);
+  assert.equal(shouldCreateBriskCertificate(motor).create, false);
+  assert.match(shouldCreateBriskCertificate(motor).reason, /the Brisk part makes it/);
+
+  const pa = runner.buildPartFormData(job, partOf(job, "pa"));
+  assert.equal(pa.briskByPaPart, undefined);
+  assert.equal(shouldCreateBriskCertificate(pa).create, true, "the Brisk part does buy it");
+});
+
+test("buildPartFormData: a job with no Brisk part (the old shape, or the insurer's PA) is not told to leave it", () => {
+  const noPa = jobDoc([part("motor", "bundled", "Reliance")], { formData: formData(BRISK_WANTED) });
+  assert.equal(runner.buildPartFormData(noPa, partOf(noPa, "motor")).briskByPaPart, undefined);
+  const insurerPa = jobDoc([part("motor", "bundled", "Reliance", { carriesPa: true, paCoverCompany: "Company" }), part("pa", "withPart", "Reliance", { mirrors: "motor" })], { formData: formData({ paCover: true, paCoverCompany: "Company" }) });
+  assert.equal(runner.buildPartFormData(insurerPa, partOf(insurerPa, "motor")).briskByPaPart, undefined);
+});
+
+for (const company of ["Reliance", "National", "KSHEMA"]) {
+  test(`${company}, OD + TP at one company: the insurer's part runs without buying, then the Brisk part buys, once`, async () => {
+    const parts = [part("motor", "bundled", company), part("pa", "brisk", "Brisk", { dependsOn: "motor", paCoverCompany: "Brisk" })];
+    const settings = { isMultipleCompany: false, ODCompany: company, TPCompany: company, PACompany: "Brisk" };
+    const job = jobDoc(parts, { formData: formData({ ...BRISK_WANTED, Companyname: company.toLowerCase(), settings }) });
+    assert.equal(core.selectRunnablePart(job, NOW).key, "motor", "the insurer first");
+    const claimed = claimedFrom(job, "motor");
+    const col = fakeCollection(claimed);
+    // the bundled flows ask this one function before they buy
+    let boughtInline = 0;
+    const { deps, calls } = makeDeps(col, {
+      bundledRun: async () => {
+        const fd = calls.bundled[0].fd;
+        if (shouldCreateBriskCertificate(fd).create) boughtInline += 1;
+        return { success: true, briskCertificateSkipped: true };
+      },
+      policyDoc: { _id: "policy1" },
+    });
+    await runner.runPartJob(deps, claimed);
+    assert.equal(boughtInline, 0, "nothing bought inside the insurer's part");
+    assert.equal(calls.brisk.length, 0);
+    let doc = col.state.doc;
+    assert.equal(partOf(doc, "motor").status, "completed");
+    assert.equal(partOf(doc, "pa").status, "pending");
+    assert.equal(doc.status, "pending", "the job goes on");
+    assert.equal(core.selectRunnablePart(doc, NOW).key, "pa", "then Brisk");
+
+    const claimedPa = claimedFrom(doc, "pa");
+    const paCol = fakeCollection(claimedPa);
+    const second = makeDeps(paCol, { policyDoc: { _id: "policy1", paCover: true, settings } });
+    await runner.runPartJob(second.deps, claimedPa);
+    assert.equal(second.calls.brisk.length, 1);
+    doc = paCol.state.doc;
+    assert.equal(partOf(doc, "pa").status, "completed");
+    assert.equal(doc.status, "completed");
+    assert.equal(core.selectRunnablePart(doc, NOW), null, "nothing left");
+  });
+}
+
+test("every insurer form asks the one decision before it buys, so none can buy inline on a job with a Brisk part", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const forms = ["fullPolicycompany/relianceForm.js", "fullPolicycompany/national.js", "fullPolicycompany/kshemaForm.js"];
+  for (const f of forms) {
+    const src = fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+    const decided = src.search(/shouldCreateBriskCertificate\(data\)/);
+    const bought = src.search(/await createBriskCertificate\(data\)/);
+    assert.ok(decided > 0 && bought > decided, f);
+  }
+  // the part forms of a two-insurer policy are told no in their own copy of the line ([MC] 4, [TP] 6)
+  for (const f of ["multiCompany/common/reliance/relianceMultiForm.js", "multiCompany/tpCompany/kshemaTP/kshemaTPForm.js"]) {
+    assert.match(fs.readFileSync(path.join(__dirname, "..", f), "utf8"), /const briskDecision = \{ create: false,/, f);
+  }
+  const portalOnly = fs.readFileSync(path.join(__dirname, "..", "multiCompany/tpCompany/nationalTP/nationalTPForm.js"), "utf8");
+  assert.doesNotMatch(portalOnly, /await createBriskCertificate\(/, "National TP never buys Brisk in its form");
+});
+
+test("the Brisk window: three at a time unless .env says otherwise, because each one may wait up to 2 minutes for its PDF", () => {
+  const src = require("fs").readFileSync(require.resolve("../server.js"), "utf8");
+  assert.match(src, /const DEFAULT_BRISK_MAX_PARALLEL_JOBS = 3;/);
+});
+
+test("runPartJob (brisk): the run is given the certificate records; number only and PDF not stored reads completed with errors, not completed", async () => {
+  const parts = [part("motor", "bundled", "Reliance", { status: "completed" }), part("pa", "brisk", "Brisk", { dependsOn: "motor", paCoverCompany: "Brisk" })];
+  const claimed = claimedFrom(jobDoc(parts), "pa");
+  const col = fakeCollection(claimed);
+  const { deps, calls } = makeDeps(col, {
+    briskResult: { success: false, briskFailed: true, certificateNo: "HALF-1", error: "Brisk certificate HALF-1 was created but its PDF could not be stored: Brisk had not made the PDF after 3 checks" },
+    policyDoc: { _id: "policy1", paCover: true, settings: { isMultipleCompany: false, ODCompany: "Reliance", TPCompany: "Reliance", PACompany: "Brisk" } },
+  });
+  deps.certificates = { marker: true };
+  await runner.runPartJob(deps, claimed);
+  assert.equal(calls.brisk[0].d.certificates, deps.certificates);
+  const doc = col.state.doc;
+  assert.equal(partOf(doc, "pa").status, "completed_with_errors");
+  assert.equal(doc.status, "completed_with_errors");
+  assert.equal(partOf(doc, "pa").result.certificateNo, "HALF-1");
+});
+

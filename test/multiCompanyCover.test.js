@@ -27,10 +27,10 @@ const fieldRequired = (key, data) => {
   return typeof f.required === "function" ? f.required(data) : f.required;
 };
 
-/** The parts the backend builds for Reliance OD + `tp`: TP first, the OD and a Brisk PA both wait for the TP only. */
+/** The parts the backend builds for Reliance OD + `tp`: TP first, then the OD, then a Brisk PA. */
 const partsFor = ({ tp, pa }) => {
   const parts = [part("od", "portal", "Reliance", { dependsOn: "tp" }), part("tp", "portal", tp, pa === "Company" ? { carriesPa: true, paCoverCompany: "Company" } : {})];
-  if (pa === "Brisk") parts.push(part("pa", "brisk", "Brisk", { dependsOn: "tp", paCoverCompany: "Brisk" }));
+  if (pa === "Brisk") parts.push(part("pa", "brisk", "Brisk", { dependsOn: "od", paCoverCompany: "Brisk" }));
   if (pa === "Company") parts.push(part("pa", "withPart", tp, { mirrors: "tp", paCoverCompany: "Company" }));
   return parts;
 };
@@ -69,9 +69,9 @@ const dataOf = (job, key) => buildPartFormData(job, job.parts.find((p) => p.key 
 
 /* ------------------------------------------ the shapes (same as the backend's) ------------------------------------------ */
 
-test("the parts of a two-insurer policy: PA through Brisk = a Brisk part that follows the TP; through the TP company = the TP carries it; off = none", () => {
+test("the parts of a two-insurer policy: PA through Brisk = a Brisk part that runs last; through the TP company = the TP carries it; off = none", () => {
   for (const tp of ["KSHEMA", "National"]) {
-    assert.equal(shape(partsFor({ tp, pa: "Brisk" })), "od<-tp tp pa(brisk)<-tp");
+    assert.equal(shape(partsFor({ tp, pa: "Brisk" })), "od<-tp tp pa(brisk)<-od");
     assert.equal(shape(partsFor({ tp, pa: "Company" })), "od<-tp tp[PA] pa(with tp)");
     assert.equal(shape(partsFor({ tp, pa: "off" })), "od<-tp tp");
   }
@@ -164,15 +164,16 @@ test("the Brisk part gets PA on and 'Brisk'; only it passes the Brisk certificat
   }
 });
 
-test("a Brisk PA follows the TP: once the TP is bought it is runnable, whatever the OD is doing (failed, waiting, running)", () => {
-  const job = (odState) => ({ parts: partsFor({ tp: "KSHEMA", pa: "Brisk" }).map((p) => (p.key === "tp" ? { ...p, status: "completed" } : p.key === "od" ? { ...p, ...odState } : p)) });
+test("a Brisk PA comes last: TP, then OD, then Brisk, and it is not run while the OD is not finished", () => {
+  const job = (tp, od) => ({ parts: partsFor({ tp: "KSHEMA", pa: "Brisk" }).map((p) => (p.key === "tp" ? { ...p, ...tp } : p.key === "od" ? { ...p, ...od } : p)) });
+  assert.equal(core.selectRunnablePart(job({}, {}), NOW).key, "tp");
+  assert.equal(core.selectRunnablePart(job({ status: "completed" }, {}), NOW).key, "od");
   for (const odState of [{ status: "failed_login_form", stopped: true }, { status: "processing" }, { status: "pending", nextRetryAt: new Date(NOW.getTime() + 60000) }]) {
-    assert.equal(core.selectRunnablePart(job(odState), NOW).key, "pa", `OD ${JSON.stringify(odState)}`);
+    assert.equal(core.selectRunnablePart(job({ status: "completed" }, odState), NOW), null, `OD ${JSON.stringify(odState)}`);
   }
-  // TP not bought yet: neither the OD nor the PA runs
-  const early = { parts: partsFor({ tp: "KSHEMA", pa: "Brisk" }) };
-  assert.equal(core.selectRunnablePart(early, NOW).key, "tp");
-  assert.equal(core.normalizeParts(early.parts).find((p) => p.key === "pa").waitingFor, "tp");
+  for (const odStatus of ["completed", "completed_with_errors"]) {
+    assert.equal(core.selectRunnablePart(job({ status: "completed" }, { status: odStatus }), NOW).key, "pa", odStatus);
+  }
 });
 
 test("the TP part of a two-insurer job is not refused as a routing conflict, and a bundled part still is", () => {
@@ -345,7 +346,7 @@ async function runPart({ tp = "KSHEMA", pa, key, policyDoc, jobPatch = {}, nomin
   return { doc: col.state.doc, calls };
 }
 
-test("runner: the Brisk PA runs after the TP although the OD failed — when the policy still says Brisk", async () => {
+test("runner: a Brisk part that was started buys when the policy still says Brisk; another part's failure stays its own", async () => {
   const { doc, calls } = await runPart({ pa: "Brisk", key: "pa", policyDoc: { _id: "policy1", ...policyNow("Brisk") } });
   assert.equal(calls.brisk, 1);
   assert.equal(partOf(doc, "pa").status, "completed");

@@ -14,6 +14,7 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const http = require("http");
+const { pipeline } = require("stream");
 const axios = require("axios");
 const moment = require("moment");
 const AWS = require("aws-sdk");
@@ -117,8 +118,8 @@ const toBriskGender = (gender) => {
  * fails Brisk answers without a Message, which the backend reports as the
  * useless "Something went wrong".
  *
- * Returns { ok, balance, reason }. Never throws: if the balance cannot be read
- * we let the call proceed rather than blocking on a diagnostic.
+ * Returns { ok, balance, reason }. A certificate must not be requested when
+ * the wallet balance cannot be verified.
  */
 const checkBriskWallet = async (requiredAmount, jobId = "") => {
   try {
@@ -130,14 +131,22 @@ const checkBriskWallet = async (requiredAmount, jobId = "") => {
       console.warn(
         `[${jobId}] ⚠️ Brisk wallet lookup failed: ${body?.message || "unknown"} — the Brisk account may be unavailable.`
       );
-      return { ok: true, balance: null, reason: "wallet-unreadable" };
+      return {
+        ok: false,
+        balance: null,
+        reason: `Could not verify Brisk wallet balance: ${body?.message || "the Brisk account may be unavailable"}`,
+      };
     }
 
     const balance = Number(
       body?.data?.balance ?? body?.balance ?? body?.data?.Balance
     );
     if (!Number.isFinite(balance)) {
-      return { ok: true, balance: null, reason: "wallet-unreadable" };
+      return {
+        ok: false,
+        balance: null,
+        reason: "Could not verify Brisk wallet balance: the response did not contain a valid balance",
+      };
     }
 
     console.log(`[${jobId}] 💰 Brisk wallet balance: ${balance} (need ${requiredAmount})`);
@@ -151,7 +160,11 @@ const checkBriskWallet = async (requiredAmount, jobId = "") => {
     return { ok: true, balance, reason: null };
   } catch (e) {
     console.warn(`[${jobId}] ⚠️ Could not read Brisk wallet balance: ${e.message}`);
-    return { ok: true, balance: null, reason: "wallet-unreadable" };
+    return {
+      ok: false,
+      balance: null,
+      reason: `Could not verify Brisk wallet balance: ${e.message}`,
+    };
   }
 };
 
@@ -594,65 +607,84 @@ async function uploadBriskCertificate(briskPdfPath, certificateNo, data, jobId =
   }
 }
 
+// Brisk writes the PDF when ViewCertificate is asked, and our server asks it right after the create, so the file is normally
+// there at the first check (without it the address said 404 for 2 hours, TW31102600201901, 2026-10-31). Three checks only (the
+// owner, 2026-10-31), a minute apart for when it is not. A line before every wait and every check keeps the stuck-step watch
+// (90 s) quiet. After the third the server keeps trying (briskV2Service schedulePdfSave).
+const PDF_CHECKS = 3;
+const PDF_CHECK_EVERY_MS = 60 * 1000;
+const PDF_READ_TIMEOUT_MS = 60 * 1000;
+
+/** One try. The file gets its real name only when it is complete and really is a PDF; a failed try leaves nothing behind. */
+async function fetchPdfOnce(downloadUrl, filepath) {
+  const partPath = `${filepath}.part`;
+  try {
+    await new Promise((resolve, reject) => {
+      // Determine if URL is HTTPS or HTTP
+      const protocol = downloadUrl.startsWith('https') ? https : http;
+      const request = protocol.get(downloadUrl, (response) => {
+        // Check if response is successful
+        if (response.statusCode !== 200) {
+          response.resume();
+          reject(new Error(`Failed to download PDF. Status: ${response.statusCode}`));
+          return;
+        }
+        pipeline(response, fs.createWriteStream(partPath), (err) => (err ? reject(err) : resolve()));
+      });
+      request.setTimeout(PDF_READ_TIMEOUT_MS, () => request.destroy(new Error("Failed to download PDF. Brisk did not answer in time")));
+      request.on('error', reject);
+    });
+    const handle = fs.openSync(partPath, 'r');
+    const head = Buffer.alloc(5);
+    fs.readSync(handle, head, 0, 5, 0);
+    fs.closeSync(handle);
+    if (head.toString('latin1') !== '%PDF-') throw new Error("Failed to download PDF. The address did not answer with a PDF");
+    fs.renameSync(partPath, filepath);
+    return filepath;
+  } catch (err) {
+    fs.rmSync(partPath, { force: true });
+    throw err;
+  }
+}
+
 /**
  * Download PDF from Brisk API response URL and save to file
  * @param {string} downloadUrl - URL to download the PDF from
  * @param {string} policyId - Policy ID to use for filename
  * @returns {Promise<string>} - Path to the downloaded file
  */
-async function downloadBriskPDF(downloadUrl, policyId) {
-  return new Promise((resolve, reject) => {
-    if (!downloadUrl) {
-      reject(new Error("No download URL provided"));
-      return;
-    }
+async function downloadBriskPDF(downloadUrl, policyId, { checks = PDF_CHECKS, waitMs = PDF_CHECK_EVERY_MS } = {}) {
+  if (!downloadUrl) {
+    throw new Error("No download URL provided");
+  }
 
-    // Create downloads directory if it doesn't exist
-    const downloadsDir = path.join(__dirname, 'brisk_certificates');
-    if (!fs.existsSync(downloadsDir)) {
-      fs.mkdirSync(downloadsDir, { recursive: true });
-    }
+  // Create downloads directory if it doesn't exist
+  const downloadsDir = path.join(__dirname, 'brisk_certificates');
+  if (!fs.existsSync(downloadsDir)) {
+    fs.mkdirSync(downloadsDir, { recursive: true });
+  }
 
-    // Generate filename
-    const filename = `${policyId || 'certificate_' + Date.now()}.pdf`;
-    const filepath = path.join(downloadsDir, filename);
+  // Generate filename
+  const filename = `${policyId || 'certificate_' + Date.now()}.pdf`;
+  const filepath = path.join(downloadsDir, filename);
 
-    console.log(`📥 Downloading PDF from: ${downloadUrl}`);
-    console.log(`💾 Saving to: ${filepath}`);
+  console.log(`📥 Downloading PDF from: ${downloadUrl}`);
+  console.log(`💾 Saving to: ${filepath}`);
 
-    // Determine if URL is HTTPS or HTTP
-    const protocol = downloadUrl.startsWith('https') ? https : http;
-
-    const file = fs.createWriteStream(filepath);
-
-    protocol.get(downloadUrl, (response) => {
-      // Check if response is successful
-      if (response.statusCode !== 200) {
-        fs.unlinkSync(filepath); // Delete the file
-        reject(new Error(`Failed to download PDF. Status: ${response.statusCode}`));
-        return;
+  for (let check = 1; ; check += 1) {
+    console.log(`📥 Check ${check} of ${checks}...`);
+    try {
+      await fetchPdfOnce(downloadUrl, filepath);
+      console.log(`✅ PDF downloaded successfully: ${filepath}`);
+      return filepath;
+    } catch (err) {
+      if (check >= checks) {
+        throw new Error(`Brisk had not made the PDF after ${checks} checks. ${err.message}. The server keeps trying and stores it on the policy.`);
       }
-
-      // Pipe the response to file
-      response.pipe(file);
-
-      file.on('finish', () => {
-        file.close();
-        console.log(`✅ PDF downloaded successfully: ${filepath}`);
-        resolve(filepath);
-      });
-
-      file.on('error', (err) => {
-        fs.unlinkSync(filepath); // Delete the file on error
-        reject(err);
-      });
-    }).on('error', (err) => {
-      if (fs.existsSync(filepath)) {
-        fs.unlinkSync(filepath); // Delete the file on error
-      }
-      reject(err);
-    });
-  });
+      console.log(`⏳ Check ${check} of ${checks}, not there yet. ${err.message}. Next check in ${Math.round(waitMs / 1000)} s...`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
 }
 
 
@@ -684,6 +716,11 @@ const shouldCreateBriskCertificate = (data) => {
   // certificate is paid for from the master wallet, so never buy a second one.
   if (data?.briskCertificateExists === true) {
     return { create: false, reason: "a Brisk certificate already exists for this policy" };
+  }
+
+  // lib/partRunner.js buildPartFormData: this job's own Brisk part makes it, after the insurer's part has finished.
+  if (data?.briskByPaPart === true) {
+    return { create: false, reason: "the Brisk part makes it after this part finishes" };
   }
 
   const provider = String(data?.paCoverCompany || "").trim().toLowerCase();

@@ -51,6 +51,23 @@ test("LIVE certificate: the old answer shape (policyId = number, downloadUrl) so
   assert.equal(res.downloadUrl, "https://b/TW261017.pdf");
 });
 
+test("policy already has a Brisk certificate: skip even when its number is not present", async () => {
+  const withNumber = await run({
+    body: { error: true, code: "POLICY_HAS_CERTIFICATE", data: { certificateNo: "TW261017", downloadUrl: "https://b/TW261017.pdf" } },
+  });
+  assert.equal(withNumber.success, true);
+  assert.equal(withNumber.alreadyExisted, true);
+  assert.equal(withNumber.policyId, "TW261017");
+
+  const withoutNumber = await run({
+    body: { error: true, code: "POLICY_HAS_CERTIFICATE", data: { certificateNo: "", downloadUrl: "https://b/existing.pdf" } },
+  });
+  assert.equal(withoutNumber.success, true);
+  assert.equal(withoutNumber.alreadyExisted, true);
+  assert.equal(withoutNumber.policyId, "");
+  assert.equal(withoutNumber.downloadUrl, "https://b/existing.pdf");
+});
+
 test("TEST certificate: never handed back as a real one (it would be stored on a real policy)", async () => {
   await assert.rejects(
     run({ body: { error: false, data: { apiEnv: "TEST", certificateNo: "TW9", downloadUrl: "https://b/TW9.pdf" } } }),

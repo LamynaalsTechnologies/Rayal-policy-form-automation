@@ -107,7 +107,7 @@ duplicated amount.
 | `POLICY_JOB_PARTS_ENABLED` | **`RayalBrokers-backend/.env`** | `false` | Off: the backend queues jobs the old way — **one bundled job whenever OD and TP are the same insurer**, and an OD job + a TP job only when two *different* insurers sell the policy. On: **one job per policy** carrying a `parts` array (OD / TP / OD+TP / PA, each with its own status). The automation server has no switch of its own — it simply runs any job that has `parts` (see §4), so **deploy the automation server first, then turn this on**. Jobs without `parts` keep running through the original code path unchanged. |
 | `OD_WAITS_FOR_TP` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | A two-insurer policy buys its **TP first**: the OD job is not started until the TP job of the same policy is `completed` / `completed_with_errors`; while it is anything else (pending, running, on hold, failed) the OD waits, and starts by itself when TP is fixed and completes. Only the old two-job shape needs this switch (`lib/jobSequence.js`); one job with parts orders them with `dependsOn`. Off: OD and TP are independent jobs again. |
 | `NATIONAL_TP_FORM_ENABLED` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | On: a National TP part selects the plan "5 Year Long Term Liability Only" and runs the whole duplicated National form for a third-party-only policy (§5, §10) up to the payment link that goes to the customer — no `.env` line needed. `false`: it logs in, opens the quote form, lists the "Your Plan" options and stops (stage `tp-plan`) — nothing is chosen or bought, no nominee lookup. To look at the TP quote before anything is sent use the Breaker instead (`BREAKER_STOP_AT=National TP/quote`, then `National TP/payment`). Needs `MULTI_COMPANY_AUTOMATION_ENABLED` too. |
-| `BRISKMAXWINDOW` | automation `.env` | `1` | How many Brisk PA parts may run at once. Brisk is API-only (no browser), so it has its own window, separate from the insurers' `RELIANCEMAXWINDOW` etc. |
+| `BRISKMAXWINDOW` | automation `.env` | `3` | How many Brisk PA parts may run at once. Brisk is API-only (no browser), so it has its own window, separate from the insurers' `RELIANCEMAXWINDOW` etc. |
 | `RELIANCE_WALLET_HOLD_ENABLED` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | The **bundled Reliance full-company** flow (`fullPolicycompany/relianceForm.js`, not the OD/TP handlers). On: after **Pay** is clicked, a policy whose `Paymentmethod` is wallet (or blank — the backend default) stops on the payment page: browser left open, nothing paid at Reliance, no Brisk certificate, no PDF merge; the job is recorded as stopped on purpose (`E100`, stage `reliance-wallet-hold`, no retry). `link` policies are not affected. `false`: the old behaviour — skip the link flow and carry on to the Brisk call. The wallet payment steps themselves are **not built yet**; this is where they go (`relianceForm.js`, the `shouldHoldForWallet` branch). Not related to the Breaker, which is a dev switch and must stay off on a real server. |
 | `KSHEMA_TP_FORM_ENABLED` | automation `.env` | **on** (anything but `false` / `0` / `no` / `off`) | On (and `KSHEMA_TP_PRODUCT_TYPE` set): a KSHEMA TP part runs the duplicated KSHEMA form for a third-party-only policy (§13) up to the Razorpay QR and the payment link, then releases the OD of the same policy. `false`: it logs in, fills the quote as far as the Product Type, lists the portal's Product Type options in the stop message (stage `tp-product`) and stops — nothing is chosen or bought. Needs `MULTI_COMPANY_AUTOMATION_ENABLED` too. |
 | `KSHEMA_TP_PRODUCT_TYPE` | automation `.env` | *(empty)* | The exact text of the liability-only option in KSHEMA's Product Type dropdown (matched exactly, spaces/case ignored, then read back). **Empty = the same stop as the switch-off one**, which is how the right text is found on the first run. |
@@ -187,7 +187,7 @@ insurer's job has been bought.
 
 The policy list reads both the same way: the OD part says **Waiting for TP to finish** — also when the TP failed (it is not an
 error of the OD; the hint says to retry TP, and OD then starts by itself). `legacyJobsToParts` gives the two-job OD the same `dependsOn`. PA through Brisk
-follows the TP only (the owner, 2026-10-23), so the chain is TP → OD and TP → PA: a failed or waiting OD no longer holds the Brisk certificate back.
+runs last (the owner, 2026-10-31), so the chain is TP → OD → PA: a failed or waiting OD holds the Brisk certificate back until the OD is finished.
 
 ### 4.1 Jobs without `parts`
 
@@ -247,8 +247,8 @@ queue pass ──► planClaims ──► claimPart ──► runPartJob ──�
    stamps `lastHeartbeatAt` and never touches `rev`.
 3. **Run.** Hydrate as before, then build the part's form data = the job's `formData` + the part's overrides:
    `Companyname` (the part's insurer), `policyType: "od"|"tp"` for portal parts, `paCover` / `paCoverCompany` (a portal
-   part buys PA only if it `carriesPa`; a bundled part keeps the policy's own PA settings so the live flow still buys a
-   Brisk certificate inline), `_partKey`, `_attemptNumber = part.attempts + 1`. Credentials are looked up for the
+   part buys PA only if it `carriesPa`; a bundled part keeps the policy's own PA settings, but with a Brisk part on the job it gets `briskByPaPart`, so the form
+   does not buy inline), `_partKey`, `_attemptNumber = part.attempts + 1`. Credentials are looked up for the
    **part's** company (not for a Brisk part). The run is raced against `JOB_TIMEOUT`.
 4. **Write back** (`writePartOutcome`). The job is **re-read**, the outcome folded onto the fresh document
    (`applyPartOutcome`) and saved with `updateOne({_id, rev}, …, {$inc:{rev:1}})`. If `rev` moved in between (an edit
@@ -297,7 +297,7 @@ is `failed_login_form`.
 **The Brisk PA part** never opens a browser: (1) a certificate already on the policy → completes without buying; (2)
 `shouldCreateBriskCertificate` → `createBriskCertificate`; (3) the certificate number is saved on
 `onlinePolicy.briskCertificate` **immediately**, before anything that can still fail; (4) download and store the PDF.
-After a bundled `motor` run that bought the certificate inline, the PA part is set from the run result
+After a bundled `motor` run the Brisk part normally just runs next (it was left pending). A run that started before the 2026-10-31 rule may still have bought inline; then the PA part is set from the run result
 (`briskCertificate` / `briskCertificateError` / `briskCertificateSkipped`) and `onlinePolicy.briskCertificate`:
 completed, failed, or — if nothing was bought — left pending for the Brisk runner. For a two-insurer policy (and TP only) the PA
 waits for the TP part only (since 2026-10-23; it used to wait for the OD). Before buying, the part checks the nominee Brisk takes —
@@ -500,9 +500,7 @@ The CLI sets `MULTI_COMPANY_AUTOMATION_ENABLED=true` for its own process only (i
 - **TP → OD hand-off** (the TP policy's number and dates reaching the OD form) — **entered by hand since 2026-10-22** (Reliance OD waits
   for them), read automatically from the TP portal **not built**, see §12.2. Ordering is (§4.0); the data
   is not passed yet, and National's flow reads no number or date from the portal at all.
-- **Multi-company Brisk PA follows the TP part** (since 2026-10-23; before, it waited for the OD, which held it back while the
-  Reliance OD could not finish). A job queued before that keeps `dependsOn: "od"` until its policy is saved again (`mergeJobParts`
-  refreshes `dependsOn`); no script re-syncs old jobs.
+- **Brisk PA runs last, one method for every company** (the owner, 2026-10-31; replaces "right after the TP", 2026-10-23). One insurer: the `motor` part, then Brisk. Two insurers: TP, OD, then Brisk. TP only or OD only: that part, then Brisk. A failed or stopped OD therefore holds the certificate back until it is finished. A job queued before keeps `dependsOn: "tp"` until its policy is saved again (`mergeJobParts` refreshes `dependsOn`); no script re-syncs old jobs.
 - **Single-company policies** (OD insurer = TP insurer) are one `motor` part and go through the **live bundled flows**,
   which buy for real. With `POLICY_JOB_PARTS_ENABLED` on they no longer fan out to login-only stubs.
 - The live bundled flows (`relianceForm.js`, `national.js`, `kshemaForm.js`) still use their own login. Moving them
@@ -783,7 +781,7 @@ other; KSHEMA and National must work the same for multiple company and TP only."
 
 | PA Cover Company | Who buys the PA | Everyone else |
 |---|---|---|
-| Brisk | Brisk's own `pa` part, `dependsOn: "tp"`: right after the TP is bought, whatever the OD does | the TP portal opts out (KSHEMA unticks PA + reason, National "No"); the Reliance OD never has PA |
+| Brisk | Brisk's own `pa` part, `dependsOn: "od"`: after the TP and the OD have both finished | the TP portal opts out (KSHEMA unticks PA + reason, National "No"); the Reliance OD never has PA |
 | the TP insurer (KSHEMA / National) | the TP part (`carriesPa`), with the nominee, on that portal | no Brisk part, no Brisk certificate |
 | the OD insurer (Reliance) | **refused on save**: "PA Cover cannot be bought with the OD insurer (Reliance). Choose Brisk or KSHEMA, the TP insurer." Reliance's OD form has no PA, so it would be charged and never bought. A policy already sold that way keeps it on an edit that does not change it. | |
 | off | nobody | KSHEMA unticked + reason, National "No" |

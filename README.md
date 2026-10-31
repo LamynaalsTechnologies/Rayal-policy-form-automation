@@ -237,7 +237,7 @@ inline Reliance / National / KSHEMA flows all use it.
 
 | `.env` key | Default | Meaning |
 |---|---|---|
-| `BRISK_V2_AUTOMATION_ENABLED` | `false` | exactly `true` = ask our server (`POST <BRISK_V2_BACKEND_URL>/briskV2/automation/certificates`). Anything else = the old production `/createBriskCertificate` call, unchanged. |
+| `BRISK_V2_AUTOMATION_ENABLED` | `false` | exactly `true` = ask our server (`POST <BRISK_V2_BACKEND_URL>/briskV2/automation/certificates`). Anything else = the legacy `/createBriskCertificate` call; it now refuses to post if the Brisk wallet balance cannot be verified. |
 | `BRISK_V2_BACKEND_URL` | `http://localhost:4005/api` | the server's API base |
 | `BRISK_V2_AUTOMATION_KEY` | (random, set) | the same value as the server's `BRISK_V2_AUTOMATION_KEY` |
 | `BRISK_V2_AUTOMATION_TIMEOUT_MS` | `150000` | how long to wait for the server |
@@ -249,6 +249,8 @@ a real policy); a refusal = an error with the server's sentence; not known = no 
 a re-run is safe, the server answers what it made). **Careful:** the server's `BRISK_V2_BASEURL` decides the Brisk account —
 while it is the TEST account, turning this on means real policies get TEST certificates that are not stored (their PA step
 fails and says so). Tests: `test/briskV2Automation.test.js` (10, fake fetch only).
+If a legacy create request ends with a connection reset, its outcome is unknown; check Brisk before retrying. The V2 route
+records that uncertainty and prevents an accidental second purchase.
 
 
 ## Reliance KYC name — the owner's four combinations (2026-10-17)
@@ -476,3 +478,14 @@ The owner's first automation steps for the Reliance **own-damage** part (steps i
 - The generated copy `relianceMultiForm.js` carries all of it (`[MC]` lines, `mcKind` only); after any `relianceForm.js` change run `node multiCompany/common/reliance/relianceMultiFormSpec.js --write`.
 - **Not built yet (the owner will say)**: Renewal from another company, register number / fetch vehicle details, the previous-policy fields, previous insurer details (plan in `multiCompany/README.md` §15.12). `proposalNumber`, `kycStatus` and the links are single fields on the policy, shared by an OD and a TP part (known limit).
 - **Tests**: `test/relianceOdSteps.test.js` (17), `test/relianceOdFuelType.test.js` (27), `test/relianceOdExistingTp.test.js` (25), `test/existingTpDetails.test.js` (7), `test/vehicleFuelType.test.js` (10), `test/relianceMultiForm.test.js` (43). **Real Chrome checks by hand** in `test/manual/odReplica/` (README there; not part of `npm test`, they start a browser): the whole generated copy on a replica site in 17 scenarios (all pass, up to the proposal number), the Fuel Type step on 14 page shapes, the reader of Reliance's words, the TP Details box. **73 deliberate breaks of the Fuel Type work and 50 of the existing-TP / address / Calculate / Save work in a copy caught.** Not run on the live portal; the Fuel Type box's, the existing TP panel's, the insurer box's and the date pickers' real markup has never been seen.
+
+## Brisk: one method for every company (the owner, 2026-10-31)
+
+"All company handle the PA Brisk API with the same scenario." The insurer's work finishes first, then the job's Brisk part (`lib/briskPartRunner.js`) makes the certificate.
+
+- **How.** `buildPartFormData` gives a bundled part `briskByPaPart` when the job has a Brisk part, and `shouldCreateBriskCertificate` then answers no. No insurer form changed. The forms' inline code only runs for a job with no parts (`POLICY_JOB_PARTS_ENABLED` off).
+- **Getting the PDF.** Brisk writes the PDF when `ViewCertificate` is asked. The create only gives its address, which answers 404 until then (proved live on TW31102600201901, 2026-10-31: 404 for 2 hours, then 200 at the moment View answered, file stamped the same second). Girnar does the same (`dao/policyDao.js`, create then `viewBriskCertificate`). Our server asks it before it answers the automation, so the file is normally there at once. `downloadBriskPDF` checks 3 times only (at once, then a minute apart) and saves the file under its real name only when it is complete and starts with `%PDF-`. If it still is not there, the part ends `completed_with_errors` and the server keeps trying (backend README, "Brisk certificate PDF"); when it saves the file the part turns `completed`.
+- **A re-run with only the number on the policy** (a restart or ^C while waiting for the file). It used to say completed with no PDF. Now it reads the address from the server's `briskV2Certificate` record, never through the create call so it cannot buy, does its 3 checks and stores the PDF. If the PDF still is not stored the part is `completed_with_errors`.
+- **`BRISKMAXWINDOW` default is now 3** (was 1): every certificate comes through this window and may wait up to 2 minutes.
+- **What changed for Reliance.** Its Policy PDF is no longer merged with the Brisk certificate on the wallet path: they are two files, as National, KSHEMA and two-insurer policies already were.
+- **Tests:** `test/briskPdfWait.test.js`, end of `test/partRunner.test.js`, `test/multiCompanyCover.test.js`. Not run against real Brisk.
