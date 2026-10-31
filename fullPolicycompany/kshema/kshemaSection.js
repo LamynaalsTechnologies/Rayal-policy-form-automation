@@ -23,6 +23,8 @@
  */
 const kshemaFields = require("./kshemaFields");
 const { log, warn, debug } = require("./kshemaLog");
+const { isAutomationStop } = require("../../automationStopper");
+const { throwIfHeld } = require("../../lib/holdStop");
 
 const OFF_WORDS = new Set(["false", "0", "no", "off"]);
 
@@ -49,9 +51,16 @@ const isEmptyValue = (field, value) => {
 
 /**
  * The per-type dispatch, exactly as fillSection did it — plus a catch, so an unexpected exception is this field's
- * failure ("could not be filled - <first line>") instead of the end of the section.
+ * failure ("could not be filled - <first line>") instead of the end of the section. A Hold is not a field's failure: it
+ * ends the section here, also when the helper swallowed it and answered "not on the page".
  */
-async function fillOneField(driver, data, field, value, { capture, screenshots, handlers }) {
+async function fillOneField(driver, data, field, value, ctx) {
+  const result = await fillByType(driver, data, field, value, ctx);
+  throwIfHeld(driver);
+  return result;
+}
+
+async function fillByType(driver, data, field, value, { capture, screenshots, handlers }) {
   const h = handlers || kshemaFields;
   try {
     if (field.type === "radio") return await h.selectMatRadio(driver, field.selectors, value, field.label);
@@ -80,6 +89,7 @@ async function fillOneField(driver, data, field, value, { capture, screenshots, 
       recover: field.recover || null,
     });
   } catch (e) {
+    if (isAutomationStop(e)) throw e;
     return { ok: false, value: null, reason: `"${field.label}" could not be filled (${firstLine(e)})`, threw: true };
   }
 }
@@ -126,6 +136,7 @@ async function fillSection(driver, data, fields, sectionName, capture = null, de
 
   // ── pass 1: today's loop ──────────────────────────────────────────────────
   for (const field of fields) {
+    throwIfHeld(driver);
     const value = field.value(data);
     if (isEmptyValue(field, value)) {
       const isRequired = typeof field.required === "function" ? field.required(data) : field.required;
@@ -190,6 +201,7 @@ async function fillSection(driver, data, fields, sectionName, capture = null, de
     }
   }
 
+  throwIfHeld(driver); // a read-back swallows the refusal, so a Hold during pass 3 is only seen here
   for (const entry of done) {
     if (!failures.some((f) => f.label === entry.field.label)) {
       remember(driver, entry.field, data, entry.expected, sectionName);
@@ -260,6 +272,7 @@ async function recheckBeforeSave(driver, deps = {}) {
   const lost = [];
   const refilled = [];
   for (const entry of entries.values()) {
+    throwIfHeld(driver);
     const value = entry.field.value(entry.data);
     let state = null;
     try {
@@ -270,6 +283,7 @@ async function recheckBeforeSave(driver, deps = {}) {
     if (problem) lost.push(`${entry.field.label} — ${problem}`);
     else refilled.push(entry.field.label);
   }
+  throwIfHeld(driver);
   if (refilled.length) log(`   ↺ Refilled before saving: ${refilled.join(", ")}`);
   return { lost, refilled };
 }
@@ -312,6 +326,7 @@ async function afterSilentSave(driver, { retrySave, fallbackError, readInvalid, 
   } catch (e) {
     invalid = [];
   }
+  throwIfHeld(driver);
   if (!invalid.length) return { ok: false, error: fallbackError };
 
   const ctx = { capture: null, screenshots: [], handlers };

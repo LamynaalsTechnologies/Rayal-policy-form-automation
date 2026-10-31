@@ -37,7 +37,7 @@ const {
 const { isAutomationStop, stoppedResult } = require("../automationStopper");
 const { shouldKeepBrowserOpen } = require("../debugRetention");
 // The three steps (proposal -> KYC -> payment), Hold at a safe step and the resume from the saved proposal page
-const { stopIfHeld, isHoldStop, armLiveHold, disarmLiveHold, liveHoldStopOf } = require("../lib/holdStop");
+const { stopIfHeld, isHoldStop, armLiveHold, disarmLiveHold, liveHoldStopOf, throwIfHeld } = require("../lib/holdStop");
 const {
   loadKshemaResume,
   markStage,
@@ -501,7 +501,7 @@ async function captureScreenshot(driver, name, data = {}, stage = "error", ready
     // readyImage: a picture the caller already made (the payment QR card) - uploaded as is, no screenshot of the page
     image = readyImage || (await driver.takeScreenshot());
   } catch (e) {
-    warn(`Could not take a screenshot: ${e.message}`);
+    if (!isAutomationStop(e)) warn(`Could not take a screenshot: ${e.message}`);
     return result;
   }
 
@@ -974,6 +974,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     if (resume.skipProposal) { // step 1 done by an earlier run - log in again (done above) and open its saved page
     proposalPage = await openSavedProposal(driver, resume);
     quoteTitle = await driver.getTitle().catch(() => null);
+    throwIfHeld(driver); // a step that swallowed a Hold ends here, not in its failure report
     if (!proposalPage.ok) {
       const resumeShot = await captureScreenshot(driver, `kshema_saved_proposal_page_${jobId}`, data, "saved_proposal_page_not_open");
       err(proposalPage.error);
@@ -1039,6 +1040,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
 
     await stopIfHeld(data, "before the quote form (nothing is filled at KSHEMA yet)");
     customer = await fillCustomerDetails(driver, data, capture);
+    throwIfHeld(driver); // a step that swallowed a Hold ends here, not in its failure report
 
     if (!customer.ok) {
       // A dropdown failure already photographed itself with the panel open;
@@ -1074,6 +1076,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
 
     // ── Vehicle details ────────────────────────────────────────────────────
     vehicle = await fillVehicleDetails(driver, data, capture);
+    throwIfHeld(driver); // a step that swallowed a Hold ends here, not in its failure report
 
     if (!vehicle.ok) {
       const vehicleShot =
@@ -1107,6 +1110,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     // ── PA Cover details ───────────────────────────────────────────────────
     const { fillPaCoverDetails } = require("./kshema/kshemaQuoteForm");
     paCover = await fillPaCoverDetails(driver, data, capture);
+    throwIfHeld(driver); // a step that swallowed a Hold ends here, not in its failure report
 
     if (!paCover.ok) {
       const paShot =
@@ -1141,6 +1145,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     // ── Premium / Discount details ──────────────────────────────────────────
     const { fillPremiumDetails } = require("./kshema/kshemaQuoteForm");
     premium = await fillPremiumDetails(driver, data, capture);
+    throwIfHeld(driver); // a step that swallowed a Hold ends here, not in its failure report
 
     if (!premium.ok) {
       const premShot =
@@ -1175,6 +1180,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     // ── Submit Quote Form ──────────────────────────────────────────────────
     const { submitQuoteForm } = require("./kshema/kshemaQuoteForm");
     const submitResult = await submitQuoteForm(driver);
+    throwIfHeld(driver); // a step that swallowed a Hold ends here, not in its failure report
     
     if (!submitResult.ok) {
       const submitShot = await captureScreenshot(
@@ -1207,6 +1213,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     // ── Add-Ons Details ────────────────────────────────────────────────────
     const { fillAddonsDetails } = require("./kshema/kshemaQuoteForm");
     addonsResult = await fillAddonsDetails(driver, data, capture);
+    throwIfHeld(driver); // a step that swallowed a Hold ends here, not in its failure report
 
     if (!addonsResult.ok) {
       const addonsShot =
@@ -1244,6 +1251,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     
     // ── Download Proposal ────────────────────────────────────────────────────
     const downloadResult = await downloadProposal(driver, data, jobBrowser, jobId, capture);
+    throwIfHeld(driver); // a step that swallowed a Hold ends here, not in its failure report
     
     if (!downloadResult.ok) {
       err(downloadResult.error);
@@ -1319,6 +1327,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     await stopIfHeld(data, "before the nominee and Save and Finalize (the quote is not a proposal yet)");
     const { fillNomineeDetails } = require("./kshema/kshemaQuoteForm");
     const nomineeResult = await fillNomineeDetails(driver, data, capture);
+    throwIfHeld(driver); // a step that swallowed a Hold ends here, not in its failure report
 
     if (!nomineeResult.ok) {
       err(nomineeResult.error);
@@ -1353,6 +1362,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     // The 2nd Save and Finalize made the quote a proposal; the page with the KYC button is its page. Its address is
     // saved NOW (it used to be saved only after the KYC), so a Hold or a failure from here on resumes on it.
     proposalPage = await awaitProposalPage(driver, data);
+    throwIfHeld(driver); // a step that swallowed a Hold ends here, not in its failure report
     if (proposalPage.ok) await keepProposalPage(data, proposalPage.url, { jobId });
     } // end of step 1
 
@@ -1373,6 +1383,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     const { fillKYCDetails } = require("./kshema/kshemaQuoteForm");
     // No proposal page = the KYC button never came: the same failure the KYC step reported for it before.
     kycResult = proposalPage.ok ? await fillKYCDetails(driver, data, capture) : { ok: false, error: proposalPage.error };
+    throwIfHeld(driver); // a step that swallowed a Hold ends here, not in its failure report
 
     // Save the links BEFORE deciding whether the KYC failed.
     //

@@ -345,6 +345,16 @@ Hold pressed while the automation runs a Reliance policy used to apply only afte
 - **Not stopped inside one long wait** (for example the up-to-5-minute KYC PROCEED wait). It stops at the step after it.
 - **Tests**: `test/holdStop.test.js` (the real form with a fake browser stops after the login, and the window closes with no error flag). 7 deliberate breaks were all caught.
 
+### Hold on a run whose helpers catch every error (2026-10-31)
+A live KSHEMA log showed Hold blocking the browser while the run carried on. The field helpers report every error as a plain field failure, so the refusal became "not on the page": 10 s for each remaining field, then the second pass, with the window open. It did end as a Hold, because a later uncaught command rethrew the stop. Real Chrome on a blank form, vehicle section: 170 s and 61 false lines before, 1 s and none after.
+
+- `lib/holdStop.js`: `driver.sleep` is refused too and a sleep in progress is woken (every company). Refusals arrive after 20 ms, so a retry loop that swallows them cannot freeze the other job in this process. A wait nobody awaits cannot become an unhandled rejection. A queue read still on its way when the payment point disarms the run can no longer fire.
+- `throwIfHeld(driver)`: asked by `kshema/kshemaSection.js`, `kshema/kshemaFields.js` and after every step of both KSHEMA forms. A Breaker or stopper inside a field now ends the section as well.
+- **Rule for new helpers:** a catch-all in a browser flow must let a stop through (`isAutomationStop` or `throwIfHeld`).
+- Not proven: a whole run on the portal; Reliance and National get the shorter waits but were not timed, and their catches can still print a few lines on the way out. A browser command already in progress finishes first.
+
+Tests: `test/holdLive.test.js`; 19 of 19 deliberate breaks caught in a copy.
+
 ## KSHEMA in three steps, with Hold and resume from the saved page (2026-10-19)
 The owner: KYC and payment split into three steps like Reliance, Hold works, a re-run continues from the finished step, and a resumed run logs in again and opens the already saved KSHEMA page. For both `fullPolicycompany/kshemaForm.js` and the TP copy `multiCompany/tpCompany/kshemaTP/kshemaTPForm.js` (byte-identical change, drift guard green).
 - **The steps**:

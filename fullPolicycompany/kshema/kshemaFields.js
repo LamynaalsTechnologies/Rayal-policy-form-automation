@@ -19,6 +19,8 @@
  */
 const { By, Key } = require("selenium-webdriver");
 const { log, debug, warn } = require("./kshemaLog");
+const { isAutomationStop } = require("../../automationStopper");
+const { throwIfHeld } = require("../../lib/holdStop");
 
 /** The open panel itself — present but empty means "no choices", which is a
  *  different problem from "the dropdown never opened". */
@@ -199,6 +201,7 @@ async function clickElement(driver, element, label) {
   try {
     await element.click();
   } catch (e) {
+    throwIfHeld(driver);
     warn(`   Normal click on ${label} was intercepted, using a JS click`);
     await driver.executeScript("arguments[0].click();", element);
   }
@@ -288,6 +291,7 @@ async function findAfterRecovery(driver, selectors, label, recover) {
     try {
       outcome = await recover.run({ driver, n, tries, fieldLabel: label });
     } catch (e) {
+      if (isAutomationStop(e)) throw e;
       const firstLine = String((e && e.message) || e).split("\n")[0].replace(/:/g, " -");
       outcome = { recovered: false, note: `the recovery stopped (${firstLine})` };
     }
@@ -320,6 +324,7 @@ async function findAfterRecovery(driver, selectors, label, recover) {
  * turns that into a visible mismatch.
  */
 async function dumpAvailableControls(driver, label) {
+  throwIfHeld(driver);
   try {
     warn(`   "${label}" not found — here is what the page is showing:`);
 
@@ -1449,6 +1454,7 @@ module.exports = {
   pickBestMatch,
   pickOtherOption,
   findAfterRecovery,
+  dumpAvailableControls,
   LOCATION_NOISE,
   typeIntoField,
   readMatSelectValue,
