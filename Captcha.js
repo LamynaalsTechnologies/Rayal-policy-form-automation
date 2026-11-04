@@ -38,11 +38,25 @@ module.exports.extractCaptchaText = async (imageUrl) => {
     });
 
     // Create message with image
+    // Rule-based prompt with the common confusions called out. On saved Reliance
+    // captchas the old one-line prompt read RMEF as "RMEE" (8/12 right); this one
+    // read all 12 right with the same model and image.
     const message = new HumanMessage({
       content: [
         {
           type: "text",
-          text: "Extract the text from this captcha image. Return only the text you see, nothing else. If the captcha contains alphabetic characters, return them exactly as they appear.",
+          text:
+            "Read the captcha in this image and return ONLY the characters.\n" +
+            "Rules:\n" +
+            "- Alphanumeric only (A-Z, a-z, 0-9). No spaces, no punctuation.\n" +
+            "- Preserve exact case — do not uppercase or lowercase.\n" +
+            "- Typical length is 4 to 8 characters.\n" +
+            "- Do NOT include any explanation, prefix, quotes, or the word 'captcha'.\n" +
+            "Common confusions — look carefully before choosing:\n" +
+            "- 0 (zero) vs O (letter O)\n" +
+            "- 1 (one) vs I (letter i) vs l (lowercase L)\n" +
+            "- 5 vs S, 8 vs B, 2 vs Z, 6 vs G, 9 vs q\n" +
+            "If you are unsure between two characters, pick the more likely one; never return an empty string.",
         },
         {
           type: "image_url",
