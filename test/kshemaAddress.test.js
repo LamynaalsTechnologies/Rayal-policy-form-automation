@@ -9,7 +9,7 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const { kshemaAddressLine } = require(path.join(ROOT, "fullPolicycompany", "kshema", "kshemaAddress.js"));
+const { kshemaAddressLine, kshemaPrintedPlaces } = require(path.join(ROOT, "fullPolicycompany", "kshema", "kshemaAddress.js"));
 
 const address = (boxes) =>
   kshemaAddressLine({
@@ -80,8 +80,63 @@ test("both KSHEMA quote forms (full and TP only) type this line, not the old com
     path.join(ROOT, "multiCompany", "tpCompany", "kshemaTP", "kshemaTPQuoteForm.js"),
   ]) {
     const src = fs.readFileSync(file, "utf8");
-    assert.match(src, /kshemaAddress"\)\.kshemaAddressLine\(data\)/, path.basename(file));
+    assert.match(src, /kshemaAddress\.kshemaAddressLine\(data, \{ printedByKshema: printed\.words \}\)/, path.basename(file));
+    assert.match(src, /kshemaAddress\.kshemaPrintedPlaces\(driver, data, \{\n\s+state: stateFromPolicy\(data\),\n\s+locality: require\("[^"]*kshemaSection"\)\.filledValueOf\(driver, "locality"\),/, path.basename(file));
     assert.equal(src.includes('addressParts.join(", ")'), false, path.basename(file));
     assert.match(src, /await field\.sendKeys\(fullAddress\);/, path.basename(file));
   }
+});
+
+/* ---- what KSHEMA prints after our line itself (the owner's PDF, 2026-11-05) ---- */
+
+test("the owner's PDF: the same name KSHEMA prints (VILLUPURAM) is left out of our line; one extra P is another name", () => {
+  // the PDF: "130 PILLAYAR KOVIL STREET TONDUR VILLUPPURAM MELOLAKKUR, VILLUPURAM, TAMIL NADU, 604203,"
+  const printedByKshema = ["MELOLAKKUR", "VILLUPURAM", "TAMIL NADU", "604203"];
+  const same = kshemaAddressLine({ flatDoorNo: "130", roadStreetLane: "PILLAYAR KOVIL STREET", areaAndLocality: "TONDUR, VILLUPURAM" }, { printedByKshema });
+  assert.equal(same.line, "130 PILLAYAR KOVIL STREET TONDUR");
+  assert.deepEqual(same.left, ["VILLUPURAM"]);
+  // the owner: "same ah irunthale pothum, oru P extra vantha koda athu new name than"
+  const extraP = kshemaAddressLine({ flatDoorNo: "130", roadStreetLane: "PILLAYAR KOVIL STREET", areaAndLocality: "TONDUR, VILLUPPURAM" }, { printedByKshema });
+  assert.equal(extraP.line, "130 PILLAYAR KOVIL STREET TONDUR VILLUPPURAM");
+  assert.deepEqual(extraP.left, []);
+});
+
+test("inside our own line too only the same spelling is a repeat (PUDUKKOTTAI and PUDUKOTTAI both stay)", () => {
+  const r = address(["", "", "", "PUDUKKOTTAI", "MAIN ROAD", "ARANTHANGI, PUDUKOTTAI DIST"]);
+  assert.equal(r.line, "PUDUKKOTTAI MAIN ROAD ARANTHANGI PUDUKOTTAI DIST");
+  assert.deepEqual(r.left, []);
+});
+
+test("KSHEMA's locality, state and pin code are left out; a different town stays; numbers that are not the pin stay", () => {
+  const r = kshemaAddressLine(
+    { flatDoorNo: "12/3", roadStreetLane: "GANDHI ROAD", areaAndLocality: "MELOLAKKUR, TINDIVANAM, TAMIL NADU 604203", blockName: "604001" },
+    { printedByKshema: ["MELOLAKKUR", "TAMIL NADU", "604203"] }
+  );
+  assert.equal(r.line, "12/3 604001 GANDHI ROAD TINDIVANAM");
+  assert.deepEqual(r.left, ["MELOLAKKUR", "TAMIL", "NADU", "604203"]);
+  // nothing printed by KSHEMA known: the line is as before
+  assert.equal(kshemaAddressLine({ areaAndLocality: "TONDUR, VILLUPPURAM" }).line, "TONDUR VILLUPPURAM");
+});
+
+test("kshemaPrintedPlaces: the picked locality, the state, the pin, and city / district boxes the page shows", async () => {
+  const driver = {
+    executeScript: async (script) => {
+      assert.match(script, /data-iid/);
+      return [{ iid: "c_district", value: "VILLUPURAM" }];
+    },
+  };
+  const r = await kshemaPrintedPlaces(driver, { pinCode: "604 203" }, { state: "TAMIL NADU", locality: "MELOLAKKUR" });
+  assert.deepEqual(r.words, ["MELOLAKKUR", "TAMIL NADU", "604203", "VILLUPURAM"]);
+  // a page that cannot be read still gives what is known
+  const broken = await kshemaPrintedPlaces({ executeScript: async () => { throw new Error("gone"); } }, { pincode: "604203" }, { state: "TAMIL NADU" });
+  assert.deepEqual(broken.words, ["TAMIL NADU", "604203"]);
+});
+
+test("filledValueOf: the option a dropdown ended on, as kshemaSection remembers it", () => {
+  const section = require(path.join(ROOT, "fullPolicycompany", "kshema", "kshemaSection.js"));
+  const driver = {};
+  section._filledByDriver.set(driver, new Map([["locality", { expected: "MELOLAKKUR" }]]));
+  assert.equal(section.filledValueOf(driver, "locality"), "MELOLAKKUR");
+  assert.equal(section.filledValueOf(driver, "pinCode"), "");
+  assert.equal(section.filledValueOf({}, "locality"), "");
 });

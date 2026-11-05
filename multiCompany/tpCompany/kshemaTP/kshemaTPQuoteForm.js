@@ -1187,9 +1187,15 @@ async function downloadProposal(driver, data, jobBrowser, jobId, capture = null)
 
   // ── Fill Address ───────────────────────────────────────────────────────────
   try {
-    // One line from the address boxes: no commas, nothing written twice, at most 100 characters cut between words
-    // (kshemaAddress.js, the owner 2026-11-05).
-    const { line: fullAddress, left: notRepeated } = require("../../../fullPolicycompany/kshema/kshemaAddress").kshemaAddressLine(data);
+    // One line from the address boxes: no commas, nothing written twice, at most 100 characters cut between words, and
+    // nothing KSHEMA prints after it itself - its locality, district, state, pin code (kshemaAddress.js, the owner 2026-11-05).
+    const kshemaAddress = require("../../../fullPolicycompany/kshema/kshemaAddress");
+    const printed = await kshemaAddress.kshemaPrintedPlaces(driver, data, {
+      state: stateFromPolicy(data),
+      locality: require("../../../fullPolicycompany/kshema/kshemaSection").filledValueOf(driver, "locality"),
+    });
+    log(`   · KSHEMA prints after the address itself: ${printed.words.length ? printed.words.join(" | ") : "nothing found"}`);
+    const { line: fullAddress, left: notRepeated } = kshemaAddress.kshemaAddressLine(data, { printedByKshema: printed.words });
 
     if (fullAddress) {
       const { Key } = require("selenium-webdriver");
@@ -1339,6 +1345,13 @@ async function fillNomineeDetails(driver, data, capture = null) {
       // 3. Nominee Relationship (Dropdown)
       let nomineeRelation = String(data.nomineeRelation || "").trim();
       if (nomineeRelation) {
+        // KSHEMA's old "Child" / "Parent" (now Son / Daughter, Mother / Father): stop with a plain sentence before the
+        // dropdown is even opened (kshemaNominee.js, the owner 2026-11-05).
+        const oldChoice = require("../../../fullPolicycompany/kshema/kshemaNominee").oldRelationProblem(nomineeRelation);
+        if (oldChoice) {
+          err(`   ✗ Nominee Relationship - ${oldChoice}`);
+          return { ok: false, error: oldChoice };
+        }
         const relSelect = await driver.findElements(By.xpath('//mat-select[.//span[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "nominee relationship")]] | //span[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "nominee relationship")]/ancestor::mat-select | //span[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "nominee relationship")]/ancestor::mat-form-field//mat-select'));
         if (relSelect.length > 0) {
           await driver.executeScript("arguments[0].scrollIntoView({block:'center'});", relSelect[0]);
@@ -1350,8 +1363,10 @@ async function fillNomineeDetails(driver, data, capture = null) {
             await clickElement(driver, options[0], "Nominee Relationship option");
             log(`   ✓ Nominee Relationship set to "${nomineeRelation}"`);
           } else {
-            log(`   ⚠️ Nominee Relationship option "${nomineeRelation}" not found`);
-            try { await driver.actions().sendKeys(Key.ESCAPE).perform(); } catch(e) {}
+            // Not on KSHEMA's list: stop here, the list left open for the screenshot (it used to go on with no relation).
+            const notOffered = require("../../../fullPolicycompany/kshema/kshemaNominee").notOfferedProblem(nomineeRelation);
+            err(`   ✗ Nominee Relationship - ${notOffered}`);
+            return { ok: false, error: notOffered };
           }
           await driver.sleep(400);
         } else {

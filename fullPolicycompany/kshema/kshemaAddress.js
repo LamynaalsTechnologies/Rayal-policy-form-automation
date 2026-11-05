@@ -17,6 +17,15 @@
  *   - numbers and the small address words (STREET, ROAD, POST, NAGAR, NO, TK ...) may repeat: "2ND STREET 3RD STREET"
  *     needs both STREETs. Words of up to three letters count as small words.
  *   - at most 100 characters, cut between words (the old cut left "ARANT").
+ *
+ * Later the same day (the PDF read "130 PILLAYAR KOVIL STREET TONDUR VILLUPPURAM MELOLAKKUR, VILLUPURAM, TAMIL NADU,
+ * 604203,"): KSHEMA prints its OWN locality, district, state and pin code after our line, with its own commas, so a
+ * name in our line that KSHEMA prints anyway can come twice. Now what KSHEMA prints itself (`printedByKshema`: the Pin
+ * code Locality picked, the district / city / state the page shows, the pin code) is left out of our line when it is
+ * the SAME name - it is in the PDF already.
+ *   Only the same spelling counts (the owner: "one extra P and it is a new name"): VILLUPPURAM and VILLUPURAM are two
+ *   names, both kept. Case and dots do not count ("Pudukottai." = "PUDUKOTTAI").
+ * The commas after our line are KSHEMA's own; nothing typed here can remove them.
  */
 
 /** The words that say what kind of place a name is: a piece of only these and names already written is a repeat. */
@@ -43,6 +52,24 @@ const keyOf = (word) => String(word).toUpperCase().replace(/[^A-Z0-9]/g, "");
 /** A name (counted for repeats): has letters, more than three, and is not a small address word or a number. */
 const isName = (key) => /^[A-Z]{4,}$/.test(key) && !MAY_REPEAT.has(key);
 
+/** A name's comparison key: the word itself (upper case, letters only). The same spelling only - one extra letter is
+ *  another name (the owner, 2026-11-05: VILLUPPURAM is not VILLUPURAM). */
+const nameKey = (key) => key;
+
+/** The names and pin codes in what KSHEMA prints after our line. */
+const printedSets = (printedByKshema) => {
+  const names = new Set();
+  const numbers = new Set();
+  for (const text of printedByKshema || []) {
+    for (const word of String(text == null ? "" : text).split(/[\s,]+/)) {
+      const key = keyOf(word);
+      if (isName(key)) names.add(nameKey(key));
+      else if (/^\d{6}$/.test(key)) numbers.add(key);
+    }
+  }
+  return { names, numbers };
+};
+
 /** The policy's address boxes, in the form's order, as found on the job. */
 const addressBoxes = (data = {}) => [
   data.flatDoorNo,
@@ -65,8 +92,10 @@ const cutBetweenWords = (line, max) => {
  * @returns {{ line: string, left: string[] }} the Address line, and what was left out because it was written already
  *   (for the log)
  */
-function kshemaAddressLine(data, { maxLength = MAX_LENGTH } = {}) {
-  const names = new Set();
+function kshemaAddressLine(data, { maxLength = MAX_LENGTH, printedByKshema = [] } = {}) {
+  const printed = printedSets(printedByKshema);
+  // what KSHEMA prints counts as written already
+  const names = new Set(printed.names);
   const pieces = new Set();
   const kept = [];
   const left = [];
@@ -77,8 +106,8 @@ function kshemaAddressLine(data, { maxLength = MAX_LENGTH } = {}) {
       const words = raw.trim().split(/\s+/).filter(Boolean);
       if (!words.length) continue;
       const keys = words.map(keyOf).filter(Boolean);
-      const pieceKey = keys.join(" ");
-      const pieceNames = keys.filter(isName);
+      const pieceKey = keys.map((k) => (isName(k) ? nameKey(k) : k)).join(" ");
+      const pieceNames = keys.filter(isName).map(nameKey);
       const onlyKnownPlaces =
         pieceNames.length > 0 &&
         pieceNames.every((n) => names.has(n)) &&
@@ -93,11 +122,11 @@ function kshemaAddressLine(data, { maxLength = MAX_LENGTH } = {}) {
       const stays = [];
       for (const word of words) {
         const key = keyOf(word);
-        if (isName(key) && names.has(key)) {
+        if ((isName(key) && names.has(nameKey(key))) || printed.numbers.has(key)) {
           left.push(word);
           continue;
         }
-        if (isName(key)) names.add(key);
+        if (isName(key)) names.add(nameKey(key));
         stays.push(word);
       }
       if (stays.length) kept.push(stays.join(" "));
@@ -107,4 +136,33 @@ function kshemaAddressLine(data, { maxLength = MAX_LENGTH } = {}) {
   return { line: cutBetweenWords(kept.join(" ").replace(/\s+/g, " ").trim(), maxLength), left };
 }
 
-module.exports = { kshemaAddressLine, addressBoxes, MAY_REPEAT, QUALIFIERS, MAX_LENGTH };
+/**
+ * What KSHEMA prints after our Address line, read where it can be: the Pin code Locality the quote step picked (the
+ * value kshemaSection remembers), the policy's state and pin code, and any city / district / state box the page shows
+ * (KSHEMA's own data-iid names; none known for sure yet, so whatever is found is logged). Never throws.
+ *
+ * @returns {Promise<{ words: string[], found: Object }>}
+ */
+async function kshemaPrintedPlaces(driver, data = {}, { state = "", locality = "" } = {}) {
+  const found = { locality: locality || "", state: state || "", pinCode: String(data.pinCode || data.pincode || "").replace(/\D/g, ""), page: [] };
+  try {
+    const shown = await driver.executeScript(`
+      const out = [];
+      for (const el of document.querySelectorAll("[data-iid]")) {
+        const iid = String(el.getAttribute("data-iid") || "");
+        if (!/(city|district|state)/i.test(iid) || /address/i.test(iid)) continue;
+        if (el.getClientRects().length === 0) continue;
+        const value = ("value" in el && el.value) || el.innerText || el.textContent || "";
+        if (String(value).trim()) out.push({ iid, value: String(value).trim().slice(0, 60) });
+      }
+      return out.slice(0, 10);
+    `);
+    if (Array.isArray(shown)) found.page = shown;
+  } catch (e) {
+    /* the page could not be read - the rest still counts */
+  }
+  const words = [found.locality, found.state, found.pinCode, ...found.page.map((p) => p.value)].filter(Boolean);
+  return { words, found };
+}
+
+module.exports = { kshemaAddressLine, kshemaPrintedPlaces, addressBoxes, MAY_REPEAT, QUALIFIERS, MAX_LENGTH, _nameKey: nameKey };

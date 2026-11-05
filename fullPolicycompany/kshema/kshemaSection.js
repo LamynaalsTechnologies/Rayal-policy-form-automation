@@ -362,8 +362,16 @@ async function afterSilentSave(driver, { retrySave, fallbackError, readInvalid, 
   };
 }
 
+/** What a field was filled with on this browser (the option text a dropdown ended on), or "". */
+const filledValueOf = (driver, key) => {
+  const entries = driver && typeof driver === "object" ? filledByDriver.get(driver) : null;
+  const entry = entries && entries.get(key);
+  return entry && entry.expected != null ? String(entry.expected) : "";
+};
+
 module.exports = {
   isFieldRecheckEnabled,
+  filledValueOf,
   fillSection,
   fillOneField,
   recheckBeforeSave,
