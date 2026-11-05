@@ -522,7 +522,7 @@ function makeDeps(collection, over = {}) {
       if (over.briskRun) return over.briskRun(data, d);
       return over.briskResult || { success: true, certificateNo: "C1" };
     },
-    finalizeRecording: (job, p, company) => calls.finalize.push({ key: p.key, company }),
+    finalizeRecording: (job, p, company, runId) => calls.finalize.push({ key: p.key, company, runId }),
     scheduleWakeup: (t) => calls.wake.push(t),
     logAudit: async (action, details) => calls.audit.push([action, details]),
     now: () => NOW,
@@ -557,7 +557,9 @@ test("runPartJob (portal): TP gets its own formData + credentials, completes, cr
   assert.equal(doc.status, "pending"); // OD still to run
   assert.equal(doc.credentialSource, "user");
   assert.equal(doc.credentialUsername, "portal-user");
-  assert.deepEqual(calls.finalize, [{ key: "tp", company: "national" }]);
+  // the video is THIS run's (2026-11-05: every run keeps its own, History -> Runs opens it from the run's card)
+  assert.deepEqual(calls.finalize, [{ key: "tp", company: "national", runId: h.data._runId }]);
+  assert.ok(h.data._runId, "the run has an id");
   assert.equal(calls.audit.at(-1)[0], "JOB_COMPLETED");
   assert.equal(calls.audit.at(-1)[1].part, "tp");
 });

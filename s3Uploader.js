@@ -166,18 +166,20 @@ const LOCAL_RECORDINGS_DIR = path.join(__dirname, "local-recordings");
 const LOCAL_MAX_MB = parseInt(process.env.RECORDING_LOCAL_MAX_MB, 10) || 2048;
 
 /**
- * S3 key for a policy's screen recording: recordings/<company>/<policyId>.mp4
+ * S3 key for one run's screen recording: recordings/<company>/<policyId>[_<part>]_<run>.mp4
  *
- * Deliberately ONE key per policy, with no attempt number in it. Re-running a
- * policy overwrites the same object, so the old video is physically replaced
- * rather than kept alongside the new one — only the latest run is ever stored.
+ * One key PER RUN (2026-11-05, the owner: History -> Runs plays every run's own video). It used to be one key per
+ * policy, so a re-run overwrote the previous video (and restarted its 10-day clock). Now each video is its own object
+ * and the lifecycle rule deletes it RECORDING_RETENTION_DAYS after its own upload. Without `runStamp` the old one-key
+ * shape is kept (nothing calls it that way any more).
  */
-function generateRecordingKey(companyName, policyId) {
+function generateRecordingKey(companyName, policyId, runStamp = null) {
   const company = String(companyName || "unknown")
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, "_");
   const sanitizedId = String(policyId).replace(/[^a-zA-Z0-9_-]/g, "_");
-  return `${RECORDING_PREFIX}${company}/${sanitizedId}.mp4`;
+  const stamp = runStamp ? `_${String(runStamp).replace(/[^a-zA-Z0-9_-]/g, "_")}` : "";
+  return `${RECORDING_PREFIX}${company}/${sanitizedId}${stamp}.mp4`;
 }
 
 /** Remove one recording object. Never throws — a missing key is a no-op. */
@@ -455,6 +457,7 @@ module.exports = {
   uploadRecordingToS3,
   generateRecordingKey,
   deleteRecordingFromS3,
+  RECORDING_RETENTION_DAYS,
   ensureRecordingLifecycleRule,
   ensureLifecycleRule,
   ensureMultiCompanyScreenshotLifecycleRule,

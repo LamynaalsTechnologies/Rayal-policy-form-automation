@@ -203,7 +203,9 @@ const RelianceJobQueueSchema = new mongoose.Schema(
     // that fell back to local storage.
     // Entry: { attemptNumber, s3Key, localPath, storage: "s3"|"local",
     //          startedAt, endedAt, durationMs, sizeBytes, frameCount,
-    //          captureMode }
+    //          captureMode, part, runId, expiresAt, chapters }
+    // One per RUN, all kept (2026-11-05; newest 100): History -> Runs plays each run's own video. S3 deletes each
+    // video RECORDING_RETENTION_DAYS after its upload (expiresAt).
     recordings: {
       type: [mongoose.Schema.Types.Mixed],
       default: [],

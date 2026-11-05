@@ -583,6 +583,8 @@ const buildFormDataFromPolicy = async (data) => {
       firstName: data?.fullName || data?.firstName,
       middleName: data?.middleName || "",
       lastName: data?.surname || data?.lastName,
+      // KSHEMA's Last Name box gets the Surname only when the form's switch is on (kshemaQuoteForm.js)
+      kshemaSendSurname: data?.kshemaSendSurname === true,
       // Policy dates are read in INDIA time, whatever timezone this server runs
       // in (lib/policyDates.js) — the picker's 16 Oct is stored as 15 Oct 18:30Z.
       dob: formatPolicyDate(data?.dateOfBirth),
@@ -2179,10 +2181,10 @@ const runPolicyJobOnce = async (rawJob) => {
     // keeps going detached (the recorder's own max-duration stop covers it).
     void finalizeRecording(job._id, {
       companyName,
-      // Keyed by the POLICY, so a re-run overwrites the previous video rather
-      // than adding another one next to it.
+      // Named by the policy AND the run (2026-11-05): every run keeps its own video.
       policyId: job.captchaId,
       collection: jobQueueCollection,
+      runId: (job && job.formData && job.formData._runId) || null,
     });
   }
 };
@@ -2221,13 +2223,14 @@ const partRunnerDeps = {
   resolveMultiCompanyHandler,
   assertMultiCompanyEnabled,
   runBriskPart,
-  // Video per part: named ${policyId}_${part}, only that part's entry replaced.
-  finalizeRecording: (job, part, companyName) =>
+  // One video per RUN (2026-11-05): named ${policyId}_${part}_<run>, tagged with the run it is of; earlier ones kept.
+  finalizeRecording: (job, part, companyName, runId) =>
     finalizeRecording(job._id, {
       companyName,
       policyId: job.captchaId,
       collection: jobQueueCollection,
       partKey: part.key,
+      runId,
     }),
   scheduleWakeup: scheduleQueueWakeup,
   logAudit: logAuditEntry,

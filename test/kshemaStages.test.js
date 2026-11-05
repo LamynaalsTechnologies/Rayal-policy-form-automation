@@ -177,6 +177,26 @@ test("keepProposalPage: no readable address or no policy id -> nothing written, 
   assert.equal(log.updates.length, 0);
 });
 
+test("keepProposalPage records the run's Proposal step, so the KYC after it is timed on its own (History -> Runs)", async () => {
+  const runHistory = require("../lib/runHistory");
+  const START = new Date("2026-11-04T10:04:07Z");
+  const PROPOSAL_DONE = new Date("2026-11-04T10:05:40Z");
+  const KYC_FAILED = new Date("2026-11-04T10:06:58Z");
+  const data = { _id: "p1", _partKey: "motor", _runId: "run-kshema-1", _jobId: "job-1", _runStartedAt: START };
+  const { FakeClient } = fakeMongo();
+  await quiet(() => ks.keepProposalPage(data, LINK, { MongoClient: FakeClient, now: PROPOSAL_DONE }));
+  assert.equal(runHistory._clocks.get("run-kshema-1").lastAt, PROPOSAL_DONE.getTime(), "the run's clock moved to the proposal's end");
+
+  const writes = [];
+  const collection = { updateOne: async (filter, update) => writes.push(update) };
+  await runHistory.markRunStep(data, "kyc", { status: "failed", now: KYC_FAILED, collection });
+  assert.equal(writes[0].$set["runHistory.$[run].steps.kyc"].ms, KYC_FAILED - PROPOSAL_DONE, "the KYC alone, not since the run start");
+
+  // an address that cannot be read is still a proposal made in this run
+  await quiet(() => ks.keepProposalPage({ ...data, _runId: "run-kshema-2" }, "", { MongoClient: FakeClient, now: PROPOSAL_DONE }));
+  assert.equal(runHistory._clocks.get("run-kshema-2").lastAt, PROPOSAL_DONE.getTime());
+});
+
 test("loadKshemaResume: a finished step 1 with its saved page -> the KYC, with the address to open", async () => {
   const doc = { relianceStages: { motor: { proposal: { status: "completed", link: LINK } } } };
   const { FakeClient } = fakeMongo({ doc });

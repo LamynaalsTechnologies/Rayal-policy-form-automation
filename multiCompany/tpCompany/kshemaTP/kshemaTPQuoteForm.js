@@ -177,11 +177,13 @@ const CUSTOMER_FIELDS = [
     label: "Last Name",
     type: "text",
     selectors: byIid("c_last_name"),
-    value: (data) => data.lastName,
+    // Typed only when the "Send to KSHEMA" switch on the form's Surname is on
+    // (owner, 2026-11-04). Off, the default and every older policy, leaves the
+    // box empty ("nothing to enter, skipping"): the portal does not require it.
+    value: (data) => (data.kshemaSendSurname === true ? data.lastName : ""),
     stripSpaces: true,
-    // No asterisk on the portal's placeholder — a customer with one name is
-    // allowed through rather than blocked.
-    required: false,
+    // Switched on, a Surname that cannot be typed fails like any required field.
+    required: (data) => data.kshemaSendSurname === true,
   },
   {
     key: "mobileNumber",
@@ -726,13 +728,53 @@ async function fillPaCoverDetails(driver, data, capture = null) {
   // The portal recalculates the premium on every change here and sometimes answers with a gateway error
   // ("Http failure response ... 504") — that is it being slow, not a verdict on the data, and the field itself was set.
   // Wait it out, untick / tick PA Cover again and look again (kshemaSlowFields.js) before giving up.
-  return recoverSectionAfterPortalError(driver, await fill(), {
+  const section = await recoverSectionAfterPortalError(driver, await fill(), {
     fillAgain: fill,
     checkboxSelectors: () => PA_COVER_FIELDS[0].selectors,
     wantChecked: !!PA_COVER_FIELDS.find((f) => f.key === "paCoverYear").required(data),
     label: "PA Cover",
     sectionLabel: "PA Cover details",
   });
+  return tppdRefusal(driver, data, section, capture);
+}
+
+/**
+ * Limited TPPD = Yes on an RTO where KSHEMA gives no TPPD discount: the portal answers with its "Note" popup
+ * ("Please unselect limited TPPD as TPPD Discount is not applicable for this RTO") and the quote cannot go on with it.
+ * The run stops here with KSHEMA's own sentence and a screenshot; the popup is left on screen (owner, 2026-11-05).
+ * Only a popup that names TPPD stops it; any other popup is logged, and the run goes on as before.
+ */
+async function tppdRefusal(driver, data, section, capture = null, deps = {}) {
+  const tppd = PA_COVER_FIELDS.find((f) => f.key === "tppdRestrict");
+  if (tppd.value(data) !== "Yes") return section;
+  const waitForDialog = deps.waitForMessageDialog || require("../../../fullPolicycompany/kshema/kshemaDialog").waitForMessageDialog;
+  const dialog = await waitForDialog(driver, { timeoutMs: deps.timeoutMs ?? 6000 });
+  if (!dialog) return section;
+  if (!/tppd/i.test(dialog.text)) {
+    warn(`   ⚠️  KSHEMA showed a popup after TPPD Restrict: "${dialog.text}"`);
+    return section;
+  }
+  // an operator sentence carries no colon (the error is cut at its last colon before it is shown)
+  const said = dialog.text.replace(/:/g, " -").replace(/[.\s]+$/, "");
+  const error = `KSHEMA does not allow Limited TPPD for this RTO ("${said}"). Edit the policy, untick TPPD Restrict and run it again.`;
+  err(`   ✗ TPPD Restrict: KSHEMA says "${dialog.text}"`);
+  let shot = null;
+  if (capture) {
+    try {
+      shot = await capture("kshema_tppd_refused", "tppd_refused");
+    } catch (e) {
+      shot = null;
+    }
+  }
+  return {
+    ...section,
+    ok: false,
+    tppdRefused: true,
+    portalMessage: dialog.text,
+    failures: [...(section.failures || []), { label: "TPPD Restrict", reason: error }],
+    screenshots: shot && shot.screenshotUrl ? [shot, ...(section.screenshots || [])] : section.screenshots || [],
+    error,
+  };
 }
 
 const PREMIUM_FIELDS = [
@@ -1145,22 +1187,12 @@ async function downloadProposal(driver, data, jobBrowser, jobId, capture = null)
 
   // ── Fill Address ───────────────────────────────────────────────────────────
   try {
-    const addressParts = [
-      data.flatDoorNo,
-      data.floorNo,
-      data.buildingName,
-      data.blockName || data.blockNameNo,
-      data.roadStreetLane,
-      data.areaAndLocality || data.locality || data.area
-    ].filter(p => p && String(p).trim() !== "");
+    // One line from the address boxes: no commas, nothing written twice, at most 100 characters cut between words
+    // (kshemaAddress.js, the owner 2026-11-05).
+    const { line: fullAddress, left: notRepeated } = require("../../../fullPolicycompany/kshema/kshemaAddress").kshemaAddressLine(data);
 
-    if (addressParts.length > 0) {
+    if (fullAddress) {
       const { Key } = require("selenium-webdriver");
-      let fullAddress = addressParts.join(", ");
-      // Portal often limits address to 100 or 50 chars, let's limit to 100 just in case
-      if (fullAddress.length > 100) {
-        fullAddress = fullAddress.substring(0, 100).replace(/,\s*$/, "");
-      }
       const addressInput = await driver.findElements(By.xpath('//input[@data-iid="c_address_one" or contains(translate(@placeholder, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "address")]'));
       if (addressInput.length > 0 && await addressInput[0].isDisplayed()) {
         const field = addressInput[0];
@@ -1168,7 +1200,7 @@ async function downloadProposal(driver, data, jobBrowser, jobId, capture = null)
         await field.sendKeys(Key.CONTROL, "a");
         await field.sendKeys(Key.BACK_SPACE);
         await field.sendKeys(fullAddress);
-        log(`   ✓ Address set to "${fullAddress}"`);
+        log(`   ✓ Address set to "${fullAddress}"` + (notRepeated.length ? ` (written once only: ${notRepeated.join(" | ")})` : ""));
       } else {
         log("   – Address field not found, skipping");
       }
@@ -1857,6 +1889,7 @@ module.exports = {
   fillCustomerDetails,
   fillVehicleDetails,
   fillPaCoverDetails,
+  tppdRefusal,
   fillPremiumDetails,
   submitQuoteForm,
   fillAddonsDetails,

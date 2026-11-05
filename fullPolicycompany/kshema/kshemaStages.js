@@ -81,6 +81,10 @@ async function awaitProposalPage(driver, data, { awaitKycButton = require("./ksh
  * it, in one write. Without an address nothing is marked: a later run then makes a new quote, as before. Never throws.
  */
 async function keepProposalPage(data, url, { jobId = "", MongoClient, now = new Date() } = {}) {
+  // How long the proposal took in THIS run, on the job's run record (lib/runHistory.js), as markStage does for Reliance.
+  // Before 2026-11-05 a KSHEMA run never recorded it: History showed "done earlier" and the KYC carried the proposal's
+  // time. Recorded even when the address cannot be read - the proposal is made on the portal either way. Never throws.
+  require("../../lib/runHistory").markRunStep(data, "proposal", { status: "completed", now }).catch(() => {});
   const link = String(url || "").trim();
   if (!/^https?:\/\//i.test(link)) {
     warn(`[${jobId}] ⚠️ The proposal page address could not be read - KSHEMA step Proposal is not marked, a later run makes a new quote.`);

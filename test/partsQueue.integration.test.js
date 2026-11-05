@@ -499,28 +499,23 @@ it("queue wake-up: fires for insert and for an update that re-pends / reschedule
 
 /* -------------------------------- recordings ------------------------------- */
 
-it("recordings: a part replaces only its own entry and deletes only its own old video; legacy keeps one", async () => {
+it("recordings: every run's video is kept (2026-11-05) - a part's new video is added, nothing pulled or deleted; legacy too", async () => {
   const env = newEnv("rec");
   const job = await insertJob(env, multiParts(), {
     recordings: [
-      { part: "od", s3Key: "recordings/reliance/p_od-old.mp4" },
-      { part: "tp", s3Key: "recordings/national/p_tp.mp4" },
+      { part: "od", s3Key: "recordings/reliance/p_od_20261104T033407_aaaa.mp4", runId: "run-1" },
+      { part: "tp", s3Key: "recordings/national/p_tp_20261104T033500_bbbb.mp4", runId: "run-2" },
     ],
   });
-  const deleted = [];
-  const opts = (s3Key) => ({ entry: { attemptNumber: 2, s3Key }, partKey: "od", s3Key, deleteOld: async (k) => deleted.push(k), warn() {} });
+  const opts = (s3Key, runId) => ({ entry: { attemptNumber: 2, s3Key, runId }, partKey: "od", s3Key });
 
-  await saveRecordingEntry(env.col, job._id, opts("recordings/reliance/p_od-new.mp4"));
-  await saveRecordingEntry(env.col, job._id, opts("recordings/reliance/p_od-new.mp4")); // same key again: no growth
+  await saveRecordingEntry(env.col, job._id, opts("recordings/reliance/p_od_20261104T035524_cccc.mp4", "run-3"));
+  await saveRecordingEntry(env.col, job._id, opts("recordings/reliance/p_od_20261104T035524_cccc.mp4", "run-3")); // the same video twice: one entry
   const doc = await env.col.findOne({ _id: job._id });
-  assert.deepEqual(deleted, ["recordings/reliance/p_od-old.mp4"], "only this part's older video is deleted");
-  assert.equal(doc.recordings.length, 2);
-  assert.equal(doc.recordings.find((r) => r.part === "tp").s3Key, "recordings/national/p_tp.mp4");
-  assert.equal(doc.recordings.find((r) => r.part === "od").s3Key, "recordings/reliance/p_od-new.mp4");
+  assert.deepEqual(doc.recordings.map((r) => r.runId), ["run-1", "run-2", "run-3"], "the first run's OD video is still there");
+  assert.equal(doc.recordings[2].part, "od");
 
   const legacy = await insertJob(env, [part("od", "portal", "Reliance")], { recordings: [{ s3Key: "a.mp4" }, { s3Key: "b.mp4" }] });
-  const gone = [];
-  await saveRecordingEntry(env.col, legacy._id, { entry: { s3Key: "c.mp4" }, s3Key: "c.mp4", deleteOld: async (k) => gone.push(k), warn() {} });
-  assert.deepEqual(gone, ["a.mp4", "b.mp4"]);
-  assert.deepEqual((await env.col.findOne({ _id: legacy._id })).recordings, [{ s3Key: "c.mp4" }]);
+  await saveRecordingEntry(env.col, legacy._id, { entry: { s3Key: "c.mp4" }, s3Key: "c.mp4" });
+  assert.deepEqual((await env.col.findOne({ _id: legacy._id })).recordings.map((r) => r.s3Key), ["a.mp4", "b.mp4", "c.mp4"]);
 });
