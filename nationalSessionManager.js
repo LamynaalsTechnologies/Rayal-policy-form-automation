@@ -138,6 +138,12 @@ async function cleanupNationalJobBrowser(jobBrowserInfo, { hadError = false } = 
           ? path.dirname(profileInfo.fullPath)
           : null
       );
+      // Closing the window by hand removes this job's own cloned profile (lib/retainedBrowser.js, 2026-11-06).
+      require("./lib/retainedBrowser").watchRetainedBrowser({
+        label: `National Job ${jobBrowserInfo.jobId}`,
+        driver,
+        dirs: [profileInfo && profileInfo.fullPath ? path.dirname(profileInfo.fullPath) : null],
+      });
       return;
     }
 

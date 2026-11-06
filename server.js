@@ -65,6 +65,8 @@ const cleanupOldData = async () => {
     'temp_uploads',
     'cloned_profiles_national',
     'cloned_profiles_kshema',
+    // United India TP (2026-11-06): one fresh profile per run (multiCompany/tpCompany/unitedIndiaTP/unitedIndiaSession.js)
+    'cloned_profiles_united_india',
     // Frame dumps from job screen recordings — useless across a restart
     // (finished videos are already in S3 / local-recordings by then).
     'recordings_tmp',
@@ -349,7 +351,7 @@ const companyOfJob = (job) => {
 };
 
 /** Pretty label for logs and operator-facing messages: "national" -> "National" */
-const COMPANY_LABELS = { kshema: "KSHEMA" }; // brands that are not just Capitalised
+const COMPANY_LABELS = { kshema: "KSHEMA", "united india": "United India" }; // brands that are not just Capitalised
 const companyLabel = (company) => {
   const key = String(company).trim().toLowerCase();
   return COMPANY_LABELS[key] || key.charAt(0).toUpperCase() + key.slice(1);
@@ -419,6 +421,8 @@ const PROFILE_DIRS = [
   // It was held back while that flow deliberately left windows open — the
   // age-based sweep would have deleted the profile out from under one.
   "cloned_profiles_kshema",
+  // United India TP (2026-11-06) — a fresh profile per run, closed by its own session manager like KSHEMA's.
+  "cloned_profiles_united_india",
 ];
 // At least 1 hour, and never less than 4x JOB_TIMEOUT: when a job times out,
 // the Promise.race only rejects the outer promise — the automation keeps
@@ -1453,8 +1457,8 @@ const dispatchBundled = async (
       _attemptNumber: attemptNumber,
       _jobQueueCollection: jobQueueCollection,
     });
-  } else {
-    // Reliance form (default)
+  } else if (companyName === "reliance") {
+    // Reliance form
     run = fillRelianceForm({
       // NOTE: credentials come AFTER the spread on purpose. formData carries
       // hardcoded defaults ("rfcpolicy"/"Pass@123"), so spreading it last
@@ -1474,6 +1478,13 @@ const dispatchBundled = async (
       _attemptNumber: attemptNumber, // Current attempt number
       _jobQueueCollection: jobQueueCollection, // Pass collection for logging
     });
+  } else {
+    // A company with no full (OD + TP) flow (United India sells TP only, 2026-11-06). It used to fall through to Reliance's
+    // form and log in to Reliance with this insurer's login. Stopped before any browser opens, not retried ([E110]).
+    throw new Error(
+      `[E110] No full (OD + TP) automation exists for ${companyLabel(companyName)}. ` +
+        `Sell it as TP only, or as the TP side of a Combined Make and Model.`
+    );
   }
 
   return { run };

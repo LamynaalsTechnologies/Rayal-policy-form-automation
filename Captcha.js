@@ -25,10 +25,16 @@ function incrementCaptchaCount() {
     });
 }
 
-module.exports.extractCaptchaText = async (imageUrl) => {
+/**
+ * @param {string} imageUrl  a data: URL of the captcha picture
+ * @param {Object} [opts]
+ * @param {boolean} [opts.count=true]  count the read in the daily Reliance online counter. United India (2026-11-06)
+ *   passes false: that counter has no field for it, and its reads must not be booked as Reliance's.
+ */
+module.exports.extractCaptchaText = async (imageUrl, { count = true } = {}) => {
   try {
     // Count this AI extraction attempt in the daily counter
-    incrementCaptchaCount();
+    if (count) incrementCaptchaCount();
 
     // Initialize OpenAI model with vision capabilities
     const model = new ChatOpenAI({

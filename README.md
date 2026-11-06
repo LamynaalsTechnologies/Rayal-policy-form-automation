@@ -499,3 +499,187 @@ The owner's first automation steps for the Reliance **own-damage** part (steps i
 - **`BRISKMAXWINDOW` default is now 3** (was 1): every certificate comes through this window and may wait up to 2 minutes.
 - **What changed for Reliance.** Its Policy PDF is no longer merged with the Brisk certificate on the wallet path: they are two files, as National, KSHEMA and two-insurer policies already were.
 - **Tests:** `test/briskPdfWait.test.js`, end of `test/partRunner.test.js`, `test/multiCompanyCover.test.js`. Not run against real Brisk.
+
+## United India (TP only, 2026-11-06): what the automation already does
+United India is a TP-only insurer whose portal flow is **not built yet** (no `registry.js` entry).
+- **A United India TP part stops at once.** `lib/partRunner.js` now looks the portal handler up BEFORE the login, so it ends with
+  `[United India] [E110] No TP automation exists yet for United India.` (not retried). It no longer asks first for a portal login
+  that could not be used.
+- **The full-flow dispatcher no longer falls through to Reliance.** `server.js dispatchBundled` has an explicit Reliance branch.
+  Any other company gets `[E110] No full (OD + TP) automation exists for <company>. ...`. Before this, an unknown company ran
+  Reliance's form with that company's login.
+- **Labels**: `COMPANY_LABELS` (server.js, partRunner.js) has `"united india": "United India"`. The window limit works as it is:
+  `UNITEDINDIAMAXWINDOW`, default 1.
+- **Logins**: `models/ProviderCredential.js` accepts `united india`, like the backend's model.
+- **Existing TP insurer on Reliance OD**:
+  - `lib/existingTpDetails.js INSURERS.unitedindia` (match word `unitedindia`).
+  - `relianceOdSteps.js chooseInsurerOption` takes each insurer's `match`.
+  - An unknown key matches nothing now; it used to fall back to National's words.
+  - **Reliance's real wording for United India is not seen yet.** If it is missing, the error lists what the dropdown offers.
+- **Tests**: `test/unitedIndia.test.js` (it takes `dispatchBundled` from the source and runs it with fake forms), +1 in
+  `test/partRunner.test.js`. Two tests that used "United India" as an unknown insurer now use "ICICI Lombard".
+  - 8 of 8 deliberate breaks caught.
+  - `npm test`: 1345 tests, the only failure is the known captcha-file one.
+
+## United India TP: the login, then the Breaker stop (2026-11-06)
+The login is taken from the owner's older download project (`/home/karthi/Documents/Rayal_Brokers/Rayal-auto-pdf-downlod`:
+`xldownload.js` United India XL flow, `pdfdownload/pdfdownload.js`, `captcha.js`). It runs on our shared login loop.
+
+**How a United India TP part runs (TP only; there is no OD)**
+1. `multiCompany/registry.js` `"united india": { tp }` -> `multiCompany/tpCompany/unitedIndiaTP/unitedIndiaTP.js` inside `runHandler`.
+   That gives the gate, the browser, the recording, the live Hold, the login, a failure screenshot and clean-up.
+2. **Browser**: `unitedIndiaTP/unitedIndiaSession.js`, a fresh empty profile per run in `cloned_profiles_united_india`
+   (cleaned on start, swept). It uses KSHEMA's job driver, which has no implicit wait.
+3. **Login**: `multiCompany/common/login/unitedIndiaLogin.js`.
+   - **Page**: `https://www.uiic.in/GCWebPortal/login/LoginAction.do?p=login`; a saved credential URL wins.
+   - **Boxes**: `#username`, `#password` (`userPaWord`), `#userCaptcha`, button `#login`, plus the old fallbacks. `readonly` is
+     removed first, as the old code did.
+   - **Captcha**: `#captchaImg` is taken in memory (no file), enlarged 3x by the page canvas, read by `Captcha.js`, and typed only
+     if it is 4-8 letters/digits. It is **not** counted in the daily Reliance captcha counter (`extractCaptchaText(url, { count: false })`).
+   - **Logged in when one of these shows**: `a[data-target='#10']` ("View Reports and Queries"), `a.menuColor` /
+     `a.subMenuColor` / `#sidebar`, a "Policy Documents" link, or the login box gone from a finished page that is no longer
+     `p=login`.
+   - **Refused**: `#loginError` / `.loginError` (`portalMessages.js`).
+   - **Results**:
+     - a wrong user / password is E203: not retried, **never submitted twice**;
+     - locked is E204;
+     - a captcha refusal is E202: tried again on a fresh page with a fresh captcha, up to 3 attempts;
+     - a page that never loads is E304;
+     - a page still loading is E302.
+   - **Loader**: `loader.js "united india"` (common busy markers plus `waitReady`: the page's own load must be complete). The old
+     project had no loader, only fixed sleeps, so this code polls instead of sleeping.
+4. **After the login**: `Breaker.checkpoint("stopthis-location")`, the owner's own stop point (his `.env`: `BREAKER_ENABLED=true`,
+   `BREAKER_STOP_AT=stopthis-location`). If the Breaker lets it pass: "Logged in to United India - the United India TP form is not
+   built yet". Both are a deliberate stop: no retry, nothing submitted, the window stays open with `KEEP_BROWSER_OPEN_ON_ERROR=true`.
+
+**Not taken over from the old code**: the PDF tool printed the password in its log and kept default credentials in its source.
+
+**Tests**
+- `test/unitedIndiaLogin.test.js` (23, a fake UIIC page).
+- `test/manual/uiicReplica/loginCheck.js` (real headless Chrome on a replica page, 15 checks, all pass; by hand only).
+- The registry / login-index lists were updated in `multiCompanyRelianceLogin.test.js` and `relianceMultiForm.test.js`.
+- 16 of 16 deliberate breaks caught in a scratch copy.
+- `npm test` has only the known old failures (the captcha-file one; the download-ceiling timing flake under load).
+
+**Not seen on the live portal yet**: which success marker shows after the login, United India's error wording, any loader, and a
+"session already active" message.
+
+### After the login: Policy Transaction > Make New/Renew Policy (the owner, 2026-11-06)
+`multiCompany/tpCompany/unitedIndiaTP/unitedIndiaMenu.js` opens the two items in the owner's markup:
+- the sidebar's `<a data-toggle="collapse" data-target="#3" class="menuColor">Policy Transaction</a>`;
+- then `<a href="../portal/MenuAction.do?method=strbtn" class="subMenuColor">Make New/Renew Policy</a>`.
+The Breaker stop (`stopthis-location`) now comes **after** that page, before the rest of the TP form.
+
+**The owner's rule for every click and every field of this flow** (`unitedIndiaTP/unitedIndiaSteps.js`):
+- **Clicks** (`clickAndConfirm`): a click counts only when its effect is seen; otherwise it is clicked **once more**.
+  - The menu counts as clicked when its submenu link shows. The submenu counts when the page address has `method=strbtn` or
+    `#selectProduct` is there.
+  - A menu that is already open is **not** clicked again, because it is a collapse toggle and would close.
+- **Fields** (`fillAndConfirm`, for the next steps): a field counts only when it reads its value back; otherwise it is typed **once
+  more**.
+- **Missing elements**: one that is not visible stops the run at once with its name, for example `[E301] United India -
+  "Policy Transaction" is not on the page (not visible after 10 seconds) ...`. Clicked twice without effect is `[E301] ... was
+  clicked 2 times but ...`; a field that never holds its value is `[E306] ...`.
+- **Stops**: every wait polls, and a Hold or Breaker stop always gets through (`throwIfHeld`).
+
+### The Products page: Liability Only Policy, then Submit (the owner, 2026-11-06)
+`multiCompany/tpCompany/unitedIndiaTP/unitedIndiaProduct.js`, on the page that Make New/Renew Policy opens.
+- **Office and LOB**: Select Office ("DO VELLORE(280300)") and Select LOB ("Motor") are filled by the portal. They are only read
+  into the log and **never changed**; an empty one is said in the log.
+- **Product**: **Select Product** (`select#productCode`) = **"Liability Only Policy"** (value 3102), matched by its exact text,
+  so "Liability Only Policy Renewal" is never taken.
+  - It is chosen like a person (click the box, click the option) and read back. If it does not show the choice, it is set
+    **once more** the page's own way (value + change event).
+  - Then `[E306] ... shows "..." instead of "Liability Only Policy" after 2 tries`.
+  - A list without it: `[E306] ... does not offer "Liability Only Policy", it offers ...`, not retried.
+- **Submit** (`input#selectProduct`): it counts when the Products page has gone and the next page finished loading. Otherwise it
+  is pressed **once more**, then `[E301]` with what the page says.
+- **Popups**: an `alert()` the portal answers with (reported by chromedriver, or still open) is read, accepted and reported in
+  the portal's own words: `[E308] United India - after "Submit" the portal said "..."`, not retried.
+- **Breaker**: the stop (`stopthis-location`) is now after this Submit. The plain stop says "Liability Only Policy is chosen and
+  submitted, the rest of the TP form is not built yet".
+- **Tests**: `test/unitedIndiaProduct.test.js` (12). The replica now has the Products page with the owner's option list, a real
+  native dropdown and a real `alert()`: 32 checks, all pass. 12 of 13 deliberate breaks caught; the 13th (dropping the explicit
+  no-retry flag) changes nothing, because E308 is never retried by its code.
+- **Not seen live**: the page after Submit.
+- **Note**: the list also has "Two Wheelers Long Term Liability" (3162); the owner chose "Liability Only Policy".
+
+### Risk Details: Vehicle Class, Registration State, New Vehicle, Chassis, Engine (the owner, 2026-11-06)
+`multiCompany/tpCompany/unitedIndiaTP/unitedIndiaRisk.js` `fillRiskDetails`, on the page that the product's Submit opens
+(`gc_initiateAshokLeyland.do`).
+- **Opening the page**: if Submit opens it in a **new window**, the run switches to that window and does not press Submit again.
+- **Data first**: the policy's state, chassis and engine number are checked **before** anything is touched. Missing ones stop
+  with one sentence, not retried.
+- **Vehicle Class** `select#v_make` = **"Motorcycle / Scooter"** (3). Its `populateManufacturer()` runs, and the loader is waited
+  for.
+- **Vehicle Registration State** `select#regst` = **the customer's State/Union Territory on the policy**:
+  - the Online Policy saves `tamilnadu`, `pondicherry`, `westbengal` ...;
+  - they are matched to United India's spelling (TAMIL NADU 43, PONDICHERRY U.T. 95 ...), ignoring case, spaces, dots and the
+    "U.T." ending, with aliases (Puducherry, Chhattisgarh, Orissa ...);
+  - a state the list lacks stops, not retried.
+  - The state is read from the **policy** at run time (`lib/partRunner.js` adds `customerState`); the job's `state` holds a
+    Reliance code.
+- **New Vehicle** `#newvehchk1`: ticked. It is never clicked when it is ticked already, and a disabled box stops with a sentence.
+  Its onclick runs `getRegState()`, so the Registration State is read again and chosen once more if the tick changed it.
+- **Chassis Number** `#chasisNumber` and **Engine Number** `#engineNumber`: the policy's values, typed and read back (the page
+  upper-cases them).
+- **Vehicle Manufacturer** `select#selectedNumNameCode` = the Make & Model row's **Make**, then the portal's **Make**
+  `select#makeMotorDisplay` = the row's **Model** (the owner's correction, 2026-11-06: "manufacturer is a make and make is a
+  model", e.g. HERO HONDA, then "CBZ(1999 - 2008)"; the first version of this step had them the other way round).
+  - Both by the **exact** name (case and spaces do not count). The manufacturer list has "HONDA" (IBB4560) next to
+    "HONDA_NONGICOUNCIL"; only the exact one is taken.
+  - The Make list is filled by the portal's `retrieveURL()` after the manufacturer; it is waited for, up to 20 s, then `[E301]`.
+  - No exact manufacturer: the stop names similar ones United India offers. No exact Make: the stop lists everything that
+    manufacturer offers. Neither is retried; correct the United India Make & Model row.
+  - The run never adds to the Vehicle Model lists (they are kept by hand). The Make & Model dialog offers their names, so the
+    row holds the portal's exact spelling.
+- **Every one** follows the owner's rule: chosen or typed, read back, once more if it did not take, a missing box is its own
+  error.
+- **Console**: every line of a United India TP run starts with `United India TP | ` (`lib/flowLogPrefix.js` TAGGED_COMPANIES, the
+  existing `FLOW_LOG_PREFIX_ENABLED`).
+- **Breaker**: the stop (`stopthis-location`) is now after the Make.
+- **Tests**: `test/unitedIndiaRisk.test.js` (16), the new-window case in `test/unitedIndiaProduct.test.js`, `customerState` in
+  `test/partRunner.test.js`.
+  - The replica has the Risk Details boxes with their onchange / onclick and loader: three scenarios (normal, new window, the
+    tick resetting the state), all pass.
+  - 23 of 23 deliberate breaks caught across this round.
+- **Not seen live**: the real page's loader after each onchange, and what `getRegState()` really does.
+
+### United India's Makes and Models: collected once, then removed (2026-11-06)
+For one afternoon the automation filled the Vehicle Model lists itself: every policy run saved the Vehicle Manufacturer list
+and the Make list it saw (insert only), and a temporary collect mode (`COLLECT_MAKES_AND_MODELS_ONLY` in `unitedIndiaTP.js`,
+plus `scripts/unitedIndiaCollectModels.js`) chose every manufacturer one by one and saved its Make list. It filled
+**727 Makes and 6,304 Models**, with no duplicates. Then the owner said "now all make finished, remove the code of model
+getting", and chose to remove the per-run saving too. **All of it is gone**: `lib/insurerCatalog.js`,
+`unitedIndiaCollect.js`, the script, `models/InsurerMake.js` / `InsurerModel.js`, and their tests and replica scenarios.
+A United India run now only **reads and picks** the exact names. The lists are kept by hand on the Vehicle Model page
+(backend README §25.1).
+
+### A kept window is cleaned up when you close it (every company, 2026-11-06)
+`lib/retainedBrowser.js`. A window left open on purpose (`KEEP_BROWSER_OPEN_ON_ERROR=true`, or `CLOSE_BROWSER_AFTER_COMPLETE=false`)
+used to keep its profile (100-200 MB) until the next restart.
+- **Who**: Reliance `sessionManager.js`, National `nationalSessionManager.js`, KSHEMA `kshemaSessionManager.js` and United India
+  `unitedIndiaSession.js` all hand the kept browser to `watchRetainedBrowser`.
+- **How it checks**: every 5 s it asks Chrome for its windows (`getAllWindowHandles`). An alert or a busy page is not "closed".
+- **When it is closed**: once no window is left or the session is gone, it ends the chromedriver session and deletes **that job's
+  own** folders (Reliance's download folder too).
+- **Two windows**: a folder is deleted only through `lib/jobDirs.js`, so it never removes a folder another running job still
+  holds. Closing one window never touches the other's data.
+- **Timer**: it never keeps the process alive. A restart still wipes every profile folder.
+
+United India's profile folder name has no spaces any more (`united_india_job_tp_united_india_<name>_...`). Git ignores every
+`cloned_profiles*/` folder.
+
+**Tests**
+- `test/unitedIndiaSteps.test.js` (18).
+- `test/retainedBrowser.test.js` (11).
+- `test/unitedIndiaLogin.test.js` (now 25).
+- `test/manual/uiicReplica/loginCheck.js`: 25 real-Chrome checks, all pass. They cover the menu with a swallowed click and an
+  already-open menu, and two real kept windows closed one after the other.
+- 19 of 19 deliberate breaks caught in a scratch copy.
+
+The real-Chrome check also found that selenium-webdriver for Node has `getAllWindowHandles`, not `getWindowHandles`. Fixed before
+anything shipped.
+
+**Not seen live**: the page after Make New/Renew Policy (its address, `#selectProduct`), and the error chromedriver gives when a
+person closes the window by hand. The replica closes it through WebDriver, and the watcher accepts the known wordings.

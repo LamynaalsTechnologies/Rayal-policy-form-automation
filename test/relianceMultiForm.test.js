@@ -577,7 +577,7 @@ test("failure path of the copy (OD): a vehicle whose fuel type cannot be found s
 
 test("failure path of the copy (OD): bad existing TP details stop BEFORE any window opens — each with its own sentence, not retried", async () => {
   for (const [over, pattern] of [
-    [{ existingTpInsurer: "United India" }, /the existing TP insurer "United India" is not KSHEMA or National/i],
+    [{ existingTpInsurer: "ICICI Lombard" }, /the existing TP insurer "ICICI Lombard" is not KSHEMA, National or United India/i],
     [{ existingTpStartDate: "Invalid date" }, /start date "Invalid date" is not a date/i],
     [{ existingTpEndDate: "01-10-2026" }, /end date 01-10-2026 is not after its start date 01-10-2026/i],
     [{ existingTpPolicyNumber: "A" }, /number "A" is not a policy number/i],
@@ -869,8 +869,10 @@ test("registry: reliance / od and reliance / tp are these handlers; the other fo
   assert.equal(registry.reliance.od, fillRelianceOD);
   assert.equal(registry.reliance.tp, fillRelianceTP);
   assert.equal(resolveMultiCompanyHandler("Reliance", "OD"), fillRelianceOD);
-  assert.deepEqual(Object.keys(registry).sort(), ["kshema", "national", "reliance"]);
+  // United India (2026-11-06) sells TP only: one handler (test/unitedIndiaLogin.test.js)
+  assert.deepEqual(Object.keys(registry).sort(), ["kshema", "national", "reliance", "united india"]);
   for (const company of ["national", "kshema"]) assert.deepEqual(Object.keys(registry[company]).sort(), ["od", "tp"]);
+  assert.deepEqual(Object.keys(registry["united india"]), ["tp"]);
 });
 
 test("the handlers do not load the 5,000-line form until a part runs", () => {

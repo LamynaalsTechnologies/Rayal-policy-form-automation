@@ -293,7 +293,8 @@ test("the part runner asks the guard before anything is opened or bought", () =>
   assert.ok(guard > 0, "partRunner calls the guard");
   assert.ok(guard < src.indexOf("resolveCredentials(companyName"), "…before any portal login");
   assert.ok(guard < src.indexOf("runBriskPart(\n"), "…before the Brisk certificate is bought");
-  assert.match(src, /projection: \{ briskCertificate: 1, proposalNumber: 1, paCover: 1, settings: 1, \.\.\.TP_PROJECTION \}/, "the policy's paCover and settings are read fresh");
+  // (state: 1 since 2026-11-06 - United India's Vehicle Registration State is the customer's state on the policy)
+  assert.match(src, /projection: \{ briskCertificate: 1, proposalNumber: 1, paCover: 1, settings: 1, state: 1, \.\.\.TP_PROJECTION \}/, "the policy's paCover and settings are read fresh");
 });
 
 /* ------------------------------ the guard inside the real part runner (fake deps, no browser) ------------------------------ */

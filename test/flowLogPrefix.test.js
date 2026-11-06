@@ -66,7 +66,11 @@ test("flowLabel: the bundled part and a legacy job are TP+OD, tp is TP, od is OD
 });
 
 test("flowLabel: only the tagged insurers, and never the Brisk PA part", () => {
-  assert.deepEqual(flow.TAGGED_COMPANIES, ["reliance"]);
+  assert.deepEqual(flow.TAGGED_COMPANIES, ["reliance", "united india"]);
+  // United India (2026-11-06): its TP part is tagged too, with the brand label server.js passes
+  const brand = (c) => (String(c).toLowerCase() === "united india" ? "United India" : c);
+  assert.equal(flow.flowLabel({ company: "United India", partKey: "tp", companyLabel: brand }), "United India TP");
+  assert.equal(flow.formatPrefix("United India TP"), "United India TP | ");
   assert.equal(flow.flowLabel({ company: "national", partKey: "motor" }), null);
   assert.equal(flow.flowLabel({ company: "kshema", partKey: "tp" }), null);
   assert.equal(flow.flowLabel({ company: "Brisk", partKey: "pa" }), null);

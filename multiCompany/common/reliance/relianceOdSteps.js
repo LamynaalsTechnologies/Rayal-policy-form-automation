@@ -45,7 +45,7 @@
  * clock. Operator sentences carry ONE colon, right after the label (lib/errorHandler.js beautifyError keeps only the text
  * after the last colon), never the driver's own text, and end with "Nothing was saved or paid." or what to check.
  */
-const { parseDay } = require("../../../lib/existingTpDetails");
+const { parseDay, INSURERS } = require("../../../lib/existingTpDetails");
 
 /** The three controls of the TP Details box, by the ids the portal gives them. */
 const TP_DETAILS_IDS = {
@@ -912,13 +912,15 @@ function readAddressSameInPage() {
 
 /**
  * The list item of the insurer's list for this insurer — "KSHEMA General Insurance Limited" / "National Insurance Company
- * Limited" (the owner's names) — matched by its text (kshema, nationalinsurance), and only when it is the ONE such item.
+ * Limited" (the owner's names) / United India — matched by its text (lib/existingTpDetails.js INSURERS `match`: kshema,
+ * nationalinsurance, unitedindia), and only when it is the ONE such item. An unknown key matches nothing.
  * @returns {{option:Object|null, why?:"none"|"many", hits?:Object[]}}
  */
 function chooseInsurerOption(insurerKey, options) {
   const usable = (Array.isArray(options) ? options : []).filter((x) => x && !x.disabled && !isPlaceholder(x.text));
-  const word = insurerKey === "kshema" ? "kshema" : "nationalinsurance";
-  const hits = usable.filter((x) => fuelKey(x.text).includes(word));
+  const insurer = Object.values(INSURERS).find((i) => i.key === insurerKey);
+  const word = insurer ? insurer.match : "";
+  const hits = word ? usable.filter((x) => fuelKey(x.text).includes(word)) : [];
   if (hits.length === 1) return { option: hits[0] };
   return { option: null, why: hits.length ? "many" : "none", hits };
 }

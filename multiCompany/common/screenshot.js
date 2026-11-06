@@ -25,7 +25,8 @@ async function captureFailure(driver, ctx = {}) {
     const key = generateScreenshotKey(
       String(ctx.jobId || "job"),
       ctx.attempt || 1,
-      `multiCompany/${ctx.company || "unknown"}`
+      // "united india" -> multiCompany/united_india (a space in an S3 folder name is legal but awkward in every link)
+      `multiCompany/${String(ctx.company || "unknown").trim().replace(/\s+/g, "_")}`
     );
     const url = await uploadScreenshotToS3(base64, key);
     return { screenshotUrl: url, screenshotKey: key };

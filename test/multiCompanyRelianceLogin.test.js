@@ -301,10 +301,11 @@ test("login(driver, 'reliance') is the copied full-company login", async () => {
   assert.equal(motors.id, "divMainMotors", "went through fullCompanyLogin, which returns the Motors menu");
 });
 
-test("National and KSHEMA still go through the shared login loop; unknown companies are refused", async () => {
-  assert.deepEqual(SUPPORTED_COMPANIES, ["reliance", "national", "kshema"]);
+test("National, KSHEMA and United India go through the shared login loop; unknown companies are refused", async () => {
+  // United India (2026-11-06): its login is on the shared loop too (test/unitedIndiaLogin.test.js)
+  assert.deepEqual(SUPPORTED_COMPANIES, ["reliance", "national", "kshema", "united india"]);
   // The shared loop refuses to start without credentials, before it touches the browser.
-  for (const company of ["national", "kshema"]) {
+  for (const company of ["national", "kshema", "united india"]) {
     await assert.rejects(
       () => login(fakeReliance(), company, { username: "", password: "" }, { jobId: "x", log() {} }),
       (e) => isMultiCompanyError(e) && e.code === "E205",

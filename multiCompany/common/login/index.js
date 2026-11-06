@@ -19,6 +19,8 @@ const OWN_LOGIN = {
 const STRATEGIES = {
   national: () => require("./nationalLogin"),
   kshema: () => require("./kshemaLogin"),
+  // United India (2026-11-06): the UIIC login of the old download project, on the shared loop
+  "united india": () => require("./unitedIndiaLogin"),
 };
 
 function login(driver, company, creds, ctx) {

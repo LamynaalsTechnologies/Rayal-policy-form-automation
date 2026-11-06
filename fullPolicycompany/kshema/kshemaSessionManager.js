@@ -109,6 +109,12 @@ async function cleanupKshemaJobBrowser(jobBrowserInfo, { hadError = false } = {}
           ? path.dirname(profileInfo.fullPath)
           : null
       );
+      // Closing the window by hand removes this job's own profile (lib/retainedBrowser.js, 2026-11-06).
+      require("../../lib/retainedBrowser").watchRetainedBrowser({
+        label: `KSHEMA Job ${jobId}`,
+        driver,
+        dirs: [profileInfo && profileInfo.userDataDir],
+      });
       return;
     }
 

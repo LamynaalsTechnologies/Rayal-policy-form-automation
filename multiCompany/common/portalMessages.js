@@ -40,6 +40,8 @@ const MESSAGE_SELECTORS = {
   ],
   national: [],
   kshema: [],
+  // United India (UIIC): the login page's error box, as the old download project read it (xldownload.js).
+  "united india": ["#loginError", ".loginError"],
 };
 
 /**

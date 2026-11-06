@@ -28,16 +28,16 @@ const failure = (data) => {
 test("good details: the number upper-cased, the insurer as the page names it, the dates as DD-MM-YYYY", () => {
   const r = tp.validateExistingTpDetails(good({ existingTpPolicyNumber: " nic/tp/0001 ", existingTpStartDate: "1-10-2026" }));
   assert.equal(r.policyNumber, "NIC/TP/0001");
-  assert.deepEqual(r.insurer, { key: "national", label: "National", pageName: "National Insurance Company Limited" });
+  assert.deepEqual(r.insurer, { key: "national", label: "National", pageName: "National Insurance Company Limited", match: "nationalinsurance" });
   assert.equal(r.startDate, "01-10-2026", "a one-digit day gets its zero");
   assert.equal(r.endDate, "30-09-2031");
 });
 
-test("the insurer: KSHEMA and National in any case or full name; anything else is not guessed", () => {
-  for (const [given, key] of [["KSHEMA", "kshema"], ["kshema", "kshema"], ["Kshema General Insurance Limited", "kshema"], ["National", "national"], ["NATIONAL INSURANCE COMPANY LIMITED", "national"], ["national insurance", "national"]]) {
+test("the insurer: KSHEMA, National and United India in any case or full name; anything else is not guessed", () => {
+  for (const [given, key] of [["KSHEMA", "kshema"], ["kshema", "kshema"], ["Kshema General Insurance Limited", "kshema"], ["National", "national"], ["NATIONAL INSURANCE COMPANY LIMITED", "national"], ["national insurance", "national"], ["United India", "unitedindia"], ["UNITED INDIA", "unitedindia"], ["United India Insurance Company Limited", "unitedindia"]]) {
     assert.equal(tp.validateExistingTpDetails(good({ existingTpInsurer: given })).insurer.key, key, given);
   }
-  for (const given of ["", "Reliance", "United India", "nationwide", "KSHEM"]) assert.equal(tp.insurerOf(given), null, given);
+  for (const given of ["", "Reliance", "ICICI Lombard", "United", "nationwide", "KSHEM"]) assert.equal(tp.insurerOf(given), null, given);
 });
 
 test("every kind of bad data is its own plain error: not retried, one colon, no driver words, says what to do", () => {
@@ -46,7 +46,7 @@ test("every kind of bad data is its own plain error: not retried, one colon, no 
     [good({ existingTpPolicyNumber: "A" }), "number", /number "A" is not a policy number \(3 to 40 letters, digits and \/ - \.\)/],
     [good({ existingTpPolicyNumber: "NIC#TP" }), "number", /is not a policy number/],
     [good({ existingTpInsurer: "" }), "insurer", /the existing TP insurer is missing/],
-    [good({ existingTpInsurer: "United India" }), "insurer", /the existing TP insurer "United India" is not KSHEMA or National/],
+    [good({ existingTpInsurer: "ICICI Lombard" }), "insurer", /the existing TP insurer "ICICI Lombard" is not KSHEMA, National or United India/],
     [good({ existingTpStartDate: "Invalid date" }), "start", /the existing TP policy start date "Invalid date" is not a date \(DD-MM-YYYY\)/],
     [good({ existingTpStartDate: "" }), "start", /start date is missing/],
     [good({ existingTpEndDate: "31-02-2031" }), "end", /end date "31-02-2031" is not a date/],

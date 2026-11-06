@@ -1080,6 +1080,12 @@ async function cleanupJobBrowser(jobBrowserInfo, { hadError = false } = {}) {
         `Job ${jobId}`,
         jobBrowserInfo.profileInfo && jobBrowserInfo.profileInfo.userDataDir
       );
+      // Closing the window by hand removes this job's own profile + download folder (lib/retainedBrowser.js, 2026-11-06).
+      require("./lib/retainedBrowser").watchRetainedBrowser({
+        label: `Job ${jobId}`,
+        driver: jobBrowserInfo.driver,
+        dirs: [jobBrowserInfo.profileInfo && jobBrowserInfo.profileInfo.userDataDir, jobBrowserInfo.profileInfo && jobBrowserInfo.profileInfo.downloadDir],
+      });
       return;
     }
 

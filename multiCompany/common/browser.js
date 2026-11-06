@@ -21,6 +21,11 @@ const MANAGERS = {
     const m = require("../../fullPolicycompany/kshema/kshemaSessionManager");
     return { open: m.createKshemaJobBrowser, close: m.cleanupKshemaJobBrowser };
   },
+  // United India (2026-11-06): TP only, a fresh profile per run
+  "united india": () => {
+    const m = require("../tpCompany/unitedIndiaTP/unitedIndiaSession");
+    return { open: m.createUnitedIndiaJobBrowser, close: m.cleanupUnitedIndiaJobBrowser };
+  },
 };
 
 const managerFor = (company) => {

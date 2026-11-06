@@ -19,7 +19,8 @@ const ProviderCredentialSchema = new mongoose.Schema({
     // Must match the insurer names the app stores (lowercased by
     // syncProviderCredentials). Keep in step with PROVIDER_COMPANIES in the
     // frontend's Shared/CommonConstant.js.
-    enum: ["reliance", "national", "kshema"],
+    // "united india" (2026-11-06): United India, a TP-only insurer; its portal flow is not built yet.
+    enum: ["reliance", "national", "kshema", "united india"],
   },
   username: {
     type: String,

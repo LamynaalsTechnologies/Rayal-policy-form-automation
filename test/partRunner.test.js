@@ -637,6 +637,47 @@ test("runPartJob: no portal credentials -> [E205], not retried; no handler -> [E
   assert.match(partOf(col.state.doc, "od").lastError, /No OD automation exists yet/);
 });
 
+test("runPartJob: the customer's own state on the POLICY reaches the handler as customerState (United India's registration state)", async () => {
+  const parts = [part("tp", "portal", "United India")];
+  const claimed = claimedFrom(jobDoc(parts, { formData: formData({ Companyname: "united india", state: "30" }) }), "tp");
+  const col = fakeCollection(claimed);
+  const { deps, calls } = makeDeps(col);
+  // a database that returns only the fields asked for, like MongoDB's projection
+  const policy = { _id: "policy1", state: "tamilnadu", fullName: "A", surname: "B" };
+  deps.policies.findOne = async (query, opts = {}) => {
+    const fields = Object.keys((opts && opts.projection) || {});
+    if (!fields.length) return { ...policy };
+    const out = { _id: policy._id };
+    for (const f of fields) if (f in policy) out[f] = policy[f];
+    return out;
+  };
+  await runner.runPartJob(deps, claimed);
+  assert.equal(calls.handler.length, 1);
+  assert.equal(calls.handler[0].data.customerState, "tamilnadu");
+  assert.equal(calls.handler[0].data.state, "30", "the job's Reliance code is left as it was");
+
+  // a policy without a state: nothing is made up
+  const claimed2 = claimedFrom(jobDoc(parts, { formData: formData({ Companyname: "united india" }) }), "tp");
+  const second = makeDeps(fakeCollection(claimed2), { policyDoc: { _id: "policy1" } });
+  await runner.runPartJob(second.deps, claimed2);
+  assert.equal(second.calls.handler[0].data.customerState, undefined);
+});
+
+test("runPartJob: an insurer with no TP automation yet (United India, 2026-11-06) stops at once - no login is asked", async () => {
+  const parts = [part("tp", "portal", "United India")];
+  const claimed = claimedFrom(jobDoc(parts, { formData: formData({ Companyname: "united india" }) }), "tp");
+  const col = fakeCollection(claimed);
+  const { deps, calls } = makeDeps(col, { noHandler: true, noCreds: true });
+  deps.companyLabel = undefined; // the runner's own label (server.js passes the same one): "United India", not "united india"
+  await runner.runPartJob(deps, claimed);
+  const tp = partOf(col.state.doc, "tp");
+  assert.equal(tp.lastErrorCode, "E110");
+  assert.equal(tp.lastError, "[United India] [E110] No TP automation exists yet for United India.");
+  assert.equal(calls.creds.length, 0, "the login is not looked up for an insurer that has no automation");
+  assert.equal(calls.handler.length, 0);
+  assert.equal(tp.status, "failed_login_form", "not retried");
+});
+
 test("runPartJob: MULTI_COMPANY_AUTOMATION_ENABLED off -> [E110] before anything opens", async () => {
   const claimed = claimedFrom(jobDoc(multiParts()), "od");
   const col = fakeCollection(claimed);

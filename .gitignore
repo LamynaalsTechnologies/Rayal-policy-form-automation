@@ -222,5 +222,9 @@ reliance_captcha*
 temp_uploads/
 cloned_profiles_national/
 cloned_profiles_kshema/
+# Every company's throwaway Chrome profiles (United India 2026-11-06, and any insurer added later): 100-200 MB each
+cloned_profiles*/
+cloned_profiles_united_india/
+brisk-certificates/
 
 

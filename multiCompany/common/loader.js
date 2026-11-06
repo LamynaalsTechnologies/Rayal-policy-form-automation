@@ -13,6 +13,8 @@
  *              mask). Spinners inside an open popup are ignored: an open dialog
  *              means the request FINISHED and the portal is waiting for input.
  *   kshema   — the Angular Material spinner
+ *   united india — no loader was ever seen (the old download project only slept); common page-busy markers, and the
+ *              page itself must have finished loading (document.readyState "complete", `waitReady`)
  * The visibility rules (display/visibility/opacity/size) are National's, the
  * strictest of the three — a collapsed idle progress bar must never latch the
  * wait on "busy".
@@ -46,7 +48,31 @@ const PRESETS = {
     timeoutMs: 20000,
     stopOnDialog: false,
   },
+  // United India (UIIC GCWebPortal, a page-per-request JSP portal). Its loader is NOT known yet: these are the common
+  // busy markers of such pages; the first live run will tell. The page finishing its own load is the signal the old
+  // project relied on.
+  "united india": {
+    label: "United India",
+    busy: [
+      ".blockUI.blockOverlay",
+      ".blockUI.blockMsg",
+      "#loading",
+      "#loader",
+      ".loading",
+      ".loader",
+      "img[src*='loading']",
+      "img[src*='loader']",
+      ".spinner-border",
+    ].join(", "),
+    timeoutMs: 30000,
+    stopOnDialog: false,
+    waitReady: true,
+  },
 };
+
+/** The page's own load has finished. Mid-navigation the script fails: not ready yet. */
+const isDocumentReady = (driver) =>
+  driver.executeScript("return document.readyState").then((state) => state === "complete", () => false);
 
 const DIALOG_SELECTOR = [
   "mat-dialog-container",
@@ -114,7 +140,8 @@ async function waitForLoader(driver, company, { timeoutMs, pollMs = 120, stage =
 
   while (Date.now() < deadline) {
     if (preset.stopOnDialog && (await isDialogOpen(driver))) return true;
-    if (!(await isBusy(driver, preset.busy))) return true;
+    const ready = !preset.waitReady || (await isDocumentReady(driver));
+    if (ready && !(await isBusy(driver, preset.busy))) return true;
     await driver.sleep(pollMs);
   }
 
@@ -128,7 +155,9 @@ async function waitForLoader(driver, company, { timeoutMs, pollMs = 120, stage =
 /** True when the company's loader is on screen right now (no waiting). */
 async function isLoaderVisible(driver, company) {
   const preset = PRESETS[String(company || "").toLowerCase()];
-  return preset ? isBusy(driver, preset.busy) : false;
+  if (!preset) return false;
+  if (preset.waitReady && !(await isDocumentReady(driver))) return true;
+  return isBusy(driver, preset.busy);
 }
 
 module.exports = { waitForLoader, isLoaderVisible, LOADER_PRESETS: PRESETS };
