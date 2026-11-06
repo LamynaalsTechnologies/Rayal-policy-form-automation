@@ -88,11 +88,23 @@ const cutBetweenWords = (line, max) => {
   return (at > 0 ? room.slice(0, at) : line.slice(0, max)).trim();
 };
 
+/** A line that is an address at all: at least one word of three letters or more (not only "130" or nothing). */
+const hasAWord = (line) => /[A-Za-z]{3,}/.test(line);
+
 /**
- * @returns {{ line: string, left: string[] }} the Address line, and what was left out because it was written already
- *   (for the log)
+ * @returns {{ line: string, left: string[], cut: boolean, keptPrinted: boolean }} the Address line; what was left out
+ *   because it was written already (for the log); whether it was cut at `maxLength`; and whether KSHEMA's own names
+ *   were kept after all because without them nothing but numbers (or nothing) was left - the box is never left empty.
  */
 function kshemaAddressLine(data, { maxLength = MAX_LENGTH, printedByKshema = [] } = {}) {
+  const withPrinted = buildLine(data, printedByKshema, maxLength);
+  if (!(printedByKshema || []).length || hasAWord(withPrinted.line)) return { ...withPrinted, keptPrinted: false };
+  // everything left was KSHEMA's own (district, state, pin): keep our words, only our own repeats go
+  const ownOnly = buildLine(data, [], maxLength);
+  return { ...ownOnly, keptPrinted: ownOnly.line !== withPrinted.line };
+}
+
+function buildLine(data, printedByKshema, maxLength) {
   const printed = printedSets(printedByKshema);
   // what KSHEMA prints counts as written already
   const names = new Set(printed.names);
@@ -133,13 +145,17 @@ function kshemaAddressLine(data, { maxLength = MAX_LENGTH, printedByKshema = [] 
     }
   }
 
-  return { line: cutBetweenWords(kept.join(" ").replace(/\s+/g, " ").trim(), maxLength), left };
+  const whole = kept.join(" ").replace(/\s+/g, " ").trim();
+  const line = cutBetweenWords(whole, maxLength);
+  return { line, left, cut: line.length < whole.length };
 }
 
 /**
- * What KSHEMA prints after our Address line, read where it can be: the Pin code Locality the quote step picked (the
- * value kshemaSection remembers), the policy's state and pin code, and any city / district / state box the page shows
- * (KSHEMA's own data-iid names; none known for sure yet, so whatever is found is logged). Never throws.
+ * What KSHEMA prints after our Address line, read where it can be: the policy's state and pin code, and any customer
+ * city / district / state box the page shows (KSHEMA's own data-iid names; none known for sure yet, so whatever is found
+ * is logged). The owner's PDF showed KSHEMA printing ", <district>, <state>, <pin>," after our line.
+ * The Pin code Locality the quote step picked is reported (`found.locality`) but NOT left out of our line: it is not
+ * proven that KSHEMA prints it, and leaving it out when it does not would lose the village from the PDF. Never throws.
  *
  * @returns {Promise<{ words: string[], found: Object }>}
  */
@@ -151,6 +167,8 @@ async function kshemaPrintedPlaces(driver, data = {}, { state = "", locality = "
       for (const el of document.querySelectorAll("[data-iid]")) {
         const iid = String(el.getAttribute("data-iid") || "");
         if (!/(city|district|state)/i.test(iid) || /address/i.test(iid)) continue;
+        // the vehicle's RTO / registration place, the financier's or nominee's: not the customer's address
+        if (/(rto|regist|vehicle|veh_|hypo|financ|nominee|branch|insur|intermed)/i.test(iid)) continue;
         if (el.getClientRects().length === 0) continue;
         const value = ("value" in el && el.value) || el.innerText || el.textContent || "";
         if (String(value).trim()) out.push({ iid, value: String(value).trim().slice(0, 60) });
@@ -161,7 +179,7 @@ async function kshemaPrintedPlaces(driver, data = {}, { state = "", locality = "
   } catch (e) {
     /* the page could not be read - the rest still counts */
   }
-  const words = [found.locality, found.state, found.pinCode, ...found.page.map((p) => p.value)].filter(Boolean);
+  const words = [found.state, found.pinCode, ...found.page.map((p) => p.value)].filter(Boolean);
   return { words, found };
 }
 

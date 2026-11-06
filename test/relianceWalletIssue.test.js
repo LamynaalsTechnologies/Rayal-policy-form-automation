@@ -138,6 +138,20 @@ test("policyFileNames follow the backend's own convention: <d><m><yyyy>-<9 rando
   assert.notEqual(issue.policyFileNames().fileName, issue.policyFileNames().fileName, "random part differs");
 });
 
+test("policyFileNames with the policy number (the owner, 2026-11-06): <number>.pdf in a folder of its own", () => {
+  const r = issue.policyFileNames(new Date(2026, 10, 6), () => 0, "120122623750221335");
+  assert.equal(r.fileName, "120122623750221335.pdf");
+  assert.equal(r.key, "Policy/6112026-AAAAAAAAA/120122623750221335.pdf");
+  // two copies of the same policy never overwrite each other
+  assert.notEqual(issue.policyFileNames(new Date(), Math.random, "P1").key, issue.policyFileNames(new Date(), Math.random, "P1").key);
+  // what a file name cannot hold becomes "-"
+  assert.equal(issue.policyFileNames(new Date(2026, 10, 6), () => 0, " KGI/2W/2026/000123 ").fileName, "KGI-2W-2026-000123.pdf");
+  assert.equal(issue.policyNumberFileStem("a b//c"), "a-b-c");
+  // no number (or nothing usable left): the old name
+  assert.equal(issue.policyFileNames(new Date(2026, 9, 4), () => 0, "").fileName, "4102026-AAAAAAAAA-Policy.pdf");
+  assert.equal(issue.policyFileNames(new Date(2026, 9, 4), () => 0, "///").fileName, "4102026-AAAAAAAAA-Policy.pdf");
+});
+
 test("markerFieldFor: one note per policy, one per part of a multi-company policy", () => {
   assert.equal(issue.markerFieldFor({}), "walletPayment");
   assert.equal(issue.markerFieldFor({ _partKey: "motor" }), "walletPayment");
@@ -1210,7 +1224,10 @@ test("issued, PDF by the policy number link: the note BEFORE the press, the pres
   const pol = r.mongo.data.policy.find((p) => p._id === "pol1");
   assert.equal(pol.policyNumber, NUMBER);
   assert.equal(r.uploads.length, 1);
-  assert.match(r.uploads[0].key, /^Policy\/\d{6,8}-[A-Z0-9]{9}-Policy\.pdf$/);
+  // named after the policy number (the owner, 2026-11-06), in a folder of its own
+  assert.equal(r.uploads[0].key, `Policy/${r.uploads[0].key.split("/")[1]}/${NUMBER}.pdf`);
+  assert.match(r.uploads[0].key, new RegExp(`^Policy/\\d{6,8}-[A-Z0-9]{9}/${NUMBER}\\.pdf$`));
+  assert.equal(r.uploads[0].fileName, `${NUMBER}.pdf`);
   assert.equal(r.uploads[0].bytes, PDF.length);
   assert.deepEqual(pol.policyFile, {
     fileName: r.uploads[0].fileName,
@@ -1742,8 +1759,10 @@ test("recovery: the PDF is fetched from View Policy by the number, stored and se
   const pol = r.mongo.data.policy.find((p) => p._id === "pol1");
   assert.equal(pol.policyNumber, NUMBER);
   assert.equal(r.uploads.length, 1);
-  assert.match(r.uploads[0].key, /^Policy\/\d{6,8}-[A-Z0-9]{9}-Policy\.pdf$/);
+  assert.match(r.uploads[0].key, new RegExp(`^Policy/\\d{6,8}-[A-Z0-9]{9}/${NUMBER}\\.pdf$`));
+  assert.equal(r.uploads[0].fileName, `${NUMBER}.pdf`);
   assert.equal(pol.policyFile.key, r.uploads[0].key);
+  assert.equal(pol.policyFile.fileName, `${NUMBER}.pdf`);
   assert.deepEqual(r.result.warnings, []);
   // the note was never written as a NEW payment (no claim): the only writes are the number, the file and the pdf time
   const fields = r.mongo.writes.filter((x) => x.matched).map((x) => `${x.name}:${Object.keys(x.update.$set).filter((k) => k !== "updatedAt").join(",")}`);

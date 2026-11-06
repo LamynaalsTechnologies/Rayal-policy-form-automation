@@ -182,12 +182,33 @@ function markerFieldFor(data) {
   return key && key !== "motor" ? `walletPayment_${key}` : "walletPayment";
 }
 
-/** The S3 object of a policy PDF — the backend's own convention (getFileName + the "Policy" folder, uploads of the app). */
-function policyFileNames(now = new Date(), random = Math.random) {
+/** A policy number as a file name: what a file name cannot hold ("/", spaces ...) becomes "-". "" when nothing is left. */
+function policyNumberFileStem(policyNumber) {
+  return String(policyNumber == null ? "" : policyNumber)
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+/**
+ * The S3 object of a policy PDF, in the "Policy" folder (no expiry).
+ *
+ * With the policy number (the owner, 2026-11-06: "policynumber.pdf"): the file is `<policy number>.pdf` - what the View
+ * page shows and the name a download saves as - in a folder of its own (`Policy/<d><m><yyyy>-<9 random>/`), so two
+ * stored copies never overwrite each other. Without a number: the backend's own convention, as before
+ * (`<d><m><yyyy>-<9 random>-Policy.pdf`, getFileName).
+ */
+function policyFileNames(now = new Date(), random = Math.random, policyNumber = "") {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   let rand = "";
   for (let i = 0; i < 9; i++) rand += chars.charAt(Math.floor(random() * chars.length));
   const date = now.getDate().toString() + (now.getMonth() + 1).toString() + now.getFullYear().toString();
+  const stem = policyNumberFileStem(policyNumber);
+  if (stem) {
+    const fileName = `${stem}.pdf`;
+    return { fileName, key: `Policy/${date}-${rand}/${fileName}` };
+  }
   const fileName = `${date}-${rand}-Policy.pdf`;
   return { fileName, key: `Policy/${fileName}` };
 }
@@ -1625,7 +1646,7 @@ async function payWithCdtAndIssue(o = {}) {
   if (pdf.truncated) log(`⚠️ ${pdf.name} has no %%EOF marker at its end — it is kept, but it may be incomplete`);
 
   // 8. stored for good, and set on the policy
-  const names = policyFileNames(new Date());
+  const names = policyFileNames(new Date(), Math.random, number); // <policy number>.pdf (the owner, 2026-11-06)
   let stored;
   try {
     stored = await uploadPolicyPdf(pdf.path, { key: names.key, fileName: names.fileName });
@@ -1723,7 +1744,7 @@ async function recoverIssuedPolicyPdf(o = {}) {
     log(`the policy already has its PDF file (${storedKey}) — not stored again`);
     return { ok: true, recovered: true, policyNumber: number, pdf: { path: pdf.path, name: pdf.name, size: pdf.size, via: pdf.via }, file: null, warnings, warning: recoveryWarning(number, warnings) };
   }
-  const names = policyFileNames(new Date());
+  const names = policyFileNames(new Date(), Math.random, number); // <policy number>.pdf (the owner, 2026-11-06)
   let stored;
   try {
     stored = await uploadPolicyPdf(pdf.path, { key: names.key, fileName: names.fileName });
@@ -1800,6 +1821,7 @@ module.exports = {
   whenText,
   markerFieldFor,
   policyFileNames,
+  policyNumberFileStem,
   readIssuePageInPage,
   readViewPolicyInPage,
   selectKendoOptionInPage,

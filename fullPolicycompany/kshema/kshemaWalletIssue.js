@@ -633,7 +633,7 @@ async function payWithCdBalanceAndIssue(o = {}) {
     );
   if (!pdf.ok) return pdfFailed(`could not be downloaded (${pdf.message})`);
   log(`   📄 Policy PDF downloaded - ${pdf.name} (${pdf.size} bytes)${pdf.truncated ? " - it has no end marker, it may be incomplete" : ""}`);
-  const stored = await storePolicyPdf(pdf, { store, policyDocId: savedNumber.policyDocId, uploadPolicyPdf, names: fileNames(new Date()) });
+  const stored = await storePolicyPdf(pdf, { store, policyDocId: savedNumber.policyDocId, uploadPolicyPdf, names: fileNames(new Date(), Math.random, number.number) });
   if (!stored.ok) return pdfFailed(`was downloaded but ${stored.message}`);
   warnings.push(...((stored.saved && stored.saved.warnings) || []));
   await store.outcome({ pdfStoredAt: new Date(), pdfKey: stored.file.key });
@@ -706,7 +706,7 @@ async function recoverKshemaIssue(o = {}) {
   if (!pdf.ok) {
     return fail("PDF_MISSING", `Policy ${number.number} was issued at KSHEMA earlier and its number is saved, but its PDF could not be downloaded (${pdf.message}). Nothing was paid again. Download it from KSHEMA and upload it on the policy by hand`, { policyNumber: number.number });
   }
-  const stored = await storePolicyPdf(pdf, { store, policyDocId: savedNumber.policyDocId, uploadPolicyPdf, names: fileNames(new Date()) });
+  const stored = await storePolicyPdf(pdf, { store, policyDocId: savedNumber.policyDocId, uploadPolicyPdf, names: fileNames(new Date(), Math.random, number.number) });
   if (!stored.ok) {
     return fail("PDF_NOT_STORED", `Policy ${number.number} was issued at KSHEMA earlier and its PDF was downloaded, but ${stored.message}. Nothing was paid again`, { policyNumber: number.number });
   }

@@ -1109,8 +1109,12 @@ async function downloadProposal(driver, data, jobBrowser, jobId, capture = null)
       state: stateFromPolicy(data),
       locality: require("./kshemaSection").filledValueOf(driver, "locality"),
     });
-    log(`   · KSHEMA prints after the address itself: ${printed.words.length ? printed.words.join(" | ") : "nothing found"}`);
-    const { line: fullAddress, left: notRepeated } = kshemaAddress.kshemaAddressLine(data, { printedByKshema: printed.words });
+    log(
+      `   · KSHEMA prints after the address itself: ${printed.words.length ? printed.words.join(" | ") : "nothing found"}` +
+        (printed.found.locality ? ` (the Pin code Locality "${printed.found.locality}" stays in the address)` : "")
+    );
+    const addressLine = kshemaAddress.kshemaAddressLine(data, { printedByKshema: printed.words });
+    const { line: fullAddress, left: notRepeated } = addressLine;
 
     if (fullAddress) {
       const { Key } = require("selenium-webdriver");
@@ -1121,7 +1125,12 @@ async function downloadProposal(driver, data, jobBrowser, jobId, capture = null)
         await field.sendKeys(Key.CONTROL, "a");
         await field.sendKeys(Key.BACK_SPACE);
         await field.sendKeys(fullAddress);
-        log(`   ✓ Address set to "${fullAddress}"` + (notRepeated.length ? ` (written once only: ${notRepeated.join(" | ")})` : ""));
+        log(
+          `   ✓ Address set to "${fullAddress}"` +
+            (notRepeated.length ? ` (written once only: ${notRepeated.join(" | ")})` : "") +
+            (addressLine.cut ? " (cut at 100 characters)" : "") +
+            (addressLine.keptPrinted ? " (KSHEMA's own names kept - nothing else was left)" : "")
+        );
       } else {
         log("   – Address field not found, skipping");
       }

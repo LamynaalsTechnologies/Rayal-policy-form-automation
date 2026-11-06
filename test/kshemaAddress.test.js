@@ -68,8 +68,8 @@ test("at most 100 characters, cut between words", () => {
 });
 
 test("nothing to write: an empty line (the step logs 'no recognised parts')", () => {
-  assert.deepEqual(address([null, undefined, "", " ", ",", ""]), { line: "", left: [] });
-  assert.deepEqual(kshemaAddressLine({}), { line: "", left: [] });
+  assert.deepEqual(address([null, undefined, "", " ", ",", ""]), { line: "", left: [], cut: false, keptPrinted: false });
+  assert.deepEqual(kshemaAddressLine({}), { line: "", left: [], cut: false, keptPrinted: false });
   // the older field names still count
   assert.equal(kshemaAddressLine({ blockNameNo: "B4", locality: "ANNA NAGAR" }).line, "B4 ANNA NAGAR");
 });
@@ -118,7 +118,7 @@ test("KSHEMA's locality, state and pin code are left out; a different town stays
   assert.equal(kshemaAddressLine({ areaAndLocality: "TONDUR, VILLUPPURAM" }).line, "TONDUR VILLUPPURAM");
 });
 
-test("kshemaPrintedPlaces: the picked locality, the state, the pin, and city / district boxes the page shows", async () => {
+test("kshemaPrintedPlaces: the state, the pin and the customer's city / district boxes; the picked locality is only reported", async () => {
   const driver = {
     executeScript: async (script) => {
       assert.match(script, /data-iid/);
@@ -126,10 +126,51 @@ test("kshemaPrintedPlaces: the picked locality, the state, the pin, and city / d
     },
   };
   const r = await kshemaPrintedPlaces(driver, { pinCode: "604 203" }, { state: "TAMIL NADU", locality: "MELOLAKKUR" });
-  assert.deepEqual(r.words, ["MELOLAKKUR", "TAMIL NADU", "604203", "VILLUPURAM"]);
+  // not proven KSHEMA prints the locality: leaving it out could lose the village from the PDF, so it stays in our line
+  assert.deepEqual(r.words, ["TAMIL NADU", "604203", "VILLUPURAM"]);
+  assert.equal(r.found.locality, "MELOLAKKUR");
   // a page that cannot be read still gives what is known
   const broken = await kshemaPrintedPlaces({ executeScript: async () => { throw new Error("gone"); } }, { pincode: "604203" }, { state: "TAMIL NADU" });
   assert.deepEqual(broken.words, ["TAMIL NADU", "604203"]);
+});
+
+test("the page read (run on a fake page): the customer's city / district / state only - never the RTO / vehicle / financier / nominee ones, the address box, or hidden ones", async () => {
+  let script = "";
+  await kshemaPrintedPlaces({ executeScript: async (s) => ((script = s), []) }, {}, {});
+  const el = (iid, value, shown = true) => ({ getAttribute: () => iid, getClientRects: () => (shown ? [1] : []), value, innerText: value });
+  const page = [
+    el("c_city", "VILLUPURAM"),
+    el("c_state", "TAMIL NADU"),
+    el("rto_city", "TINDIVANAM"),
+    el("vehicle_registration_state", "PUDUCHERRY"),
+    el("financier_city", "CHENNAI"),
+    el("nominee_state", "KERALA"),
+    el("c_address_one", "130 PILLAYAR KOVIL STREET"),
+    el("c_district", "HIDDEN", false),
+    el("c_pincode", "604203"),
+  ];
+  const found = new Function("document", script)({ querySelectorAll: () => page });
+  assert.deepEqual(found, [{ iid: "c_city", value: "VILLUPURAM" }, { iid: "c_state", value: "TAMIL NADU" }]);
+});
+
+test("never an empty address box: when only KSHEMA's own names (or a door number) would be left, our words are kept", () => {
+  const all = kshemaAddressLine({ areaAndLocality: "VILLUPURAM, TAMIL NADU, 604203" }, { printedByKshema: ["VILLUPURAM", "TAMIL NADU", "604203"] });
+  assert.equal(all.line, "VILLUPURAM TAMIL NADU 604203");
+  assert.equal(all.keptPrinted, true);
+  const door = kshemaAddressLine({ flatDoorNo: "130", areaAndLocality: "VILLUPURAM, TAMIL NADU" }, { printedByKshema: ["VILLUPURAM", "TAMIL NADU"] });
+  assert.equal(door.line, "130 VILLUPURAM TAMIL NADU");
+  assert.equal(door.keptPrinted, true);
+  // a real address left: KSHEMA's names still go
+  const real = kshemaAddressLine({ flatDoorNo: "130", roadStreetLane: "GANDHI ROAD", areaAndLocality: "VILLUPURAM" }, { printedByKshema: ["VILLUPURAM"] });
+  assert.equal(real.line, "130 GANDHI ROAD");
+  assert.equal(real.keptPrinted, false);
+});
+
+test("a line cut at 100 characters says so (for the log)", () => {
+  const long = kshemaAddressLine({ roadStreetLane: "SRI VENKATESWARA NAGAR EXTENSION SECOND CROSS STREET OPPOSITE GOVERNMENT HIGHER SECONDARY SCHOOL", areaAndLocality: "KALLAKURICHI ROAD, ULUNDURPET" });
+  assert.equal(long.cut, true);
+  assert.ok(long.line.length <= 100);
+  assert.equal(kshemaAddressLine({ areaAndLocality: "TONDUR" }).cut, false);
 });
 
 test("filledValueOf: the option a dropdown ended on, as kshemaSection remembers it", () => {

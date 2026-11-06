@@ -229,6 +229,7 @@ async function pay(over = {}, storeOver = {}, { data = DATA, choice = CHOICE, up
   const w = world(over);
   const store = fakeStore(w.events, storeOver);
   const uploads = [];
+  const namedFor = [];
   const r = await quiet(() =>
     wi.payWithCdBalanceAndIssue({
       driver: w.driver,
@@ -242,7 +243,8 @@ async function pay(over = {}, storeOver = {}, { data = DATA, choice = CHOICE, up
         fsImpl: w.fsImpl,
         now: () => w.clock.t,
         sleep: async (ms) => w.driver.sleep(ms),
-        policyFileNames: () => ({ fileName: "2210-ABC-Policy.pdf", key: "Policy/2210-ABC-Policy.pdf" }),
+        // records what it was asked to name: the policy number (the owner, 2026-11-06: "<policy number>.pdf")
+        policyFileNames: (now, random, number) => (namedFor.push(number), { fileName: "2210-ABC-Policy.pdf", key: "Policy/2210-ABC-Policy.pdf" }),
         uploadPolicyPdf: async (filePath, { key }) => {
           if (uploadThrows) throw new Error("S3 refused: access denied");
           uploads.push({ filePath, key });
@@ -251,7 +253,7 @@ async function pay(over = {}, storeOver = {}, { data = DATA, choice = CHOICE, up
       },
     })
   );
-  return { r, w, store, uploads };
+  return { r, w, store, uploads, namedFor };
 }
 
 const noColonIn = (s) => assert.doesNotMatch(String(s), /:/, String(s));
@@ -259,7 +261,7 @@ const noColonIn = (s) => assert.doesNotMatch(String(s), /:/, String(s));
 /* ------------------------------------ the happy road ------------------------------------ */
 
 test("issued: premium checked, the note BEFORE the one press, the policy page, the number saved, the NEW PDF stored", async () => {
-  const { r, w, store, uploads } = await pay();
+  const { r, w, store, uploads, namedFor } = await pay();
   assert.equal(r.ok, true, r.error);
   assert.equal(w.state.presses, 1, "Pay with CD Balance pressed exactly once");
   const order = w.events.filter((e) => ["claim", "press", "outcome:issued", "saveNumber", "icon", "savePdf"].includes(e));
@@ -284,6 +286,7 @@ test("issued: premium checked, the note BEFORE the one press, the policy page, t
   assert.deepEqual(store.calls.pdf[0], { file: { fileName: "2210-ABC-Policy.pdf", key: "Policy/2210-ABC-Policy.pdf", location: "https://bucket.example/Policy/2210-ABC-Policy.pdf" }, policyDocId: "pd1" });
   assert.ok(store.calls.outcome.some((p) => p.pdfStoredAt && p.pdfKey === "Policy/2210-ABC-Policy.pdf"));
   assert.equal(r.policyNumber, NUMBER);
+  assert.deepEqual(namedFor, [NUMBER], "the stored PDF is named after the policy number");
   assert.equal(r.policyPageUrl, POLICY_PAGE);
   assert.equal(r.premiumPaise, 643700);
   assert.equal(r.warning, "");
@@ -514,6 +517,7 @@ async function recover(markerOver = {}, over = {}, storeOver = {}) {
   const w = world({ url: "https://motorinsurance.kshema.co/app/dashboard", ...over });
   const store = fakeStore(w.events, storeOver);
   const uploads = [];
+  const namedFor = [];
   const r = await quiet(() =>
     wi.recoverKshemaIssue({
       driver: w.driver,
@@ -526,7 +530,7 @@ async function recover(markerOver = {}, over = {}, storeOver = {}) {
         fsImpl: w.fsImpl,
         now: () => w.clock.t,
         sleep: async (ms) => w.driver.sleep(ms),
-        policyFileNames: () => ({ fileName: "2310-XYZ-Policy.pdf", key: "Policy/2310-XYZ-Policy.pdf" }),
+        policyFileNames: (now, random, number) => (namedFor.push(number), { fileName: "2310-XYZ-Policy.pdf", key: "Policy/2310-XYZ-Policy.pdf" }),
         uploadPolicyPdf: async (filePath, { key }) => {
           uploads.push({ filePath, key });
           return { key, location: `https://bucket.example/${key}` };
@@ -534,11 +538,11 @@ async function recover(markerOver = {}, over = {}, storeOver = {}) {
       },
     })
   );
-  return { r, w, store, uploads };
+  return { r, w, store, uploads, namedFor };
 }
 
 test("recovery: the saved policy page is opened, the number saved, the PDF stored - Pay is never pressed", async () => {
-  const { r, w, store, uploads } = await recover();
+  const { r, w, store, uploads, namedFor } = await recover();
   assert.equal(r.ok, true, r.error);
   assert.equal(r.recovered, true);
   assert.deepEqual(w.state.gets, [POLICY_PAGE]);
@@ -546,6 +550,7 @@ test("recovery: the saved policy page is opened, the number saved, the PDF store
   assert.equal(w.events.includes("claim"), false, "no new note");
   assert.deepEqual(store.calls.number, [NUMBER]);
   assert.equal(uploads.length, 1);
+  assert.deepEqual(namedFor, [NUMBER], "the fetched PDF is named after the policy number");
   assert.ok(store.calls.outcome.some((p) => p.pdfStoredAt));
 });
 

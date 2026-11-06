@@ -54,6 +54,7 @@ const {
   payWithCdtAndIssue,
   recoverIssuedPolicyPdf,
   createPolicyPdfUploader,
+  policyNumberFileStem,
 } = require("./reliance/relianceWalletIssue");
 // What the portal answered to "Get Coverage Details": the cover table, or only a refusal sentence in
 // #DivCoverDetails ("No Discount available for mentioned Details ...").
@@ -983,7 +984,11 @@ async function mergePDFsAndUpload(reliancePdfPath, briskPdfPath, data) {
     // Upload merged PDF to AWS S3
     console.log('☁️  Uploading merged PDF to AWS S3...');
     const policyId = data.policyId || data._id?.$oid || data._id || `policy_${Date.now()}`;
-    const s3Key = `MergedPolicies/${policyId}_merged.pdf`;
+    // An issued policy's file is "<policy number>.pdf" (the owner, 2026-11-06), in the policy's own folder; without a
+    // number (a link policy not paid yet) the old "<OP id>_merged.pdf".
+    const numberStem = policyNumberFileStem(data.policyNumber);
+    const mergedFileName = numberStem ? `${numberStem}.pdf` : `${policyId}_merged.pdf`;
+    const s3Key = numberStem ? `MergedPolicies/${policyId}/${mergedFileName}` : `MergedPolicies/${policyId}_merged.pdf`;
 
     const uploadParams = {
       Bucket: process.env.AWS_BUCKET_NAME,
@@ -1023,7 +1028,7 @@ async function mergePDFsAndUpload(reliancePdfPath, briskPdfPath, data) {
         success: true,
         mergedPdfUrl: s3UploadResult.Location,
         s3Key: s3Key,
-        fileName: `${policyId}_merged.pdf`,
+        fileName: mergedFileName,
         warning: 'Policy not updated - no ID found'
       };
     }
@@ -1048,7 +1053,7 @@ async function mergePDFsAndUpload(reliancePdfPath, briskPdfPath, data) {
         {
           $set: {
             mergedPolicyPdf: {
-              fileName: `${policyId}_merged.pdf`,
+              fileName: mergedFileName,
               key: s3Key,
               location: s3UploadResult.Location
             },
@@ -1086,7 +1091,7 @@ async function mergePDFsAndUpload(reliancePdfPath, briskPdfPath, data) {
       success: true,
       mergedPdfUrl: s3UploadResult.Location,
       s3Key: s3Key,
-      fileName: `${policyId}_merged.pdf`
+      fileName: mergedFileName
     };
 
   } catch (error) {
@@ -1401,6 +1406,7 @@ async function fillRelianceForm(
           uploadPolicyPdf: uploadPolicyPdfToS3,
         });
         if (recovered.warning && !documentUploadError) documentUploadError = recovered.warning;
+        if (recovered.policyNumber) data.policyNumber = recovered.policyNumber; // the merged PDF is named after it
         policyPdfOnPolicy = true; // the policy has its PDF (stored now, or already there)
         await markStage(data, "payment", "completed", { mode: "wallet", proposalNumber: data.proposalNumber || data.proposal_number || null }, { jobId });
       } catch (recoveryErr) {
@@ -5189,6 +5195,7 @@ async function fillRelianceForm(
                                         uploadPolicyPdf: uploadPolicyPdfToS3,
                                       });
                                       if (issued.warning && !documentUploadError) documentUploadError = issued.warning;
+                                      if (issued.policyNumber) data.policyNumber = issued.policyNumber; // the merged PDF is named after it
       policyPdfOnPolicy = true; // issued, and its PDF is stored (an error was thrown otherwise)
       paymentDone = "wallet"; // stage 3 done: the CDT payment is issued
                                     } else {
