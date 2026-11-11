@@ -44,6 +44,7 @@ require("dotenv").config({ quiet: true });
 const { plain, sniffDocumentBytes } = require("./relianceKycSubmit");
 const cdt = require("./relianceWalletCdt");
 const { isWalletSubmitEnabled } = require("./relianceWalletHold");
+const { holdBackForPayment } = require("../../lib/holdStop");
 
 const { PaymentStepError, parseRupees, formatPaise, REFUSAL_WORDS } = cdt;
 
@@ -1502,6 +1503,16 @@ async function payWithCdtAndIssue(o = {}) {
     );
   }
   log(`note ${field}.state = ${STATES.PRESSED} saved — pressing Submit Details`);
+  // The money press: a Hold pressed from here on waits until Reliance's answer is written on the note below, then stops
+  // the run at once (lib/holdStop.js holdBackForPayment - the owner, 2026-11-11: "finish the payment, then stop").
+  const paymentRecorded = (deps.holdBackForPayment || holdBackForPayment)(driver);
+  const recordOutcome = async (fields) => {
+    try {
+      return await store.outcome(fields);
+    } finally {
+      paymentRecorded();
+    }
+  };
 
   // The amount typed into the CDT box, on its own field for the View page. Only once THIS run owns the note (a run that
   // finds a payment already submitted pays nothing and must not overwrite the amount that was paid). Best effort: a failed
@@ -1527,7 +1538,7 @@ async function payWithCdtAndIssue(o = {}) {
     pressError = click.clicked ? click.error : "";
     if (!click.clicked) {
       // refused before it happened, in both ways: nothing was pressed, and the note says so
-      await store.outcome({ state: STATES.FAILED, outcomeAt: new Date(), words: `Submit Details could not be clicked (${click.error})` });
+      await recordOutcome({ state: STATES.FAILED, outcomeAt: new Date(), words: `Submit Details could not be clicked (${click.error})` });
       throw new PaymentStepError(
         `Submit Details could not be clicked for ${proposal} (${plain(click.error)}). Nothing was submitted or paid.`,
         { code: "SUBMIT_NOT_CLICKED" }
@@ -1536,7 +1547,7 @@ async function payWithCdtAndIssue(o = {}) {
   } catch (e) {
     if (e instanceof PaymentStepError || cdt.isStop(e)) throw e;
     // the button could not even be found; nothing was pressed
-    await store.outcome({ state: STATES.FAILED, outcomeAt: new Date(), words: `Submit Details was not found (${(e && e.message) || e})` });
+    await recordOutcome({ state: STATES.FAILED, outcomeAt: new Date(), words: `Submit Details was not found (${(e && e.message) || e})` });
     throw new PaymentStepError(
       `Submit Details could not be found on the payment page for ${proposal} (${plain((e && e.message) || e)}). Nothing was submitted or paid.`,
       { code: "SUBMIT_MISSING" }
@@ -1560,7 +1571,7 @@ async function payWithCdtAndIssue(o = {}) {
   const unconfirmed = async (why, words = "") => {
     const shown = [...new Set((verdict.alerts || []).map((a) => String(a || "").trim()).filter(Boolean))];
     const said = shown.length ? ` Reliance showed ${shown.map((a) => `"${plain(a)}"`).join(" and ")} while it was pressed.` : "";
-    await store.outcome({
+    await recordOutcome({
       state: STATES.UNCONFIRMED,
       outcomeAt: new Date(),
       words: String(words || shown[0] || why).slice(0, 500),
@@ -1573,7 +1584,7 @@ async function payWithCdtAndIssue(o = {}) {
   };
 
   if (verdict.kind === "failed") {
-    await store.outcome({ state: STATES.FAILED, outcomeAt: new Date(), words: String(verdict.words).slice(0, 500) });
+    await recordOutcome({ state: STATES.FAILED, outcomeAt: new Date(), words: String(verdict.words).slice(0, 500) });
     throw new PaymentStepError(
       `Reliance refused the CDT payment of ${amount} for ${proposal} when Submit Details was pressed — it said "${plain(verdict.words)}". ` +
         `The payment page is still showing and no policy number appeared, so this run is marked refused and the policy can be run again.`,
@@ -1595,7 +1606,7 @@ async function payWithCdtAndIssue(o = {}) {
   // issued
   const number = verdict.policyNumber;
   log(`✅ CDT payment of ${amount} submitted — policy ${number} issued${verdict.transactionNo ? ` (transaction ${plain(verdict.transactionNo)})` : ""}`);
-  await store.outcome({
+  await recordOutcome({
     state: STATES.ISSUED,
     outcomeAt: new Date(),
     policyNumber: number,

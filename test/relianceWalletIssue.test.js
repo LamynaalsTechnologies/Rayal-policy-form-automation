@@ -1996,3 +1996,38 @@ test("relianceWalletIssue.js: the note is claimed before the press; Submit Detai
   // a script click of Submit Details exists only inside clickOnce's refused-before-it-happened branch
   assert.ok(!/executeScript\([^)]*submit/i.test(issueSrc));
 });
+
+/* ------------------------- Hold during the money press (2026-11-11) ------------------------- */
+
+test("Hold: Submit Details holds a Hold back from the note until Reliance's answer is written - released before the number and PDF", async () => {
+  const w = makeWorld();
+  const r = await runFlow(w, {
+    deps: {
+      holdBackForPayment: () => {
+        w.order.push("hold-back");
+        return () => w.order.push("hold-released");
+      },
+    },
+  });
+  assert.ok(!r.error, r.error && r.error.message);
+  const o = w.order;
+  const note = o.findIndex((x) => x === "db:onlinePolicy:walletPayment");
+  const back = indexOf(o, "hold-back");
+  const press = indexOf(o, "submit-click");
+  const issued = o.findIndex((x) => x.startsWith("db:onlinePolicy:walletPayment.state"));
+  const released = indexOf(o, "hold-released");
+  const number = o.findIndex((x) => x === "db:onlinePolicy:policyNumber");
+  assert.ok(note >= 0 && note < back && back < press && press < issued && issued < released && released < number, o.join(" | "));
+  assert.equal(o.filter((x) => x === "hold-released").length, 1);
+});
+
+test("Hold: every answer written after Submit Details (refused, not found, unconfirmed, issued) releases the Hold", () => {
+  const code = fs.readFileSync(path.join(__dirname, "..", "fullPolicycompany", "reliance", "relianceWalletIssue.js"), "utf8");
+  const fn = code.slice(code.indexOf("async function payWithCdtAndIssue("), code.indexOf("async function recoverIssuedPolicyPdf("));
+  const noted = fn.indexOf("saved — pressing Submit Details");
+  const back = fn.indexOf("(deps.holdBackForPayment || holdBackForPayment)(driver)");
+  const press = fn.indexOf("const click = await clickOnce(driver, button);");
+  const issued = fn.indexOf("await recordOutcome({\n    state: STATES.ISSUED");
+  assert.ok(noted > 0 && noted < back && back < press && press < issued, "note -> hold back -> press -> issued");
+  assert.ok(!/await store\.outcome\(/.test(fn.slice(back + 200, issued)), "no answer is written without releasing the Hold");
+});

@@ -608,6 +608,9 @@ const buildFormDataFromPolicy = async (data) => {
       roadStreetLane: data?.roadStreetLane, // Added to match onlinePolicy schema
       areaAndLocality: data?.areaAndLocality || data?.area || data?.locality || "",
       state: data?.state == "TAMILNADU" ? "30" : data?.state == "KARNATAKA" ? "26" : "30",
+      // The policy's own State/Union Territory ("tamilnadu") - Reliance's State box is chosen from this one
+      // (fullPolicycompany/reliance/relianceState.js); `state` above is "30" for every policy and stays for Brisk / KSHEMA.
+      customerState: data?.state ? String(data.state).trim() : "",
       pinCode: data?.pincode,
       // Contact details
       mobile: data?.mobileNumber,
@@ -1657,10 +1660,15 @@ const runPolicyJobOnce = async (rawJob) => {
     try {
       const existingBrisk = await db
         .collection("onlinePolicy")
-        .findOne({ _id: job.captchaId }, { projection: { briskCertificate: 1 } });
+        .findOne({ _id: job.captchaId }, { projection: { briskCertificate: 1, state: 1 } });
       const bc = existingBrisk?.briskCertificate;
       if (bc && (bc.key || bc.location || bc.certificateNo)) {
         job.formData.briskCertificateExists = true;
+      }
+      // The customer's state as the policy has it NOW - Reliance's State box is chosen from it
+      // (fullPolicycompany/reliance/relianceState.js; the parts path does the same in lib/partRunner.js).
+      if (existingBrisk && existingBrisk.state != null && String(existingBrisk.state).trim()) {
+        job.formData.customerState = String(existingBrisk.state).trim();
       }
     } catch (e) {
       console.warn(`[${queueName}] could not check for an existing Brisk certificate: ${e.message}`);

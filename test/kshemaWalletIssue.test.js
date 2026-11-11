@@ -225,7 +225,7 @@ function fakeStore(events, over = {}) {
 const DATA = { _id: "op1", _partKey: "tp", _jobId: "job1", username: "agent7" };
 const CHOICE = { ok: true, wallet: true, chosen: true, balance: "₹65,329", paymentUrl: PAY_PAGE };
 
-async function pay(over = {}, storeOver = {}, { data = DATA, choice = CHOICE, uploadThrows = false } = {}) {
+async function pay(over = {}, storeOver = {}, { data = DATA, choice = CHOICE, uploadThrows = false, extraDeps = {} } = {}) {
   const w = world(over);
   const store = fakeStore(w.events, storeOver);
   const uploads = [];
@@ -250,6 +250,7 @@ async function pay(over = {}, storeOver = {}, { data = DATA, choice = CHOICE, up
           uploads.push({ filePath, key });
           return { key, location: `https://bucket.example/${key}` };
         },
+        ...(typeof extraDeps === "function" ? extraDeps(w) : extraDeps),
       },
     })
   );
@@ -624,10 +625,11 @@ for (const [name, file] of [
     assert.match(flow.slice(refuse, done), /postSubmissionFailed: true, retryable: false/);
   });
 
-  test(`${name}: the recovery runs right after the login, past the payment point (no Hold, no stuck-step cut), and never reaches the quote`, () => {
+  test(`${name}: the recovery runs right after the login, past the payment point (no stuck-step cut; a Hold still stops it - it never pays), and never reaches the quote`, () => {
     const login = at('await stopIfHeld(data, "after the login");');
     const branch = at('if (walletGate.action === "recover") {', login);
-    const disarm = at("disarmLiveHold(data);", branch);
+    const disarm = at("pastPaymentPoint(data);", branch);
+    assert.ok(!flow.slice(branch, at("await recoverKshemaIssue({", branch)).includes("disarmLiveHold(data)"), "the Hold is not switched off (2026-11-11)");
     const run = at("await recoverKshemaIssue({", disarm);
     const back = at("return {", run);
     const resume = at("const resume = await loadKshemaResume(data, { jobId });", back);
@@ -654,4 +656,35 @@ test("the module: no .env switch, one press site, and the press only after the n
   assert.ok(fn.indexOf("await store.claim(note)") < fn.indexOf("issue.clickOnce(driver, button.element)"), "the note before the press");
   const rec = code.slice(code.indexOf("async function recoverKshemaIssue("), code.indexOf("module.exports"));
   assert.ok(!/button\.element|PAY_BUTTON_SCRIPT|store\.claim/.test(rec), "the recovery cannot press Pay or write a new note");
+});
+
+/* ------------------------- Hold during the money press (2026-11-11) ------------------------- */
+
+test("Hold: the money press holds a Hold back from the note until KSHEMA's answer is written - not a moment longer", async () => {
+  const seen = [];
+  const { r, w } = await pay({}, {}, {
+    extraDeps: (world) => ({
+      holdBackForPayment: (driver) => {
+        seen.push(driver);
+        world.events.push("hold-back");
+        return () => world.events.push("hold-released");
+      },
+    }),
+  });
+  assert.equal(r.ok, true, r.error);
+  const order = w.events.filter((e) => ["claim", "hold-back", "press", "outcome:issued", "hold-released", "saveNumber"].includes(e));
+  assert.deepEqual(order, ["claim", "hold-back", "press", "outcome:issued", "hold-released", "saveNumber"]);
+  assert.equal(seen[0], w.driver, "held back on this run's driver");
+});
+
+test("Hold: every answer KSHEMA gives after the press (not clicked, unconfirmed, issued) releases the Hold", () => {
+  const code = fs.readFileSync(path.join(__dirname, "..", "fullPolicycompany", "kshema", "kshemaWalletIssue.js"), "utf8");
+  const fn = code.slice(code.indexOf("async function payWithCdBalanceAndIssue("), code.indexOf("async function recoverKshemaIssue("));
+  const back = fn.indexOf("(deps.holdBackForPayment || holdBackForPayment)(driver)");
+  const noted = fn.indexOf("saved - pressing Pay with CD Balance");
+  const press = fn.indexOf("await issue.clickOnce(driver, button.element)");
+  const issued = fn.indexOf("await recordOutcome({ state: STATES.ISSUED");
+  assert.ok(noted > 0 && noted < back && back < press && press < issued, "note -> hold back -> press -> issued");
+  assert.ok(!/await store\.outcome\(\{ state:/.test(fn.slice(back, issued)), "every answer after the press releases the Hold");
+  assert.equal((fn.slice(back, issued + 60).match(/await recordOutcome\(\{ state: STATES\.(FAILED|UNCONFIRMED|ISSUED)/g) || []).length, 3);
 });

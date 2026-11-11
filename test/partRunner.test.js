@@ -1116,3 +1116,44 @@ test("runPartJob (brisk): the run is given the certificate records; number only 
   assert.equal(partOf(doc, "pa").result.certificateNo, "HALF-1");
 });
 
+
+/* ----------------------- Hold: on hold at once (2026-11-11) ----------------------- */
+
+test("write-back: Hold pressed while it ran and the run stopped for it -> the job is ON HOLD in the same write, the request gone", async () => {
+  const claimed = { ...claimedFrom(jobDoc(multiParts()), "tp"), holdRequested: { at: NOW, by: "op-7" } };
+  const col = fakeCollection(claimed);
+  await runner.writePartOutcome({
+    collection: col, jobId: "job1", key: "tp", now: NOW, logger: silentLogger,
+    outcome: { type: "held", error: "Held by the operator", stage: "operator-hold" },
+  });
+  const doc = col.state.doc;
+  assert.equal(doc.status, "hold", "on hold now, not on the queue's next pass");
+  assert.equal(doc.holdRequested, undefined);
+  assert.equal(doc.heldBy, "op-7");
+  assert.ok(doc.heldAt instanceof Date);
+  assert.equal(partOf(doc, "tp").status, "pending", "the part waits for Release, no attempt counted");
+  assert.equal(doc.statusHistory.at(-1).kind, "held");
+  assert.equal(doc.statusHistory.at(-2).part, "tp");
+});
+
+test("write-back: a held outcome whose request was withdrawn meanwhile (Release while stopping) -> pending, runs again", async () => {
+  const col = fakeCollection(claimedFrom(jobDoc(multiParts()), "tp"));
+  await runner.writePartOutcome({
+    collection: col, jobId: "job1", key: "tp", now: NOW, logger: silentLogger,
+    outcome: { type: "held", error: "Held by the operator", stage: "operator-hold" },
+  });
+  assert.equal(col.state.doc.status, "pending");
+  assert.equal(col.state.doc.heldAt, undefined);
+});
+
+test("a thrown hold-stop (the queue stopped waiting for a held run) is held - not a terminal 'stopped'", () => {
+  const { AutomationStoppedError } = require("../automationStopper");
+  const { HOLD_STOP_STAGE } = require("../lib/holdStop");
+  const e = new AutomationStoppedError("Held by the operator - stopped while a step was running.", { stage: HOLD_STOP_STAGE });
+  const od = part("od", "portal", "Reliance");
+  const out = runner.mapThrownError(e, { part: od, companyName: "reliance", companyLabel: (c) => c });
+  assert.equal(out.type, "held");
+  assert.equal(out.stage, HOLD_STOP_STAGE);
+  // any other calm stop stays "stopped"
+  assert.equal(runner.mapThrownError(new AutomationStoppedError("Breaker", { stage: "x" }), { part: od, companyName: "reliance", companyLabel: (c) => c }).type, "stopped");
+});

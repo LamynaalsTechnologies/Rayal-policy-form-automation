@@ -37,7 +37,7 @@ const {
 const { isAutomationStop, stoppedResult } = require("../automationStopper");
 const { shouldKeepBrowserOpen } = require("../debugRetention");
 // The three steps (proposal -> KYC -> payment), Hold at a safe step and the resume from the saved proposal page
-const { stopIfHeld, isHoldStop, armLiveHold, disarmLiveHold, liveHoldStopOf, throwIfHeld } = require("../lib/holdStop");
+const { stopIfHeld, isHoldStop, armLiveHold, disarmLiveHold, liveHoldStopOf, throwIfHeld, pastPaymentPoint } = require("../lib/holdStop");
 const {
   loadKshemaResume,
   markStage,
@@ -915,7 +915,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
 
     // An ISSUED CD Balance payment whose number or PDF was not stored: finished from the saved policy page - never paid again.
     if (walletGate.action === "recover") {
-      disarmLiveHold(data); // past the payment: neither a Hold nor the stuck-step watch may cut it
+      pastPaymentPoint(data); // past the payment: the stuck-step watch is off; a Hold still stops it (this branch never pays)
       const recovered = await recoverKshemaIssue({
         driver,
         data,

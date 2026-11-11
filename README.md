@@ -645,6 +645,19 @@ The Breaker stop (`stopthis-location`) now comes **after** that page, before the
   - 23 of 23 deliberate breaks caught across this round.
 - **Not seen live**: the real page's loader after each onchange, and what `getRegState()` really does.
 
+### Reliance's Appointee Name: only for a nominee under 18 (2026-11-11)
+The owner: on the Online Policy a Reliance nominee may now be under 18 (no 18+ limit on the Nominee DOB), and the Appointee
+Name is required only then; for the automation, "type it only if under 18". `fullPolicycompany/reliance/relianceAppointee.js`
+(`fillAppointeeIfMinor`), called from the nominee block of `relianceForm.js` (and the generated `relianceMultiForm.js`, which
+got its require-path rule in `relianceMultiFormSpec.js`):
+- the age is counted on today's date in India from the job's Nominee DOB (`DD-MM-YYYY`); 18 on the birthday itself;
+- **18 or older: the Appointee box is not touched**, even when the policy carries a name; an unreadable date: left alone too;
+- **under 18**: the policy's Appointee Name is typed (value + input / change / blur) and read back, once more if it did not
+  take. No name on the policy, Reliance's box not there or not visible after 8 s, or a box that never holds the name: a
+  deliberate stop with one sentence (not retried). Before: it was set by script whenever the policy had one, never checked.
+- Tests: `test/relianceAppointee.test.js` (8); 7 of 7 deliberate breaks caught. Not seen live: whether Reliance shows the
+  Appointee box only for an under-18 date of birth (the step waits up to 8 s for it either way).
+
 ### United India's Makes and Models: collected once, then removed (2026-11-06)
 For one afternoon the automation filled the Vehicle Model lists itself: every policy run saved the Vehicle Manufacturer list
 and the Make list it saw (insert only), and a temporary collect mode (`COLLECT_MAKES_AND_MODELS_ONLY` in `unitedIndiaTP.js`,

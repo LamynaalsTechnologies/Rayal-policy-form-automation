@@ -66,6 +66,7 @@ const {
   sentDetails,
   isPortalSuccessMessage,
 } = require("./reliance/relianceCoverDetails");
+const { fillAppointeeIfMinor } = require("./reliance/relianceAppointee");
 // Get Coverage Details is fired four ways, so Reliance answers four times, in any order, and every answer redraws
 // the cover table and re-ticks PA to Owner Driver. Wait for the last answer; check PA is really off.
 const {
@@ -98,6 +99,7 @@ const {
   saveKycStatus,
 } = require("./reliance/relianceKycSubmit");
 const { selectProposerTitle, verifyMainPageTitle } = require("../lib/proposerTitle");
+const { planRelianceState, relianceStatePlanLine, selectRelianceState, checkStateAfterPincode } = require("./reliance/relianceState");
 // The CKYC result page after SUBMIT shows the name Reliance read from the Aadhaar: it must be the policy's own name
 // (Full Name + Surname, any order; with RELIANCE_KYC_NAME_COMBINATIONS_ENABLED also Full Name alone / + Father Name) before PROCEED.
 const {
@@ -1302,6 +1304,9 @@ async function fillRelianceForm(
     // trouble in that invisible step killed the job before the real window
     // ever appeared ("Master session is not active and re-login failed").
     // The login below is the only one that ever mattered.
+    // The customer's state, worked out before the window opens (relianceState.js) - a missing or unknown one is said here
+    // and stops the run at the State box (a resumed run that skips the proposal never needs it, so it does not stop here).
+    console.log(relianceStatePlanLine(planRelianceState(data)));
     jobBrowser = await createRelianceJobBrowser(jobId);
     driver = jobBrowser.driver;
 
@@ -1676,9 +1681,12 @@ async function fillRelianceForm(
       console.log("Filling address dropdowns...");
 
 
-      // 1. Select State only (skip dependent dropdowns)
-      await safeSelectDropdown(driver, "state", data.state || "30"); // KARNATAKA
-      console.log("Selected State");
+      // 1. Select State only (skip dependent dropdowns) - the policy's own State/Union Territory, matched by name and read
+      // back (relianceState.js). It used to be data.state || "30", and data.state was "30" (TAMIL NADU) for every policy.
+      const chosenState = await selectRelianceState(driver, data, {
+        select: safeSelectDropdown,
+        log: (line) => console.log(line),
+      });
       await driver.sleep(2000);
 
       // 2. Use Pincode Search field and select first result
@@ -1754,6 +1762,8 @@ async function fillRelianceForm(
           `Pincode dropdown showed no results for "${pinCodeValue}" after 3 attempts — cannot continue without address`
         );
       }
+      // Read the State box again: only logged - what Reliance does to it when the pincode is of another state is not known yet.
+      await checkStateAfterPincode(driver, chosenState, { log: (line) => console.log(line), pinCode: pinCodeValue });
 
       // Continue with other fields
       // await safeSendKeys(driver, By.id("area"), data.area || "MG Road");
@@ -3090,14 +3100,9 @@ async function fillRelianceForm(
               }
             }
 
-            // Fill Appointee Name
-            if (data.appointeeName) {
-              try {
-                const appointeeNameInput = await driver.findElement(By.id("Appointee_Name"));
-                await driver.executeScript("arguments[0].value = arguments[1];", appointeeNameInput, data.appointeeName);
-                console.log("✅ Filled Appointee Name:", data.appointeeName);
-              } catch (e) { }
-            }
+            // Appointee Name - only for a nominee UNDER 18 (the owner, 2026-11-11), typed and read back; 18 or older: the box is
+            // not touched. A missing name / box stops the run (reliance/relianceAppointee.js).
+            await fillAppointeeIfMinor(driver, data, { stop: (message, details) => stopper(message, details) });
           } catch (nomErr) {
             if (isAutomationStop(nomErr)) throw nomErr;
             console.error("❌ Error in ultimate nominee block:", nomErr.message);
@@ -5940,7 +5945,7 @@ const testData = {
   premisesName: "Sunshine Apartments",
   blockNo: "A",
   road: "MG Road",
-  state: "30", // KARNATAKA
+  customerState: "tamilnadu", // the Online Policy's State/Union Territory (reliance/relianceState.js)
   pinCode: "614630",
   area: "MG Road",
   mobile: "9876543210",

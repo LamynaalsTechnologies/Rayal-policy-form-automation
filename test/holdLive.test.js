@@ -83,7 +83,7 @@ test("a hold pressed while a step runs: the next browser command fails with the 
   assert.equal(await driver.findElement(), "ok", "disarmed: the driver is its own again");
 });
 
-test("passing the payment point disarms it: a hold asked later never cuts a payment", async () => {
+test("2026-11-11: past the payment point the Hold still stops the run at once (Pending Quotes, the Pay page, the link)", async () => {
   const q = queue();
   const driver = fakeDriver();
   const data = { _jobId: "j1" };
@@ -91,9 +91,11 @@ test("passing the payment point disarms it: a hold asked later never cuts a paym
   await stopIfHeld(data, "before the payment (the KYC is done)", { collection: q, log: silent, env: {} });
   q.doc.holdRequested = { at: new Date(), by: "u1" };
   await wait(60);
-  assert.equal(await driver.findElement(), "ok");
-  assert.equal(liveHoldStopOf(data), null);
-  // ...while the old boundary check still stops at "before Pay"
+  await assert.rejects(() => driver.findElement(), (e) => isAutomationStop(e) && isHoldStop(e));
+  assert.ok(isHoldStop(liveHoldStopOf(data)));
+  assert.equal(await driver.quit(), "ok", "closing the window still passes");
+  disarmLiveHold(data);
+  // ...and the boundary check still stops at "before Pay"
   await assert.rejects(() => stopIfHeld(data, "before Pay (nothing is paid)", { collection: q, log: silent, env: {} }), isAutomationStop);
 });
 
@@ -414,17 +416,17 @@ test("a retry loop whose catch swallows the refusal does not freeze the other jo
   assert.ok(ticks - onCommands >= 5, `the other job got ${ticks - onCommands} turns during the waits`);
 });
 
-test("past the payment point nothing changes: sleep works, throwIfHeld stays quiet, a later Hold cuts nothing", async () => {
+test("2026-11-11: past the payment point a Hold still ends waits and throwIfHeld - only the money press holds it back", async () => {
   const q = queue();
   const driver = new EmptyPageDriver();
   armLiveHold(driver, data, opts(q));
   await stopIfHeld(data, "before the payment (the KYC is done)", { collection: q, env: {}, log: silent });
   await hold(q);
   await wait(30);
-  await driver.sleep(5);
-  throwIfHeld(driver);
-  await driver.findElement();
-  assert.equal(Object.prototype.hasOwnProperty.call(driver, "sleep"), false);
+  await assert.rejects(() => driver.sleep(5), isAutomationStop);
+  assert.throws(() => throwIfHeld(driver), isAutomationStop);
+  disarmLiveHold(data);
+  assert.equal(Object.prototype.hasOwnProperty.call(driver, "sleep"), false, "disarm gives sleep back");
 });
 
 test("JOB_HOLD_REQUEST_ENABLED off: sleep is left alone and throwIfHeld is quiet", async () => {

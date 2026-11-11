@@ -33,6 +33,7 @@ const { By } = require("selenium-webdriver");
 const { log, warn } = require("./kshemaLog");
 const issue = require("../reliance/relianceWalletIssue");
 const { parseRupees, formatPaise, isStop } = require("../reliance/relianceWalletCdt");
+const { holdBackForPayment } = require("../../lib/holdStop");
 
 const { STATES } = issue;
 const INSURER = "KSHEMA";
@@ -557,6 +558,16 @@ async function payWithCdBalanceAndIssue(o = {}) {
     return fail("NOTE_NOT_SAVED", `The note that a CD Balance payment is being made was not saved on the policy (${current && !current.found ? "the policy was not found" : "the write matched nothing"}), so Pay with CD Balance was not pressed. Nothing was paid`);
   }
   log(`   📝 Note ${field}.state = ${STATES.PRESSED} saved - pressing Pay with CD Balance`);
+  // The money press: a Hold pressed from here on waits until KSHEMA's answer is written on the note below, then stops
+  // the run at once (lib/holdStop.js holdBackForPayment - the owner, 2026-11-11: "finish the payment, then stop").
+  const paymentRecorded = (deps.holdBackForPayment || holdBackForPayment)(driver);
+  const recordOutcome = async (fields) => {
+    try {
+      return await store.outcome(fields);
+    } finally {
+      paymentRecorded();
+    }
+  };
   if (premium.paise !== null && typeof store.savePayable === "function") {
     // what KSHEMA asked, beside our own figure on the View page - bookkeeping only, never holds the press back
     const saved = await store.savePayable({
@@ -581,7 +592,7 @@ async function payWithCdBalanceAndIssue(o = {}) {
   }
   const click = await issue.clickOnce(driver, button.element);
   if (!click.clicked) {
-    await store.outcome({ state: STATES.FAILED, outcomeAt: new Date(), words: `Pay with CD Balance could not be clicked (${click.error})` });
+    await recordOutcome({ state: STATES.FAILED, outcomeAt: new Date(), words: `Pay with CD Balance could not be clicked (${click.error})` });
     return fail("PAY_NOT_CLICKED", `Pay with CD Balance could not be clicked (${noColon(click.error)}). Nothing was paid`);
   }
   log(`   💳 Pay with CD Balance pressed${click.alert ? ` - KSHEMA showed "${noColon(click.alert)}"` : ""} - waiting for KSHEMA's policy page`);
@@ -598,12 +609,12 @@ async function payWithCdBalanceAndIssue(o = {}) {
         ? "KSHEMA went back to its login page"
         : `KSHEMA did not open its policy page within ${Math.round(timing.policyPageWaitMs / 1000)} seconds` +
           (verdict.words ? ` (it showed "${noEndStop(verdict.words)}")` : "");
-    await store.outcome({ state: STATES.UNCONFIRMED, outcomeAt: new Date(), words: String(verdict.words || why).slice(0, 500), lastUrl: verdict.url || (verdict.page && verdict.page.url) || null });
+    await recordOutcome({ state: STATES.UNCONFIRMED, outcomeAt: new Date(), words: String(verdict.words || why).slice(0, 500), lastUrl: verdict.url || (verdict.page && verdict.page.url) || null });
     return fail("PAY_UNCONFIRMED", unconfirmedMessage(why, premium.paise), { paid: true, state: STATES.UNCONFIRMED });
   }
   const page = verdict.page;
   log(`   ✅ KSHEMA's policy page opened after ${Math.round(verdict.waitedMs / 1000)}s - ${page.msg || "no message"} (policy id ${page.policyId || "?"})`);
-  await store.outcome({ state: STATES.ISSUED, outcomeAt: new Date(), policyPageUrl: page.url, kshemaPolicyId: page.policyId || null });
+  await recordOutcome({ state: STATES.ISSUED, outcomeAt: new Date(), policyPageUrl: page.url, kshemaPolicyId: page.policyId || null });
 
   // 6. the number, at once
   const number = await readPolicyNumber(driver, { timing, now, sleep });
