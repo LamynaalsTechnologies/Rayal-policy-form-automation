@@ -1233,3 +1233,52 @@ anything shipped.
 
 **Not seen live**: the page after Make New/Renew Policy (its address, `#selectProduct`), and the error chromedriver gives when a
 person closes the window by hand. The replica closes it through WebDriver, and the watcher accepts the known wordings.
+
+### Reliance Make & Model collector (2026-11-14)
+The owner asked for the United India idea again, for **Reliance**: search each Make in Reliance's Make/Model box, read every
+suggestion, save the Models. Run by hand, not part of the server, **no .env switch**:
+
+    node scripts/relianceCollectModels.js --policy <onlinePolicy id> HONDA HERO SUZUKI YAMAHA BAJAJ
+
+- It uses that policy's customer and the Reliance login of its user / client (the normal resolver), walks the normal flow
+  (login, Motors -> Two Wheeler, product, Skip To Main Page, vertical code, Form 60, Validate Customer) and, at the
+  `VehicleDetailsMakeModel` box, hands over to the collector: one hook line in `relianceForm.js` (`data.collectMakeModels`, a
+  normal run has none), then `fillRelianceForm` returns and the window closes. Nothing is chosen, calculated, saved or paid at
+  Reliance. The run's data carries NO `_id` / `policyId` / `_jobId`, so it cannot read or write the policy's payment note,
+  stages or files.
+- A suggestion is `HONDA | unicorn | 160` (the owner's example): the Make is the part before the first bar and is NOT in the
+  Model; the other parts are joined with one space, no bar is saved -> Model `UNICORN 160`. The line's own Make is saved
+  (searching `hero` also finds `HERO HONDA`, saved under that Make); a line of another Make or with no bar is NOT saved and is
+  listed with its reason. Rules and parsing: `lib/relianceModelCollect.js` (`parseOption`).
+- Insert only, straight into MongoDB (`insurerMake`, `insurerModel`, company `Reliance`, `source: "automation"` = "Policy run"):
+  the Make first, then its Models; a name already there is skipped, never updated. `portalValue` keeps the line as Reliance
+  printed it. Reliance has no Variants: `insurerVariant` is never touched. Run it again any time: only new names are added.
+- The list is read to its end: the suggestion list is scrolled down step by step (Kendo lists draw or load more as they move)
+  until two reads in a row bring nothing new. The box is emptied after each Make.
+- **First live run (2026-11-14) and the fix**: Reliance fills the suggestion list a moment AFTER the typing, and the old list stays on
+  screen meanwhile - SUZUKI, YAMAHA, BAJAJ each read HONDA's 680 lines again (nothing saved, every line "not a SUZUKI one"), and
+  HERO read the HONDA list too. The collector now closes the old list first, then reads only when EVERY line shows the typed
+  Make and the list has held still for two looks (700 ms apart); a list that never becomes the new search is reported as
+  "listed nothing". Rows saved by that run (HONDA 525, HERO HONDA 151, model text like `ACTIVA 125 CC/WATT 125`) are valid and
+  stay; a re-run skips them and adds only what is new - the model text is built exactly as before (owner: no duplicates on re-run).
+- **Top first (owner, same day)**: a new search can open its list where the old one was left (scrolled down), and the lines above
+  were never read. After the new list is there the collector scrolls it back to the TOP, lets the first lines draw, reads them,
+  then walks down. A test starts the list 40 lines down and needs all 60 lines; it fails without the scroll.
+- **Makes with one word (owner, same day: "hero, hero honda, hero motocorp - three are different")**: a search saves ONLY the
+  lines of exactly the make that was typed (`hero` -> HERO's own lines; HERO HONDA and HERO MOTOCORP lines in that list are
+  counted by make in the log, "lines of other makes, not saved by this search", not saved). Each make is asked for by name on
+  the command, one search each: `... HERO "HERO HONDA" "HERO MOTOCORP"`. The same model name under two makes is two rows. (An
+  earlier version of the same day saved the longer makes found inside a `hero` search and searched them again by themselves;
+  the owner's rule replaced it.) The log prints per search "makes in this list: ...".
+- **The Reliance run itself** (`selectKendoAutocomplete`, both `relianceForm.js` and the generated `relianceMultiForm.js`):
+  a suggestion is compared with the bars and extra spaces taken out of BOTH sides (`HONDA | UNICORN | 160` matches the
+  policy's `HONDA` + `UNICORN 160`), and when the whole "make model" text finds nothing, attempts 2 and 3 type the Make alone
+  and pick the line by its model words (logged). Before, a line with bars never matched and the first suggestion was taken.
+- Frontend: the Make & Model dialog picks Reliance's Make, then Model, from these lists like United India (no Variant); the
+  amber note for a name not in the list says "Reliance may not find it" (the Reliance run does not stop on it).
+- Tests: `test/relianceModelCollect.test.js` (19: parsing, insert-only save with a fake database, a 59-line virtual list read to its
+  end with a fake driver, the run data, the script's arguments); 11 of 11 deliberate breaks caught in a scratch copy. Also
+  checked in real headless Chrome on a local page with a 142-line virtual list (all read, other makes' lines listed, box emptied).
+  Frontend: 63 + 28 tests in the touched folders.
+- **Not seen live**: Reliance's real list (is it capped? is a line always `MAKE | ... | ...`?). The script prints, per Make, the
+  lines read, new / already there, and every line it did not save with its reason; the first run with 2-3 makes shows it.

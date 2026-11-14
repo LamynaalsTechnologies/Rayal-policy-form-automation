@@ -1130,10 +1130,14 @@ async function selectKendoAutocomplete(driver, inputId, searchText, options = {}
     attempts = 3,
     suggestionTimeoutMs = 10000,
     matchText = searchText,
+    // Reliance's list shows a line as "HONDA | unicorn | 160" (the Make, then the model words, divided by bars). When the
+    // whole "make model" text finds nothing, the next attempts type the Make alone and pick the line by its model words.
+    fallbackSearchText = "",
   } = options;
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    console.log(`${label} attempt ${attempt}/${attempts}: typing "${searchText}"...`);
+    const typedText = attempt > 1 && fallbackSearchText ? fallbackSearchText : searchText;
+    console.log(`${label} attempt ${attempt}/${attempts}: typing "${typedText}"...`);
     const input = await driver.wait(until.elementLocated(By.id(inputId)), 10000);
     await driver.wait(until.elementIsVisible(input), 5000);
     await driver.wait(until.elementIsEnabled(input), 5000);
@@ -1149,7 +1153,7 @@ async function selectKendoAutocomplete(driver, inputId, searchText, options = {}
     );
     await driver.sleep(200);
     await input.click();
-    await input.sendKeys(searchText);
+    await input.sendKeys(typedText);
     await driver.executeScript(
       `
       var el = arguments[0];
@@ -1159,13 +1163,15 @@ async function selectKendoAutocomplete(driver, inputId, searchText, options = {}
       input
     );
 
-    // Poll for a VISIBLE suggestion, preferring one that matches the text
+    // Poll for a VISIBLE suggestion, preferring one that matches the text. The bars of "HONDA | unicorn | 160" and extra
+    // spaces do not count on either side (lib/relianceModelCollect.js withoutBars does the same).
     let item = null;
     const deadline = Date.now() + suggestionTimeoutMs;
     while (Date.now() < deadline && !item) {
       item = await driver.executeScript(
         `
-        var match = String(arguments[0]).toUpperCase();
+        var plain = function (x) { return String(x || '').toUpperCase().replace(/\\|/g, ' ').replace(/\\s+/g, ' ').trim(); };
+        var match = plain(arguments[0]);
         var listSelector = '#' + arguments[1] + '_listbox li, .k-animation-container li, ul.k-list li, .k-list-container li';
         var els = document.querySelectorAll(listSelector);
         var firstVisible = null;
@@ -1173,19 +1179,22 @@ async function selectKendoAutocomplete(driver, inputId, searchText, options = {}
           var el = els[i];
           if (el.offsetParent === null) continue;
           if (!firstVisible) firstVisible = el;
-          var t = (el.textContent || '').toUpperCase();
+          var t = plain(el.textContent);
           if (t.indexOf(match) !== -1) return el;
         }
-        return firstVisible;
+        // The Make-alone retry lists every model of the make: there a line that does not match is never taken as "the first
+        // one" (that would be another vehicle) - no match = nothing picked, the attempt fails.
+        return arguments[2] ? null : firstVisible;
         `,
         matchText,
-        inputId
+        inputId,
+        typedText !== searchText
       );
       if (!item) await driver.sleep(400);
     }
 
     if (!item) {
-      console.log(`⚠️ No suggestions appeared for "${searchText}" (${label}, attempt ${attempt})`);
+      console.log(`⚠️ No suggestions appeared for "${typedText}" (${label}, attempt ${attempt})`);
       continue;
     }
 
@@ -1890,6 +1899,14 @@ async function fillRelianceForm(
         // === STEP 9: Fill Vehicle Details ===
         console.log("Filling vehicle details...");
 
+        // The Make & Model collector (scripts/relianceCollectModels.js) comes this far with the normal steps above - login,
+        // customer, Form 60, Validate Customer - then reads the make/model lists instead of buying: nothing is chosen
+        // and nothing is saved at Reliance. A normal run has no such function, so this line is skipped.
+        if (typeof data.collectMakeModels === "function") {
+          const collected = await data.collectMakeModels(driver);
+          return { success: true, collected };
+        }
+
         // Vehicle Make/Model autocomplete (verified with retries)
         console.log("Filling vehicle make/model...");
         const vehicleSearchText = data.vehicleModel
@@ -1902,6 +1919,7 @@ async function fillRelianceForm(
           {
             label: "Vehicle make/model",
             matchText: data.vehicleModel || vehicleSearchText,
+            fallbackSearchText: data.vehicleModel ? String(data.vehicleMake || "").trim() : "",
           }
         );
 
