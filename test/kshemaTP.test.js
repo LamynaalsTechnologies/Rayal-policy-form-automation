@@ -115,7 +115,8 @@ test("sync: the copy exports what kshemaForm.js does, is its own function, and l
 test("the copy loads the TP quote form, not the original one (the original is left alone)", () => {
   const form = read(FORM_COPY);
   assert.ok(!/require\("[^"]*kshema\/kshemaQuoteForm"\)/.test(form), "kshemaTPForm must not require the original quote form");
-  assert.equal(form.split('require("./kshemaTPQuoteForm")').length - 1, 8, "all eight quote-form requires point at the copy");
+  // 8 in the flow + 1 in the inert Make / Model / Variant collector hook (it mirrors kshemaForm.js; a queued job never reaches it)
+  assert.equal(form.split('require("./kshemaTPQuoteForm")').length - 1, 9, "all nine quote-form requires point at the copy");
   const quote = read(QUOTE_COPY);
   assert.ok(!/require\("\.\.\/kshemaForm"\)/.test(quote), "the quote copy must not require the original form");
 });

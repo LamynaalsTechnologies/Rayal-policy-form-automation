@@ -485,6 +485,10 @@ async function collectOptions(driver, timeoutMs) {
  *   just before it is dismissed on a failure. This is the only moment a
  *   screenshot can show the open dropdown, which for an empty list is the whole
  *   of the evidence.
+ * @param {Function} [opts.onOptionsRead] - awaited once with the texts of the
+ *   options the open panel lists, before any matching (so also when nothing
+ *   matches). The Pin code Locality field saves them in the master. A throw is
+ *   only logged: the pick goes on.
  * @returns {Promise<{ok, value, reason, matchedScore?}>}
  */
 async function selectMatOption(driver, selectSelectors, optionText, label, opts = {}) {
@@ -498,6 +502,7 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
     noise = null,
     beforeClose = null,
     recover = null,
+    onOptionsRead = null,
   } = opts;
 
   // Give the caller its one chance to photograph the open panel, then dismiss
@@ -631,6 +636,17 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
   };
 
   let seen = await readOptionTexts(options);
+
+  // The list the open panel shows is handed on once, BEFORE any matching, so it is known on a match and on a miss
+  // (the Pin code Locality names go to the master). Whatever it does, the pick below goes on exactly as before.
+  if (onOptionsRead && seen.some(Boolean)) {
+    try {
+      await onOptionsRead(seen.filter(Boolean));
+    } catch (e) {
+      if (isAutomationStop(e)) throw e;
+      debug(`   · ${label}: the list could not be passed on (${String((e && e.message) || e).split("\n")[0]})`);
+    }
+  }
 
   let target = null;
   let matchedScore = null;
@@ -1463,4 +1479,7 @@ module.exports = {
   closeOverlay,
   setMatCheckbox,
   setSlider,
+  // read-only dropdown helpers, exported for the Make / Model / Variant collector (lib/kshemaModelCollect.js)
+  collectOptions,
+  searchInPanel,
 };

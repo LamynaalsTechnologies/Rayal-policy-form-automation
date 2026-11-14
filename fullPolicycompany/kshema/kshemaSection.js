@@ -23,6 +23,7 @@
  */
 const kshemaFields = require("./kshemaFields");
 const { log, warn, debug } = require("./kshemaLog");
+const { rememberLocalities } = require("../../lib/pincodeLocalitySave");
 const { isAutomationStop } = require("../../automationStopper");
 const { throwIfHeld } = require("../../lib/holdStop");
 
@@ -32,6 +33,17 @@ const OFF_WORDS = new Set(["false", "0", "no", "off"]);
 function isFieldRecheckEnabled() {
   return !OFF_WORDS.has(String(process.env.KSHEMA_FIELD_RECHECK_ENABLED ?? "").trim().toLowerCase());
 }
+
+/**
+ * KSHEMA's own premium calculator speaks up after the Pin Code ("Could not compute the premium") while the CUSTOMER
+ * DETAILS are being filled - there is no vehicle, IDV or product yet for it to compute anything with, so it is not a
+ * refusal of that field (the owner, 2026-11-14: a run died on exactly this with the Pin Code "rejected"). Only this message,
+ * only in the customer details; every other toast still rejects the field, and a premium refusal at Save / in the later
+ * sections is still a refusal (kshemaToast.classifyToast is not changed).
+ */
+const BENIGN_FIELD_TOASTS = [{ section: "customer details", text: /could not compute the premium/i }];
+const isBenignFieldToast = (sectionName, toastText) =>
+  BENIGN_FIELD_TOASTS.some((b) => b.section === sectionName && b.text.test(String(toastText || "")));
 
 /** driver -> Map(field key -> { field, data, expected, sectionName }): what has been filled on this job's form. */
 const filledByDriver = new WeakMap();
@@ -75,6 +87,8 @@ async function fillByType(driver, data, field, value, { capture, screenshots, ha
         noise: field.noise,
         emptyReason: field.emptyReason,
         recover: field.recover || null,
+        // The Pin code Locality list goes to the Pincode & Locality master (never fails the field)
+        onOptionsRead: field.key === "locality" ? (names) => rememberLocalities(data.pinCode || data.pincode, names, { log, warn }) : null,
         beforeClose: capture
           ? async (why) => {
               const shot = await capture(`kshema_${field.key}_${why}`, `${field.key}_${why.replace(/-/g, "_")}`);
@@ -127,7 +141,9 @@ async function fillSection(driver, data, fields, sectionName, capture = null, de
       await waitForLoader(driver, 20000);
       // Check if an error toast appeared after the reload (e.g. "Quotation already converted to proposal")
       const toast = await readToast(driver);
-      if (toast && toast.isError) {
+      if (toast && toast.isError && isBenignFieldToast(sectionName, toast.text)) {
+        warn(`   ℹ️ KSHEMA said "${toast.text}" after ${field.label} - not counted while the ${sectionName} are filled (it cannot compute a premium before the vehicle is entered).`);
+      } else if (toast && toast.isError) {
         return { ...result, ok: false, rejected: true, reason: `Portal rejected the field update: "${toast.text}"` };
       }
     }
@@ -373,6 +389,7 @@ module.exports = {
   isFieldRecheckEnabled,
   filledValueOf,
   fillSection,
+  isBenignFieldToast,
   fillOneField,
   recheckBeforeSave,
   afterSilentSave,

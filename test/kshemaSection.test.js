@@ -80,9 +80,9 @@ const text = (label, value, extra = {}) => ({
   ...extra,
 });
 
-const run = (form, fields, deps = {}) =>
+const run = (form, fields, deps = {}, sectionName = "customer details") =>
   quiet(() =>
-    section.fillSection(form.driver, {}, fields, "customer details", null, {
+    section.fillSection(form.driver, {}, fields, sectionName, null, {
       handlers: form.handlers,
       readState: form.readState,
       waitForLoader: async () => {},
@@ -136,6 +136,41 @@ test("missing data and a portal rejection are NOT retried (a retry cannot change
     assert.equal(rejected.ok, false);
     assert.match(rejected.failures[0].reason, /Portal rejected the field update/);
     assert.equal(toastForm.calls["Pin Code"], 1, "typed once, not again");
+  });
+});
+
+test("\"Could not compute the premium\" after the Pin Code is not a failure of the customer details (owner's live run, 2026-11-14); every other toast still is", async () => {
+  await withSwitch(undefined, async () => {
+    // the owner's case: customer details, Pin Code, the rater's message
+    const form = fakeForm();
+    const r = await run(form, [text("Pin Code", "614616", { settleMs: 2000 }), text("First Name", "ANMOL")], {
+      readToast: async () => ({ text: "Could not compute the premium", isError: true }),
+    }, "customer details");
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.failures, []);
+    assert.equal(form.calls["Pin Code"], 1, "typed once");
+    assert.ok(r.filled.includes("Pin Code"));
+
+    // the wording around it (case, extra words) - the same message
+    assert.equal(section.isBenignFieldToast("customer details", "Error: could not compute the premium for this quote"), true);
+
+    // another error toast on the same field is still a rejection
+    const other = await run(fakeForm(), [text("Pin Code", "614616", { settleMs: 2000 })], {
+      readToast: async () => ({ text: "Quotation already converted to proposal", isError: true }),
+    }, "customer details");
+    assert.equal(other.ok, false);
+    assert.match(other.failures[0].reason, /Portal rejected the field update/);
+
+    // the same message in the LATER sections is still a rejection (a real rater refusal there)
+    for (const section of ["vehicle details", "PA Cover details", "Premium details"]) {
+      const later = await run(fakeForm(), [text("PA Year", "1 Year", { settleMs: 2000 })], {
+        readToast: async () => ({ text: "Could not compute the premium", isError: true }),
+      }, section);
+      assert.equal(later.ok, false, section);
+      assert.match(later.failures[0].reason, /Portal rejected the field update: "Could not compute the premium"/);
+    }
+    assert.equal(section.isBenignFieldToast("customer details", "System Error More than one rate found for rate"), false);
+    assert.equal(section.isBenignFieldToast("customer details", ""), false);
   });
 });
 

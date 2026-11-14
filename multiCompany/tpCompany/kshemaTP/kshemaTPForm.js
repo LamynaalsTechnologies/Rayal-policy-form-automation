@@ -1090,6 +1090,27 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
       };
     }
 
+    // The Make / Model / Variant collector (scripts/kshemaCollectModels.js, lib/kshemaModelCollect.js) comes this far with
+    // the normal steps above - login, Two-Wheeler, customer details - and then reads the vehicle lists instead of filling
+    // the vehicle: nothing else is filled, nothing is saved at KSHEMA. A queued job carries plain data from the database,
+    // never a function, so a normal run skips this block.
+    if (typeof data.collectMakeModels === "function") {
+      const collected = await data.collectMakeModels(driver, {
+        kshemaFields: require("../../../fullPolicycompany/kshema/kshemaFields"),
+        vehicleFields: require("./kshemaTPQuoteForm").VEHICLE_FIELDS,
+        fillOneField: require("../../../fullPolicycompany/kshema/kshemaSection").fillOneField,
+        waitForLoader: waitForKshemaLoaderToDisappear,
+      });
+      return {
+        success: true,
+        stage: "make-model-collected",
+        collected,
+        loggedIn: true,
+        twoWheelerOpened: true,
+        pageUrl: await driver.getCurrentUrl(),
+      };
+    }
+
     // ── Vehicle details ────────────────────────────────────────────────────
     vehicle = await fillVehicleDetails(driver, data, capture);
     throwIfHeld(driver); // a step that swallowed a Hold ends here, not in its failure report

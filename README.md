@@ -1282,3 +1282,69 @@ suggestion, save the Models. Run by hand, not part of the server, **no .env swit
   Frontend: 63 + 28 tests in the touched folders.
 - **Not seen live**: Reliance's real list (is it capped? is a line always `MAKE | ... | ...`?). The script prints, per Make, the
   lines read, new / already there, and every line it did not save with its reason; the first run with 2-3 makes shows it.
+
+### KSHEMA Make / Model / Variant collector + the Pin Code toast (2026-11-14)
+**1. "Could not compute the premium" after the Pin Code (owner's live run, job ANMOL).** KSHEMA's own rater says it while the CUSTOMER
+DETAILS are filled (there is no vehicle yet); `kshemaSection.js` read it as the Pin Code being "rejected" and the run stopped. Now
+that ONE message, in the customer details only (`BENIGN_FIELD_TOASTS`), is logged (`ℹ️ KSHEMA said ... not counted`) and ignored. Every other
+toast still rejects the field, the same message in the vehicle / PA / premium sections still does, and `classifyToast` and the Save-time
+checks are unchanged (a premium refusal at Save stays a refusal). Both quote forms share the code (one edit).
+
+**2. The collector** - run ONCE by hand, not part of the server, no .env switch:
+
+    node scripts/kshemaCollectModels.js --policy <onlinePolicy id>                          every make in KSHEMA's Make dropdown, 10 windows
+    node scripts/kshemaCollectModels.js --policy <onlinePolicy id> --windows 5 HONDA "TVS MOTOR COMPANY LTD"   only these makes (exact portal names), 5 windows
+
+- It walks the normal flow (login, Two-Wheeler, customer details of the quote form of that policy), sets "Is New Vehicle?" to Yes (the portal
+  shows Make / Model / Variant only then) and then, strictly: **pick a make -> read ALL its Models -> save the Make and its Models ->
+  for each Model in turn: pick it -> read ITS Variants -> save them -> the next Model -> when the last Model is done, the next make.**
+  Nothing else on the form is filled, Save is never pressed, nothing is written to the policy (the run's data has no `_id/policyId/_jobId`).
+- Reading a dropdown (`lib/kshemaModelCollect.js readOptions`): the list is read as it shows; a panel that is EMPTY until typed (Make /
+  Model have a search box) is read by typing A-Z and 0-9 and joining the answers; the list must hold still for two looks in a row
+  (a list still being replaced is not taken); every pick is exact (`selectMatOption` with `fuzzy:false`, read back) - a make the portal
+  shows under another name after the pick stops the walk before it reads the wrong list.
+- Insert only into `insurerMake` / `insurerModel` (shared `saveModels`) and `insurerVariant` (`saveVariants`): company KSHEMA, `source:
+  "automation"` ("Policy run"), a name already there is skipped. It saves after every model, so a stop loses nothing; a make with no models and
+  a model with no variants are counted and logged, not errors. Typed makes that KSHEMA does not have are reported with names like them.
+- The only edits to the working KSHEMA flows: the inert hook (`typeof data.collectMakeModels === "function"`, after the customer details, before
+  the vehicle) in `kshemaForm.js` AND the identical block in `kshemaTPForm.js` (its sync guard needs it; `kshemaTP.test.js` counts 9
+  quote-form requires now), two additive exports in `kshemaFields.js` (`collectOptions`, `searchInPanel`), and the benign-toast line. A queued
+  job carries plain data from the database, never a function, so a normal run skips the hook.
+- Tests: `test/kshemaModelCollect.test.js` (14: the walk order, all makes / typed makes, empty-until-typed list, stale list, insert-only
+  second run, error sentences, the script and the hook never touching a normal run) + 1 new in `kshemaSection.test.js`; 12 of 12
+  deliberate breaks caught in a scratch copy; also run in real headless Chrome with the REAL KSHEMA dropdown helpers
+  (`selectMatOption`, `collectOptions`, `searchInPanel`, the real Make / Model / Variant locators) against a replica Angular-Material page
+  (Make list at once, Model list empty until typed, Variant list per model): 11 of 11 variants, no wrong row. Full suite: only the old
+  captcha-file failure.
+- **Not seen live**: KSHEMA's real lists (does the Make list show before typing? how long are the lists? the exact Model / Variant text), whether a
+  filled Make / Model select is found again by the same locators (the replica has the `mat-label` the third locator needs - the real page
+  was never looked at), how long the whole walk takes (every model is one pick + one read; hundreds of makes can take hours), and whether
+  the session stays logged in that long. Run it for ONE make first and send the log.
+- **Several windows (owner, same day: "too slow - 5 screens, then 10 screens, a make must not be done on two screens")**:
+  `--windows N` (1-10, default **10**), each window opens its own Chrome, logs in (3 s apart) and walks the SAME way, but all take their next make from ONE
+  shared queue (`createWorkQueue`): a make is done by exactly one window; with typed makes the windows are at most that many. Windows run
+  **headless** (this run only, the .env is not touched) unless `--show`. A make that fails (portal shows another name, a list that did not open ...) does not stop
+  the window: it is put back ONCE for another try, then listed under "Makes that failed (run the script again for these)"; a window
+  whose last 3 makes all failed stops (the session is probably gone). Every model line and every make now prints its seconds, so the
+  next log shows where the time goes. Waits were trimmed (400 ms after a pick, 250 ms between the two stable looks, 150 ms after closing a list).
+  Real Chrome check: 5 headless windows on the replica, 10 makes, each picked once, 60 of 60 variants, no wrong row. **Not known**: whether KSHEMA
+  lets one login be used in 10 windows at once (production already runs 2) - if windows drop out, use fewer (`--windows 4`); memory (about 0.3-0.5 GB per
+  headless window; 10 windows need several GB free - this machine had about 5 GB free).
+- Frontend: the Make & Model dialog picks KSHEMA's Make, Model and **Variant** from the saved lists (`InsurerVariantField`, the Variant
+  follows the Make + Model; National keeps typed boxes). Note wording for KSHEMA: "KSHEMA picks the closest name, which may be another one".
+
+### Pincode & Locality: saved by the KSHEMA run (2026-11-14, owner's request)
+When KSHEMA's "Pin code Locality" dropdown opens in the customer details, **every locality it lists is saved** in the
+`pincodeLocality` collection (backend README §39) - on a match AND on "none of ... was close enough" (the list is read
+before any matching). Insert only: a name already saved is skipped, never updated, never duplicated. Both flows (full + TP)
+share the code.
+- `lib/pincodeLocalitySave.js`: `saveLocalities(db, {pincode, names, company})` (clean + de-dupe, at most 200 names of 150
+  characters per call, pincode must be 6 digits, `insertMany(docs,{ordered:false})`, E11000 = "already there") and
+  `rememberLocalities` (what the field calls: uses the server's open Mongo connection, none = quiet nothing, never throws,
+  waits at most 3 s, one log line `📍 Pin code 604203: N new locality name(s) saved (M already saved)` or one `⚠` warning).
+- `kshemaFields.js` `selectMatOption`: new optional `onOptionsRead(texts)`, awaited once after the list is read, inside a
+  try / catch; absent = nothing changes. `kshemaSection.js` `fillByType` passes it for the `locality` field ONLY. The two quote
+  forms (the drift-guarded pair) are NOT edited.
+- Not saved when the dropdown already holds the right value (it is not opened then). A hand-run script (no open connection) saves nothing.
+- Tests `test/pincodeLocalitySave.test.js` (17); 6 deliberate breaks caught in a scratch copy. Not run on the live portal: KSHEMA's real option
+  texts (may carry S.O / B.O markers - saved as shown). No `.env` switch.
