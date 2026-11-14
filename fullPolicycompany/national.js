@@ -4,6 +4,7 @@ const {
   cleanupNationalJobBrowser,
 } = require("../nationalSessionManager");
 const { CONFIG } = require("../nationalBrowserConfig");
+const { selectNationalAccountType, waitForNationalLoginForm, typeAndVerify, clickLoginButton } = require("./national/nationalLoginForm");
 const { startRecording } = require("../lib/jobRecorder");
 const fs = require("fs");
 const path = require("path");
@@ -1683,11 +1684,9 @@ async function fillNationalForm(
       // Wait for the login page itself to render rather than a flat 3s. The
       // duplicated portal-loader call below was harmless when that helper was
       // a no-op, but now that it really waits it would double the timeout.
-      await driver
-        .wait(until.elementLocated(By.name("log_txtfield_iUsername_01")), 30000)
-        .catch(() => {
-          console.log(`[${jobId}] Login form not detected yet, continuing...`);
-        });
+      // Filling starts as soon as the form's first control (the User Type list) shows; the Login ID box can be drawn only
+      // after the lists are chosen, so it is not waited for here (nationalLoginForm.js).
+      await waitForNationalLoginForm(driver, { log: (line) => console.log(`[${jobId}] ${line}`) });
       await waitForLoaderToDisappear(driver);
       await waitForPortalLoaderToDisappear(driver);
 
@@ -1709,168 +1708,30 @@ async function fillNationalForm(
       // Handle login form
       console.log(`[${jobId}] Filling login form...`);
 
-      // Select INTERMEDIARY option
-      try {
-        // First, click on the specific dropdown to open it
-        // Try multiple selectors for the dropdown
-        let dropdown;
-        try {
-          dropdown = By.name("reg_dropdown_iType_02");
-          await driver.wait(until.elementLocated(dropdown), 5000);
-        } catch (e) {
-          console.log("Name selector failed, trying ID selector...");
-          try {
-            dropdown = By.id("mat-select-4");
-            await driver.wait(until.elementLocated(dropdown), 5000);
-          } catch (e2) {
-            console.log("ID selector failed, trying CSS selector...");
-            dropdown = By.css("mat-select[role='combobox']");
-            await driver.wait(until.elementLocated(dropdown), 5000);
-          }
-        }
-
-        await safeClick(driver, dropdown, 10000);
-        await driver.sleep(2000);
-
-        // Check if dropdown is open and look for INTERMEDIARY option
-        console.log("Looking for INTERMEDIARY option...");
-
-        // Debug: List all available options
-        try {
-          const allOptions = await driver.findElements(By.css("mat-option"));
-          console.log(`Found ${allOptions.length} options in dropdown`);
-          for (let i = 0; i < allOptions.length; i++) {
-            const optionText = await allOptions[i].getText();
-            console.log(`Option ${i}: "${optionText}"`);
-          }
-        } catch (debugError) {
-          console.log("Could not list options:", debugError.message);
-        }
-
-        const intermediaryOption = By.xpath("//mat-option[contains(., 'INTERMEDIARY')]");
-
-        // Wait for the option to be available
-        await driver.wait(until.elementLocated(intermediaryOption), 10000);
-        await safeClick(driver, intermediaryOption, 10000);
-        console.log("Selected INTERMEDIARY option");
-
-        // Wait a bit for the selection to take effect
-        await driver.sleep(1000);
-      } catch (error) {
-        console.log("INTERMEDIARY option not found or already selected:", error.message);
-
-        // Try alternative approach - look for any option that contains "INTERMEDIARY"
-        try {
-          console.log("Trying alternative selector...");
-          const altOption = By.xpath("//mat-option[contains(text(), 'INTERMEDIARY')]");
-          await safeClick(driver, altOption, 5000);
-          console.log("Selected INTERMEDIARY option with alternative selector");
-        } catch (altError) {
-          console.log("Alternative selector also failed:", altError.message);
-        }
-      }
-
-      // Select second dropdown option (after INTERMEDIARY)
-      try {
-        console.log("Selecting second dropdown option...");
-
-        // Wait a bit for the first selection to take effect
-        await driver.sleep(2000);
-
-        // Try to find and click the dropdown again
-        let secondDropdown;
-        try {
-          secondDropdown = By.name("reg_dropdown_iType_02");
-          await driver.wait(until.elementLocated(secondDropdown), 5000);
-        } catch (e) {
-          console.log("Name selector failed for second dropdown, trying ID selector...");
-          try {
-            secondDropdown = By.id("mat-select-4");
-            await driver.wait(until.elementLocated(secondDropdown), 5000);
-          } catch (e2) {
-            console.log("ID selector failed for second dropdown, trying CSS selector...");
-            secondDropdown = By.css("mat-select[role='combobox']");
-            await driver.wait(until.elementLocated(secondDropdown), 5000);
-          }
-        }
-
-        await safeClick(driver, secondDropdown, 10000);
-        await driver.sleep(2000);
-
-        // Debug: List all available options in the second dropdown
-        try {
-          const allOptions = await driver.findElements(By.css("mat-option"));
-          console.log(`Found ${allOptions.length} options in second dropdown`);
-          for (let i = 0; i < allOptions.length; i++) {
-            const optionText = await allOptions[i].getText();
-            console.log(`Second dropdown option ${i}: "${optionText}"`);
-          }
-        } catch (debugError) {
-          console.log("Could not list second dropdown options:", debugError.message);
-        }
-
-        // Select BROKER POSP option specifically
-        try {
-          const brokerPospOption = By.xpath("//mat-option[contains(., 'BROKER POSP')]");
-          await safeClick(driver, brokerPospOption, 10000);
-          console.log("Selected BROKER POSP option");
-        } catch (brokerError) {
-          console.log("BROKER POSP option not found, trying alternative selector...");
-          try {
-            const altBrokerOption = By.xpath("//mat-option[contains(text(), 'BROKER POSP')]");
-            await safeClick(driver, altBrokerOption, 10000);
-            console.log("Selected BROKER POSP option with alternative selector");
-          } catch (altBrokerError) {
-            console.log("Alternative BROKER POSP selector also failed:", altBrokerError.message);
-          }
-        }
-
-        // Wait for selection to take effect
-        await driver.sleep(1000);
-
-      } catch (error) {
-        console.log("Second dropdown selection failed:", error.message);
-      }
+      // User Type = INTERMEDIARY, then the Intermediary Type list that appears = BROKER POSP. Each list is found by its own
+      // label, picked from its own panel and read back; a miss stops here with a named error (nationalLoginForm.js).
+      await selectNationalAccountType(driver, {
+        userType: "INTERMEDIARY",
+        intermediaryType: "BROKER POSP",
+        log: (line) => console.log(`[${jobId}] ${line}`),
+      });
 
       // Fill username. `data` carries THIS job's resolved credential; the
       // shared CONFIG is only a fallback for a standalone CLI run.
       console.log(`[${jobId}] Looking for username field...`);
       const usernameField = By.name("log_txtfield_iUsername_01");
-      await safeType(driver, usernameField, data.username || CONFIG.USERNAME, 10000);
+      await typeAndVerify(driver, usernameField, data.username || CONFIG.USERNAME, "Login ID");
       console.log(`[${jobId}] Filled username`);
 
       // Fill password
       console.log(`[${jobId}] Looking for password field...`);
       const passwordField = By.name("log_pwd_iPassword_01");
-      await safeType(driver, passwordField, data.password || CONFIG.PASSWORD, 10000);
+      await typeAndVerify(driver, passwordField, data.password || CONFIG.PASSWORD, "Password");
       console.log(`[${jobId}] Filled password`);
 
-      // Click login button
+      // Click login button (found again if the page redraws it; named errors - nationalLoginForm.js)
       console.log(`[${jobId}] Looking for login button...`);
-      const loginButton = By.name("log_btn_login_01");
-
-      try {
-        const buttonElement = await driver.wait(until.elementLocated(loginButton), 10000);
-        console.log(`[${jobId}] Login button found`);
-
-        await driver.wait(until.elementIsVisible(buttonElement), 10000);
-        console.log(`[${jobId}] Login button is visible`);
-
-        await driver.wait(until.elementIsEnabled(buttonElement), 10000);
-        console.log(`[${jobId}] Login button is enabled`);
-
-        try {
-          await buttonElement.click();
-          console.log(`✅ [${jobId}] Clicked login button (regular click)`);
-        } catch (clickError) {
-          console.log(`[${jobId}] Regular click failed, trying JavaScript click...`);
-          await driver.executeScript("arguments[0].click();", buttonElement);
-          console.log(`✅ [${jobId}] Clicked login button (JavaScript click)`);
-        }
-      } catch (buttonError) {
-        console.error(`❌ [${jobId}] Failed to click login button:`, buttonError.message);
-        throw new Error(`Failed to click login button: ${buttonError.message}`);
-      }
+      await clickLoginButton(driver, By.name("log_btn_login_01"), { log: (line) => console.log(`[${jobId}] ${line}`) });
 
       console.log(`[${jobId}] Waiting for login to complete...`);
       // Wait for the login page to actually go away rather than guessing at a

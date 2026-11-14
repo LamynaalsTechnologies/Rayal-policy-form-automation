@@ -3,6 +3,8 @@
  * fullPolicycompany/national.js — same field names, same account-type
  * dropdown walk, same "left the login page" success signal.
  *
+ * The account-type dropdown walk is now the shared fullPolicycompany/national/nationalLoginForm.js (2026-11-14).
+ *
  * Two things differ from the legacy flow, on purpose:
  *  - there is NO built-in login URL. The legacy CONFIG.LOGIN_URL is "", so a
  *    credential saved without one used to fail deep inside driver.get(""); it
@@ -13,6 +15,8 @@
 const { By } = require("selenium-webdriver");
 const { firstVisible, clickWithFallback } = require("../elements");
 const { waitForLoader } = require("../loader");
+const { MultiCompanyError } = require("../errors");
+const { selectNationalAccountType, waitForLoginBox } = require("../../../fullPolicycompany/national/nationalLoginForm");
 
 const USERNAME_LOCATOR = By.name("log_txtfield_iUsername_01");
 
@@ -24,33 +28,6 @@ async function isLoggedIn(driver) {
     return (await driver.findElements(USERNAME_LOCATOR)).length === 0;
   } catch (e) {
     return false; // mid-navigation — keep polling
-  }
-}
-
-const DROPDOWN_LOCATORS = [
-  By.name("reg_dropdown_iType_02"),
-  By.id("mat-select-4"),
-  By.css("mat-select[role='combobox']"),
-];
-
-/** Open the account-type dropdown and pick the option containing `text`. Best effort. */
-async function chooseOption(driver, text, log) {
-  try {
-    const dropdown = await firstVisible(driver, DROPDOWN_LOCATORS);
-    if (!dropdown) throw new Error("dropdown not visible");
-    await clickWithFallback(driver, dropdown);
-    await driver.sleep(1500);
-    const option = await firstVisible(driver, [
-      By.xpath(`//mat-option[contains(., '${text}')]`),
-      By.xpath(`//mat-option[contains(text(), '${text}')]`),
-    ]);
-    if (!option) throw new Error(`option "${text}" not shown`);
-    await clickWithFallback(driver, option);
-    await driver.sleep(1000);
-    log(`   selected ${text}`);
-  } catch (e) {
-    // The legacy flow swallows these too: the dropdown can be pre-selected.
-    log(`   (${text}: ${e.message} — continuing)`);
   }
 }
 
@@ -72,15 +49,25 @@ module.exports = {
   loginResultMs: 30000,
   pauseMs: 0,
   fields: {
+    // What shows first: the User Type list. The Login ID box can be drawn only after the lists are chosen, so the page is
+    // "ready" without it (2026-11-14) - waiting for it first cost the whole page-load wait on every run.
+    ready: [By.css("mat-select[aria-labelledby~='userGroupLabel']"), By.css("mat-select"), USERNAME_LOCATOR],
     username: [USERNAME_LOCATOR],
     password: [By.name("log_pwd_iPassword_01")],
     submit: [By.name("log_btn_login_01")],
   },
   isLoggedIn,
+  // User Type = INTERMEDIARY, then the Intermediary Type that appears = BROKER POSP: each list found by its own label,
+  // picked and read back (fullPolicycompany/national/nationalLoginForm.js, the same code the full and TP flows use).
+  // A miss is a named, retryable E306 - it used to be logged and skipped, and the login failed later without a reason.
   beforeFill: async (driver, ctx) => {
     const log = ctx?.log || ((l) => console.log(l));
-    await chooseOption(driver, "INTERMEDIARY", log);
-    await chooseOption(driver, "BROKER POSP", log);
+    try {
+      await selectNationalAccountType(driver, { userType: "INTERMEDIARY", intermediaryType: "BROKER POSP", log });
+      await waitForLoginBox(driver, { log }); // drawn after the lists: be sure it is there before the fields are filled
+    } catch (e) {
+      throw new MultiCompanyError("E306", `${e.message} - it will try again shortly.`, { company: "national", retryable: true });
+    }
   },
   // A promo/flash modal often greets the first login.
   afterLogin: async (driver) => {

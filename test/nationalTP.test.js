@@ -45,7 +45,10 @@ require.cache[captchaPath] = {
 const { diffHunks, untagged } = require("./driftGuard");
 
 /** The copy's text as if it sat next to the original: only the three-folders-deeper require paths are undone. */
-const normalisePaths = (text) => text.replace(/require\("\.\.\/\.\.\/\.\.\//g, 'require("../');
+const normalisePaths = (text) =>
+  text
+    .replace(/require\("\.\.\/\.\.\/\.\.\/fullPolicycompany\/national\//g, 'require("./national/') // the helper folder national.js sits beside
+    .replace(/require\("\.\.\/\.\.\/\.\.\//g, 'require("../');
 
 
 test("sync: the copy is national.js plus [TP]-tagged changes only", () => {

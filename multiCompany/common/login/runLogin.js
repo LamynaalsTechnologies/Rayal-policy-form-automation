@@ -115,7 +115,8 @@ async function runLogin(driver, strategy, creds = {}, ctx = {}) {
       await driver.get(loginUrl);
 
       // 1. The login form must actually render.
-      const userField = await waitForVisible(driver, strategy.fields.username, strategy.pageLoadMs);
+      // A strategy whose Login ID box is drawn only after earlier choices (National) names what shows FIRST in fields.ready
+      const userField = await waitForVisible(driver, strategy.fields.ready || strategy.fields.username, strategy.pageLoadMs);
       if (!userField) {
         throw new MultiCompanyError(
           "E304",
