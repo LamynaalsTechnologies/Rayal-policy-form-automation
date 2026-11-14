@@ -2180,6 +2180,15 @@ async function fillNationalForm(
       }
     }
 
+    // The National Make / Model / Variant and RTO location collectors (scripts/nationalCollectModels.js and
+    // scripts/nationalCollectRtoLocations.js, lib/nationalModelCollect.js) come this far with the normal steps above - login,
+    // Calculate Premium, vehicle type, plan, class - and then read the portal's lists instead of filling the quote: nothing is
+    // chosen or saved at National. A queued job carries plain data from the database, never a function, so a normal run skips this.
+    if (typeof data.collectMakeModels === "function") {
+      const collected = await data.collectMakeModels(driver, { By, until, waitForPortalIdle, waitForOverlayGone });
+      return { success: true, stage: "make-model-collected", collected, pageUrl: await driver.getCurrentUrl() };
+    }
+
     // Fill RTO location (autocomplete field)
     console.log("Filling RTO location...");
     const rtoLocationField = By.name("mcy_dropdown_newRtoLocation_01");
@@ -2196,6 +2205,11 @@ async function fillNationalForm(
     } else if (!data.RTOCity) {
       console.log("RTO City not found, using fallback");
       rtoText = "Chennai - North West";
+    }
+    // The operator may have picked National's OWN location on the policy ("DELHI - SOUTH - DL 03", optional): typed as it is
+    if (data.nationalRto && String(data.nationalRto).trim()) {
+      rtoText = String(data.nationalRto).trim();
+      console.log("National RTO chosen on the policy, using it:", rtoText);
     }
     await selectAutocompleteOption(driver, rtoInput, rtoText, "RTO location");
 

@@ -1367,3 +1367,64 @@ failed later at the password / "still on the login page" with no reason.
   **Not run on the live portal** - the first live run should show `✓ User Type set to INTERMEDIARY` and `✓ Intermediary Type set to BROKER POSP` (or the warning "found by its place").
 - **Filling started too late (2026-11-14, same day).** The log stopped right after "Navigation successful!" because the code first waited up to **30 s** for the Login ID box (`log_txtfield_iUsername_01`) before touching any list, and that box can be drawn only after the lists are chosen - so the 30 s was lost on every run. Now `waitForNationalLoginForm` (in `nationalLoginForm.js`) is ready as soon as the form's first control shows (the User Type list), logs `✓ National login form ready, the User Type list showed after N s`, and the Login ID box is waited for AFTER the lists (`waitForLoginBox`, 20 s, named error). Every list pick logs the seconds it took. The multi-company login got the same (`fields.ready` in `runLogin.js`, optional, other insurers unchanged). 8 more tests in `test/nationalLoginForm.test.js`, 4 breaks caught. Not run on the live portal: read the new timing lines in the first run's log.
 - **"stale element reference" killed the login (owner's live run, job ANMOL, 2026-11-14).** The portal draws the form again right after its loader clears (and when a choice adds the next list), so an element found a moment earlier is replaced. Now every step of `nationalLoginForm.js` (both lists, Login ID, Password, Login button) looks its element up AGAIN and redoes the step on a stale element (`↻ National login - the page redrew the "User Type" list, looking for it again (1/3)`, up to 4 tries, then `the page kept redrawing ...`, never the raw message). After both lists are chosen they are read again (`✓ Both lists hold INTERMEDIARY and BROKER POSP`); a list that lost its value is chosen once more. The Intermediary Type list is also found by its own name `reg_dropdown_iType_02` (from the owner's HTML). The Login button is clicked only once it is enabled (named error if it stays disabled: the form did not accept the boxes). 12 more tests (80 in total in the two National test files), breaks caught in a scratch copy.
+
+### National RTO locations + Make / Model / Variant collectors (2026-11-14)
+Two hand-run scripts (run ONCE, no .env switch, nothing quoted or saved at National, nothing written to the policy):
+
+    node scripts/nationalCollectRtoLocations.js --policy <onlinePolicy id> [--show]          National's RTO Location list -> the RTO City Location master
+    node scripts/nationalCollectModels.js --policy <onlinePolicy id> [--windows N] [--show] [MAKE ...]   Makes / Models / Variants, 10 windows (1-10)
+
+- Both walk the normal National flow (login, Calculate Premium, vehicle type, plan, class) and stop at ONE inert hook in `national.js` (and its
+  identical twin in `nationalTPForm.js`, which the TP sync guard needs): `typeof data.collectMakeModels === "function"`, placed after the class and
+  before the RTO box, no field names inside (the portal's input names live in `lib/nationalModelCollect.js NAMES`, so the TP token guards are
+  untouched). A queued job carries plain data, never a function. Windows run headless unless `--show`; the National login needs its address
+  (`loginUrl`) saved and the policy needs an RTO city (one plain sentence each before any window opens).
+- National's RTO / Make / Model / Variant are mat-autocomplete TEXT inputs. `readAutocompleteOptions` reads the list that opens at once (scrolled to its end, two
+  agreeing looks) or, if the box shows nothing until typed, by A-Z and 0-9; `pickAutocompleteExact` types the exact text and clicks the option whose text
+  EQUALS it (never "contains", never the portal's "click the first option" fallback `selectAutocompleteOption`) and reads the box back.
+- **RTO locations** (`lib/nationalRtoCollect.js`): "Chennai - West" -> city CHENNAI + region WEST (split at the FIRST " - "); no " - " -> the whole text is the
+  city, region blank. Each row gets an auto-made code, NATIONAL + city + region, letters and digits only (`NATIONALGURGAONNCR`), editable on the page. Insert only
+  into `RTOCityLocation` with `company "National"`, `source "automation"`, `portalText` (the option as National writes it); never a zone, never the Pincode
+  Locality master; a re-run skips a row with the same code OR the same National text (so an edited code does not make a second row).
+- **Make / Model / Variant** (`lib/nationalModelCollect.js`): same walk and shared queue as KSHEMA (`createWorkQueue`, `newTotals`, `saveVariants`, `CollectError` are reused from
+  `lib/kshemaModelCollect.js`): the policy's RTO is picked first (Make opens only after it), then each window takes the next make nobody has taken: pick the make ->
+  read ALL its Models -> for each Model in turn: pick it, **then** save it, read its Variants, save them -> next model -> next make. A failed make is put back once, then listed;
+  a window whose last 3 makes failed stops. Timings on every line.
+- **A bug the real-Chrome replica found (fixed in BOTH collectors)**: after a make is picked the portal can keep showing the PREVIOUS make's model list for a moment; the
+  first version read that list and saved the models under the wrong make (21 wrong rows on the replica). Now a model is saved only AFTER the portal accepted picking it
+  under that make, and a Model list identical to this window's previous make's is read again every 0.7 s until it changes (6 s, else that attempt fails with one plain
+  sentence and is retried); a Variant list identical to the previous model's gets 2.5 s (it can legitimately be the same - "STD"). `lib/kshemaModelCollect.js` got the same
+  two safeguards (its saved-models order changed: Make + Model, then that model's Variants, then the next model).
+- Tests: `test/nationalModelCollect.test.js` (23), `test/nationalRtoCollect.test.js` (10), shared fake page `test/nationalFakePage.js`; `test/nationalTP.test.js` stays green with the
+  identical hook; real headless Chrome on a replica (5 windows, 12 makes incl. HONDA vs HONDA MOTORS, a 1.2 s lagging model list): every make once, 62 of 62 variants, 0 wrong rows;
+  the KSHEMA replica was rerun after the port (60 of 60). **Not seen live**: whether Make / Model / Variant open at once or only after typing, whether they depend on RTO or
+  plan, the option text formats, how long it takes, and whether 10 windows on one National login hold (production runs 2) - run `--windows 1` for ONE make first.
+
+### National's SECOND list: "Not able to Find the required Model & Variant" (2026-11-14)
+National's quote form has a checkbox "Not able to Find the required Model & Variant" (`isNonGICSelected`); ticked, the portal offers a DIFFERENT set of make / model / variant (and a
+Manufacturer's Selling Price box). The owner wants that set collected too, kept apart from the normal one (his choice: **three new separate lists, no database change**):
+
+    node scripts/nationalCollectModels.js --policy <onlinePolicy id> --not-found [--windows N] [MAKE ...]
+    node scripts/nationalCollectRtoLocations.js --policy <onlinePolicy id> --not-found
+
+- `--not-found` only puts `modelNotFound: true` in the run data. The NORMAL flow already ticks that box (`national.js` / `nationalTPForm.js`, `data.modelNotFound`) BEFORE the collector hook, so the hook,
+  the TP sync guards and the flows are not touched. The MSP step comes after the hook, so no selling price is needed. The collector then reads whatever lists the portal shows and saves them into
+  `insurerMakeNotFound` / `insurerModelNotFound` / `insurerVariantNotFound` (`lib/nationalModelCollect.js` `LISTS` / `listsOf`; `saveModels` and `saveVariants` got an optional collection name whose
+  DEFAULT is the old one, so KSHEMA / Reliance / the normal National run are unchanged). The same names (HONDA ...) can be in both lists. A run without `--not-found` is exactly today's.
+- The RTO script with `--not-found` reads the RTO list the portal shows in that mode and only ADDS locations not already saved (same insert-only rule).
+- Tests: `--not-found` parsing, a not-found run writes ONLY the three new collections (also with names that are in the normal list), a normal run never touches them, a second run adds nothing, the
+  tick comes before the hook in both flow files. Real headless Chrome on a replica whose lists swap when its box is ticked (3 windows, both modes): normal and not-found rows exact, HONDA in both,
+  the normal lists untouched by the second run. **Not seen live**: whether the portal really swaps the lists behind the SAME inputs after the tick (the code assumes it, like the flow itself), whether the RTO
+  list differs in that mode, the option text, the speed. If the portal uses different input names in that mode the next step is a small names switch in `lib/nationalModelCollect.js` (not guessed).
+
+### National RTO locations: a JSON file on the backend, NOT the RTO City Location master (2026-11-14, owner's correction; replaces the earlier RTO rows)
+The owner saw the collected locations (`NATIONALDELHINORTH` ...) as rows in the RTO City Location table and said: "rto code not update this on the data, remove that - save it on the json file on the backend and show it on
+the dropdown, optional, city and branch". So `scripts/nationalCollectRtoLocations.js` now writes **only a JSON file** (default `RayalBrokers-backend/json/nationalRtoLocations.json` when the backend folder is next to this one, else
+`data/nationalRtoLocations.json` here to carry across; `--file <path>` overrides): `{ "updatedAt", "locations": [ { "text": "DELHI - SOUTH - DL 03", "city": "DELHI", "branch": "SOUTH - DL 03" } ] }`, split at the FIRST " - "
+(no " - " = city only). Entries are only ADDED, a re-run keeps everything (same bytes when nothing is new), written whole to a temp file then renamed. No database write, no auto-made code, nothing in the Pincode Locality master
+(`lib/nationalRtoCollect.js`; the backend's `shared/nationalRtoLocations.js mergeLocations` writes the same bytes - a test compares them). **A policy can carry `nationalRto`** (picked in the policy form's optional "National RTO (City - Branch)"
+dropdown): `server.js` puts it in the job data and `national.js` / `nationalTPForm.js` (identical lines, TP guards green) type exactly that text in National's RTO box when it is set, else `RTOCity - RTORegion` as always;
+the Make / Model collector's RTO pick uses it too. The rows an earlier run saved into the master are moved into the file and removed by the backend's `scripts/removeNationalRtoRows.js` (dry run by default, rollback file, `--apply --db <name>`).
+Tests: `test/nationalRtoCollect.test.js` (11). **Popups (same day, live log)**: National shows a Material dialog with a dark backdrop after some picks; it blocked every next click ("element click intercepted") and stopped 4 of 10 windows. The Make / Model collector now
+closes any popup (the portal's own close button by name, then Close / OK, last resort the first button - the same rules as `national.js dismissPortalDialog`), says its text in the log (the same text twice, then only counted; the totals list them),
+and repeats a click that a popup intercepted; a make that still fails is retried after the popup is closed.

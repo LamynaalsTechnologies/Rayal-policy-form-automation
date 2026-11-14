@@ -633,6 +633,8 @@ const buildFormDataFromPolicy = async (data) => {
       vehicleVariant: data?.vehicleVariant,
       RTORegion: data?.RTORegion,
       RTOCity: data?.RTOCity,
+      // National's own RTO location, when the operator picked one (optional; fullPolicycompany/national.js types it as it is)
+      nationalRto: data?.nationalRto || "",
       idv: data?.idv,
       // Model-not-found support (mirrors the backend's buildFullJobFormData).
       modelNotFound: !!data?.modelNotFound,

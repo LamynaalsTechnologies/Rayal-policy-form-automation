@@ -198,16 +198,19 @@ test("the walk: a make, ALL its models, then each model's variants one by one, a
       assert.ok(between.includes("read:variant"), `${events[i]} was followed by a read of its variants`);
     }
   }
-  // saved: the Make, its Models, then each Model's Variants, in the order the walk went
+  // saved: a Model only AFTER the portal accepted picking it under the make, its Variants right after it, then the next Model
   assert.deepEqual(db.writes, [
     "insurerMake:HONDA",
-    "insurerModel:HONDA/ACTIVA", "insurerModel:HONDA/DIO", "insurerModel:HONDA/UNICORN",
+    "insurerModel:HONDA/ACTIVA",
     "insurerVariant:HONDA/ACTIVA/STD", "insurerVariant:HONDA/ACTIVA/DLX", "insurerVariant:HONDA/ACTIVA/DLX OBD2B",
+    "insurerModel:HONDA/DIO",
     "insurerVariant:HONDA/DIO/STD", "insurerVariant:HONDA/DIO/DLX",
+    "insurerModel:HONDA/UNICORN",
     "insurerVariant:HONDA/UNICORN/STD",
     "insurerMake:TVS MOTOR COMPANY LTD",
-    "insurerModel:TVS MOTOR COMPANY LTD/JUPITER", "insurerModel:TVS MOTOR COMPANY LTD/NTORQ",
+    "insurerModel:TVS MOTOR COMPANY LTD/JUPITER",
     "insurerVariant:TVS MOTOR COMPANY LTD/JUPITER/STD", "insurerVariant:TVS MOTOR COMPANY LTD/JUPITER/ZX", "insurerVariant:TVS MOTOR COMPANY LTD/JUPITER/CLASSIC",
+    "insurerModel:TVS MOTOR COMPANY LTD/NTORQ",
     "insurerVariant:TVS MOTOR COMPANY LTD/NTORQ/RACE", "insurerVariant:TVS MOTOR COMPANY LTD/NTORQ/XT",
   ]);
   assert.equal(db.store.insurerMake.every((d) => d.company === "KSHEMA" && d.source === "automation"), true);
@@ -258,6 +261,31 @@ test("the old make's models still on screen are not read as the new make's (the 
   const tvsModels = db.store.insurerModel.filter((m) => m.make === "TVS MOTOR COMPANY LTD").map((m) => m.model).sort();
   assert.deepEqual(tvsModels, ["JUPITER", "NTORQ"], "no HONDA model was saved under the TVS make");
   assert.equal(db.store.insurerModel.some((m) => m.make === "TVS MOTOR COMPANY LTD" && m.model === "ACTIVA"), false);
+});
+
+test("a model list that still shows the PREVIOUS make's models is read again until it changes; nothing wrong is saved (found with the National replica)", async () => {
+  const { ctx, driver, events } = fakeForm({ staleModelReads: 4 });
+  const db = fakeDb();
+  const totals = {};
+  await lib.collectKshema(driver, ctx, { makes: ["HONDA", "TVS MOTOR COMPANY LTD", "BAJAJ AUTO"], db, log: () => {}, totals });
+  // the re-read path did it: no make failed and none was picked twice
+  assert.deepEqual(totals.makesFailed, []);
+  for (const make of ["HONDA", "TVS MOTOR COMPANY LTD", "BAJAJ AUTO"]) assert.equal(events.filter((e) => e === `pick:make:${make}`).length, 1, make);
+  const wrong = db.store.insurerModel.filter((m) => !(CATALOG[m.make] || {})[m.model]);
+  assert.deepEqual(wrong, [], "no model was saved under a make that does not have it");
+  assert.deepEqual(db.store.insurerModel.filter((m) => m.make === "BAJAJ AUTO").map((m) => m.model).sort(), ["CT100", "PULSAR"]);
+});
+
+test("a model the portal refuses to pick under the make is never saved", async () => {
+  const form = fakeForm();
+  const realSelect = form.ctx.kshemaFields.selectMatOption;
+  form.ctx.kshemaFields.selectMatOption = async (driver, selectors, text, label, opts) =>
+    label === "Model" && text === "UNICORN" ? { ok: false, value: null, reason: `"UNICORN" was not one of the choices for "Model"` } : realSelect(driver, selectors, text, label, opts);
+  const db = fakeDb();
+  const totals = {};
+  await lib.collectKshema(form.driver, form.ctx, { makes: ["HONDA"], db, log: () => {}, totals });
+  assert.equal(db.store.insurerModel.some((m) => m.model === "UNICORN"), false);
+  assert.deepEqual(totals.makesFailed.map((f) => f.make), ["HONDA"]);
 });
 
 test("a second run adds nothing (insert only)", async () => {
@@ -476,4 +504,13 @@ test("the hook in the KSHEMA flow: after the customer details pass, before the v
   assert.ok(tp.indexOf('typeof data.collectMakeModels === "function"') < tp.indexOf("vehicle = await fillVehicleDetails(driver, data, capture);"));
   assert.equal(read("fullPolicycompany", "kshema", "kshemaQuoteForm.js").includes("collectMakeModels"), false);
   assert.equal(read("multiCompany", "tpCompany", "kshemaTP", "kshemaTPQuoteForm.js").includes("collectMakeModels"), false);
+});
+
+test("saveVariants with another collection writes only there (National's 'Not able to Find' list); the default is unchanged", async () => {
+  const written = [];
+  const db = { collection: (name) => ({ async insertMany(docs) { written.push([name, docs.length]); return { insertedCount: docs.length }; } }) };
+  const rows = [{ make: "A", model: "B", variant: "C" }];
+  await lib.saveVariants(db, rows);
+  await lib.saveVariants(db, rows, { company: "National", collection: "insurerVariantNotFound" });
+  assert.deepEqual(written, [["insurerVariant", 1], ["insurerVariantNotFound", 1]]);
 });

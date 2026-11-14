@@ -377,3 +377,17 @@ test("the Make-alone retry never takes 'the first suggestion' when no line match
     assert.match(src, /typedText !== searchText\n/, file.join("/"));
   }
 });
+
+test("saveModels with another pair of collections writes only there (National's 'Not able to Find' lists); the default is unchanged", async () => {
+  const written = [];
+  const fake = (name) => ({
+    async insertOne(doc) { written.push([name, "insertOne", doc.make]); },
+    async insertMany(docs) { written.push([name, "insertMany", docs.length]); return { insertedCount: docs.length }; },
+  });
+  const db = { collection: (name) => fake(name) };
+  await lib.saveModels(db, [{ make: "HONDA", model: "DIO" }]);
+  assert.deepEqual(written.map((w) => w[0]), ["insurerMake", "insurerModel"], "the default lists");
+  written.length = 0;
+  await lib.saveModels(db, [{ make: "HONDA", model: "DIO" }], { company: "National", collections: { make: "insurerMakeNotFound", model: "insurerModelNotFound" } });
+  assert.deepEqual(written.map((w) => w[0]), ["insurerMakeNotFound", "insurerModelNotFound"]);
+});
