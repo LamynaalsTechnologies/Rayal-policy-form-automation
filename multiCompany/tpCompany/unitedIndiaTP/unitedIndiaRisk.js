@@ -17,9 +17,13 @@
  *                                retrieveURL after the manufacturer)  -> our row's MODEL
  *   (the owner's correction, 2026-11-06: "manufacturer is a make and make is a model" - e.g. HERO HONDA, then
  *   "CBZ(1999 - 2008)"). Both by the EXACT name (case and spaces do not count) - never a guess: the manufacturer list has
- *   "HONDA" and "HONDA_NONGICOUNCIL" side by side, and only the exact one is taken. No exact name: the run stops and its
- *   sentence lists what United India offers (similar names for the manufacturer, the whole list for the Make), not
- *   retried - the Make & Model row has to be corrected. (The Make & Model dialog offers United India's own names from the
+ *   "HONDA" and "HONDA_NONGICOUNCIL" side by side, and only the exact one is taken. Each list is filled by the portal itself
+ *   (the manufacturers after the Vehicle Class, the Makes after the manufacturer), so it is waited for first (20 s): a list
+ *   that has not arrived is "stayed empty" [E301, tried again], never "has no HONDA". No exact name in a loaded list: the
+ *   run stops and its sentence names what United India offers that is LIKE it (at most 15 names, then "and N more"; the
+ *   whole Make list only when it is that short), not retried - the Make & Model row has to be corrected (2026-11-13: the
+ *   owner's live run, HONDA / "ACTIVA 125 FI(2019 - 2023)@ALLOY BS VI"; HONDA has well over a hundred Makes). The run's
+ *   screenshot shows the page at the stop (runHandler). (The Make & Model dialog offers United India's own names from the
  *   Vehicle Model lists, which are kept by hand - the run never adds to them.)
  * Select Office, Motor (Liability Only), Business Source and Business Channel are filled by the portal and not touched.
  *
@@ -31,6 +35,7 @@ const { selectAndConfirm, waitForShown, clickAndConfirm, fillAndConfirm } = requ
 const { waitForLoader } = require("../../common/loader");
 const { readSelectInPage } = require("../../../lib/realSelect");
 const { MultiCompanyError } = require("../../common/errors");
+const { throwIfHeld } = require("../../../lib/holdStop");
 const { By } = require("selenium-webdriver");
 
 const VEHICLE_CLASS = "Motorcycle / Scooter";
@@ -54,7 +59,12 @@ function exactOption(state, wanted) {
   return realOptions(state).find((o) => nameKey(o.text) === key) || null;
 }
 
-/** Up to 15 manufacturer names like `wanted` ("HONDA" -> HONDA_NONGICOUNCIL, HONDA MOTORCYCLE ...), for the stop sentence. */
+/** At most this many names in a stop sentence (HONDA alone has well over a hundred Makes at United India). */
+const LIST_MAX = 15;
+/** How long a list filled by the portal's own onchange may take to arrive (a slow portal). */
+const LIST_WAIT_MS = 20000;
+
+/** Manufacturer names like `wanted` ("HONDA" -> HONDA_NONGICOUNCIL, HONDA MOTORCYCLE ...), for the stop sentence. */
 function similarNames(state, wanted) {
   const key = nameKey(wanted);
   const base = (t) => nameKey(t).replace(/(_NONGICOUNCIL)+$/, "");
@@ -64,11 +74,56 @@ function similarNames(state, wanted) {
     .filter((t) => {
       const b = base(t);
       return b.includes(key) || key.includes(b) || words.some((w) => b.split(/[ _]/).includes(w));
-    })
-    .slice(0, 15);
+    });
 }
 
-const listOf = (names) => names.map((n) => `"${String(n).replace(/:/g, " -")}"`).join(", ");
+/** The parts of a Make name with a letter in them, 2+ characters ("ACTIVA 7G STD" -> ACTIVA, 7G, STD; not "125"). */
+const modelTokens = (text) => nameKey(text).split(/[^A-Z0-9]+/).filter((w) => w.length >= 2 && /[A-Z]/.test(w));
+/** The words that make a name "like" another: 3+ characters ("CB SHINE" -> SHINE; "BS VI" alone is like nothing). */
+const modelWords = (text) => modelTokens(text).filter((w) => w.length >= 3);
+
+/**
+ * The portal's Make names (our Model) like `wanted`: those sharing a 3+ letter word with it, the ones sharing the most
+ * parts first (so "ACTIVA 7G" puts "ACTIVA 7G STD" before "ACTIVA 6G"), then in the portal's own order.
+ */
+function similarModelNames(state, wanted) {
+  const words = modelWords(wanted);
+  if (!words.length) return [];
+  const tokens = modelTokens(wanted);
+  return realOptions(state)
+    .map((o, i) => {
+      const own = modelTokens(o.text);
+      return { text: o.text, i, like: words.some((w) => own.includes(w)), shared: tokens.filter((w) => own.includes(w)).length };
+    })
+    .filter((x) => x.like)
+    .sort((a, b) => b.shared - a.shared || a.i - b.i)
+    .map((x) => x.text);
+}
+
+/** A name inside an operator sentence: no colon (beautifyError keeps only what follows the last one). */
+const say = (name) => String(name == null ? "" : name).replace(/:/g, " -");
+/** "A", "B", "C" - at most LIST_MAX, then "and N more". */
+const listOf = (names) => {
+  const shown = names.slice(0, LIST_MAX).map((n) => `"${say(n)}"`).join(", ");
+  return names.length > LIST_MAX ? `${shown} and ${names.length - LIST_MAX} more` : shown;
+};
+
+/**
+ * A list the portal fills by itself (the Vehicle Manufacturer after the Vehicle Class, the Make after the manufacturer):
+ * read until it has a real choice, at most LIST_WAIT_MS. Returns the last read - null when the box was never on the page,
+ * a list with no real choice when it stayed empty.
+ */
+async function waitForList(driver, selectId, o = {}) {
+  const { now, sleep } = { now: o.now || Date.now, sleep: o.sleep || ((d, ms) => d.sleep(ms)) };
+  const deadline = now() + LIST_WAIT_MS;
+  for (;;) {
+    throwIfHeld(driver);
+    const state = await driver.executeScript(readSelectInPage, selectId).catch(() => null);
+    if (state && realOptions(state).length) return state;
+    if (now() >= deadline) return state;
+    await sleep(driver, 250);
+  }
+}
 
 /**
  * Vehicle Manufacturer = the row's MAKE, then Make = the row's MODEL (the owner's correction, 2026-11-06), both exact.
@@ -77,38 +132,44 @@ const listOf = (names) => names.map((n) => `"${String(n).replace(/:/g, " -")}"`)
 async function chooseManufacturerAndMake(driver, data = {}, o = {}) {
   const log = o.log || ((line) => console.log(line));
   const stage = "united-india-risk";
-  const { now, sleep } = { now: o.now || Date.now, sleep: o.sleep || ((d, ms) => d.sleep(ms)) };
   const manufacturerWanted = nameKey(data.vehicleMake);
   const makeWanted = nameKey(data.vehicleModel);
 
-  // Vehicle Manufacturer
-  // (no list at all: selectAndConfirm below says the box is not on the page)
-  const manufacturers = await driver.executeScript(readSelectInPage, MANUFACTURER_ID).catch(() => null);
-  const hit = manufacturers ? exactOption(manufacturers, manufacturerWanted) : null;
-  if (manufacturers && !hit) {
+  // Vehicle Manufacturer: its list is filled after the Vehicle Class (populateManufacturer) - waited for, so a list that
+  // has not arrived yet is never reported as "has no HONDA" (that stop is not retried).
+  const manufacturers = await waitForList(driver, MANUFACTURER_ID, o);
+  if (!manufacturers) {
+    throw new MultiCompanyError(
+      "E301",
+      `United India - the "Vehicle Manufacturer" box is not on the Risk Details page (not visible after ${LIST_WAIT_MS / 1000} seconds), so the run stopped there. It will try again shortly.`,
+      { company: "united india", stage }
+    );
+  }
+  if (!realOptions(manufacturers).length) {
+    throw new MultiCompanyError(
+      "E301",
+      `United India - the Vehicle Manufacturer list stayed empty after the Vehicle Class was chosen (${LIST_WAIT_MS / 1000} seconds), so the run stopped there. It will try again shortly.`,
+      { company: "united india", stage }
+    );
+  }
+  const hit = exactOption(manufacturers, manufacturerWanted);
+  if (!hit) {
     const like = similarNames(manufacturers, manufacturerWanted);
     throw stateProblem(
-      `United India - Vehicle Manufacturer has no "${manufacturerWanted}" (the Make of this vehicle in the Make and Model master), so the run stopped there. ` +
+      `United India - Vehicle Manufacturer has no "${say(manufacturerWanted)}" (the Make of this vehicle in the Make and Model master), so the run stopped there. ` +
         (like.length ? `Names like it that United India offers are ${listOf(like)}. ` : "United India offers no name like it. ") +
         "Correct the Make of the United India Make and Model row, then run the policy again."
     );
   }
   const manufacturer = await selectAndConfirm(
     driver,
-    { label: "Vehicle Manufacturer", selectId: MANUFACTURER_ID, wanted: hit ? hit.text : manufacturerWanted, stage },
+    { label: "Vehicle Manufacturer", selectId: MANUFACTURER_ID, wanted: hit.text, stage },
     { ...o, log }
   );
   await waitForLoader(driver, "united india", { stage }); // retrieveURL() loads the Make list
 
-  // Make: its list is filled by retrieveURL() - wait for it (a slow portal gets 20 s), then the row's MAKE, exact
-  const deadline = now() + 20000;
-  let makes = null;
-  for (;;) {
-    makes = await driver.executeScript(readSelectInPage, MAKE_ID).catch(() => null);
-    if (makes && realOptions(makes).length) break;
-    if (now() >= deadline) break;
-    await sleep(driver, 250);
-  }
+  // Make: its list is filled by retrieveURL() - wait for it (a slow portal gets 20 s), then the row's MODEL, exact
+  const makes = await waitForList(driver, MAKE_ID, o);
   if (!makes) {
     throw new MultiCompanyError("E301", 'United India - the "Make" box is not on the Risk Details page, so the run stopped there. It will try again shortly.', {
       company: "united india",
@@ -124,9 +185,18 @@ async function chooseManufacturerAndMake(driver, data = {}, o = {}) {
   }
   const makeHit = exactOption(makes, makeWanted);
   if (!makeHit) {
+    // Only names like it (HONDA has well over a hundred), and the whole list only when it is short.
+    const all = realOptions(makes).map((x) => x.text);
+    const like = similarModelNames(makes, makeWanted);
+    const offers = like.length
+      ? `Names like it that United India offers for "${say(manufacturer.text)}" are ${listOf(like)}. `
+      : all.length <= LIST_MAX
+        ? `United India offers ${listOf(all)}. `
+        : `None of the ${all.length} names United India offers for "${say(manufacturer.text)}" is like it. `;
     throw stateProblem(
-      `United India - the Make list for "${manufacturer.text}" has no "${makeWanted}" (the Model of this vehicle in the Make and Model master), so the run stopped there. ` +
-        `United India offers ${listOf(realOptions(makes).map((x) => x.text))}. Correct the Model of the United India Make and Model row, then run the policy again.`
+      `United India - the Make list for "${say(manufacturer.text)}" has no "${say(makeWanted)}" (the Model of this vehicle in the Make and Model master), so the run stopped there. ` +
+        offers +
+        "Correct the Model of the United India Make and Model row, then run the policy again."
     );
   }
   const make = await selectAndConfirm(driver, { label: "Make", selectId: MAKE_ID, wanted: makeHit.text, stage }, { ...o, log });
@@ -309,6 +379,10 @@ module.exports = {
   stateKey,
   exactOption,
   similarNames,
+  similarModelNames,
+  waitForList,
+  LIST_MAX,
+  LIST_WAIT_MS,
   VEHICLE_CLASS,
   VEHICLE_CLASS_ID,
   REG_STATE_ID,

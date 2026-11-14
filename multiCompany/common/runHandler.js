@@ -34,10 +34,15 @@ const { failureResult } = require("./errors");
  * @param {"od"|"tp"} opts.policyType
  * @param {Object} opts.data   the job payload server.js hands every handler
  * @param {Function} opts.body async (ctx) => result | void. ctx = { driver,
- *   data, settings, jobId, log, capture, stop }. Call ctx.stop(msg, {stage})
+ *   data, settings, jobId, log, downloadDir, capture, stop }. Call ctx.stop(msg, {stage})
  *   to end the run deliberately.
+ * @param {boolean} [opts.screenshotOnStop=false] a deliberate stop (ctx.stop,
+ *   the Breaker) gets a screenshot too, like a failure - United India (the
+ *   owner, 2026-11-13: "every error want to take the screenshot"). A Hold
+ *   never does: it is the operator's own choice, not something that went
+ *   wrong. Off for the others: their stops stay as they were.
  */
-async function runHandler({ company, policyType, data = {}, body }) {
+async function runHandler({ company, policyType, data = {}, body, screenshotOnStop = false }) {
   assertMultiCompanyEnabled();
 
   const jobId = `${policyType}_${company}_${data.firstName || "Job"}_${Date.now()}`;
@@ -73,6 +78,8 @@ async function runHandler({ company, policyType, data = {}, body }) {
       settings: data.settings || null,
       jobId,
       log,
+      // where this job's browser saves its downloads (its own throwaway profile; a file to keep is uploaded from here)
+      downloadDir: (jobBrowser.profileInfo && jobBrowser.profileInfo.downloadDir) || null,
       capture: (name, stage) => captureFailure(driver, { company, jobId, attempt }, stage || name),
       stop: stopper,
     };
@@ -87,7 +94,13 @@ async function runHandler({ company, policyType, data = {}, body }) {
     if (!isAutomationStop(error) && liveHoldStopOf(data)) error = liveHoldStopOf(data);
     hadError = !isHoldStop(error);
     if (isAutomationStop(error)) {
-      return stoppedResult(error, { _jobBrowser: jobBrowser });
+      // the page as it was at the stop (one picture per attempt, like a failure's)
+      const shot =
+        screenshotOnStop && jobBrowser && !isHoldStop(error)
+          ? await captureFailure(jobBrowser.driver, { company, jobId, attempt })
+          : {};
+      if (shot.screenshotUrl) console.log(`📸 [${jobId}] ${company} ${policyType.toUpperCase()} - screenshot of the page at the stop saved`);
+      return stoppedResult(error, { _jobBrowser: jobBrowser, ...shot });
     }
     const shot = jobBrowser
       ? await captureFailure(jobBrowser.driver, { company, jobId, attempt })

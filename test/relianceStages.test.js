@@ -59,6 +59,7 @@ test("planResume: an old policy (no stages) starts from the proposal, exactly as
     skipPayment: false,
     proposalNumber: null,
     proposalLink: null,
+    referenceDate: null,
     startAt: "proposal",
   });
   assert.equal(core.planResume(null).startAt, "proposal");
@@ -66,17 +67,26 @@ test("planResume: an old policy (no stages) starts from the proposal, exactly as
 
 test("planResume: stage 1 done WITH its number -> the KYC; without a number -> the proposal again", () => {
   const atKyc = core.planResume(core.stagesFor(policyWith({ proposal: { status: "completed", proposalNumber: " R141026119597 " } }), "motor"));
-  assert.deepEqual(atKyc, { skipProposal: true, skipKyc: false, skipPayment: false, proposalNumber: "R141026119597", proposalLink: null, startAt: "kyc" });
+  assert.deepEqual(atKyc, { skipProposal: true, skipKyc: false, skipPayment: false, proposalNumber: "R141026119597", proposalLink: null, referenceDate: null, startAt: "kyc" });
   const noNumber = core.planResume(core.stagesFor(policyWith({ proposal: { status: "completed" } }), "motor"));
   assert.equal(noNumber.startAt, "proposal");
   const failed = core.planResume(core.stagesFor(policyWith({ proposal: { status: "failed", proposalNumber: "R1" } }), "motor"));
   assert.equal(failed.startAt, "proposal");
 });
 
+test("planResume: United India - the saved Reference Date comes with the number (Proposal Modification lists by it); none saved = null", () => {
+  const ui = core.planResume(core.stagesFor(policyWith({ proposal: { status: "completed", proposalNumber: "202611131375485", referenceDate: " 13/11/2026 " } }), "motor"));
+  assert.equal(ui.startAt, "kyc");
+  assert.equal(ui.proposalNumber, "202611131375485");
+  assert.equal(ui.referenceDate, "13/11/2026");
+  assert.equal(core.planResume(core.stagesFor(policyWith({ proposal: { status: "completed", proposalNumber: "202611131375485" } }), "motor")).referenceDate, null);
+  assert.equal(core.planResume(core.stagesFor(policyWith({ proposal: { status: "pending", referenceDate: "13/11/2026" } }), "motor")).referenceDate, null, "only a completed proposal's date");
+});
+
 test("planResume: KSHEMA - stage 1 done WITH its saved page link (no number) -> the KYC; a blank link -> the proposal again", () => {
   const link = "https://portal.example/Proposal/Edit/77";
   const atKyc = core.planResume(core.stagesFor(policyWith({ proposal: { status: "completed", link: ` ${link} ` } }), "motor"));
-  assert.deepEqual(atKyc, { skipProposal: true, skipKyc: false, skipPayment: false, proposalNumber: null, proposalLink: link, startAt: "kyc" });
+  assert.deepEqual(atKyc, { skipProposal: true, skipKyc: false, skipPayment: false, proposalNumber: null, proposalLink: link, referenceDate: null, startAt: "kyc" });
   const atPay = core.planResume(core.stagesFor(policyWith({ proposal: { status: "completed", link }, kyc: { status: "completed" } }), "motor"));
   assert.equal(atPay.startAt, "payment");
   assert.equal(core.planResume(core.stagesFor(policyWith({ proposal: { status: "completed", link: "  " } }), "motor")).startAt, "proposal");
@@ -95,6 +105,7 @@ test("planResume: KYC done -> the payment; a failed KYC is done again (same prop
     skipPayment: false,
     proposalNumber: "R1",
     proposalLink: null,
+    referenceDate: null,
     startAt: "kyc",
   });
   assert.equal(core.planResume(core.stagesFor(policyWith(paid), "motor")).skipPayment, false, "all done: the link is sent again");
@@ -111,6 +122,7 @@ test("planResume: KYC set back on a PAID policy -> only the KYC runs (skipPaymen
     skipPayment: true,
     proposalNumber: "R1",
     proposalLink: null,
+    referenceDate: null,
     startAt: "kyc",
   });
   const notPaid = { ...kycOnly, payment: { status: "pending" } };

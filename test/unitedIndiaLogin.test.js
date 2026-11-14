@@ -339,7 +339,7 @@ test("the portal's error box is read for United India (#loginError first)", asyn
 /* ------------------------------------------------------------------------------------------------------------------ */
 
 /** The handler with runHandler replaced by one that hands back its options (no browser is opened). */
-function handlerOptions(data = {}, deps = { openMenu: async () => ({ url: "menu-faked" }), chooseProduct: async () => ({ product: "Liability Only Policy" }), fillRisk: async () => ({}) }) {
+function handlerOptions(data = {}, deps = { openMenu: async () => ({ url: "menu-faked" }), chooseProduct: async () => ({ product: "Liability Only Policy" }), fillRisk: async () => ({}), fillDates: async () => ({}), answerQuestions: async () => ({}), fillInsured: async () => ({}), fillPin: async () => ({}), fillContact: async () => ({}), chooseRto: async () => ({}), openMore: async () => ({}), fillTppd: async () => ({}), fillPa: async () => ({}), compute: async () => ({}), quote: async () => ({}), proposal: async () => ({}), kyc: async () => null }) {
   require("../breaker"); // the global Breaker, as runHandler loads it
   const runHandlerPath = require.resolve("../multiCompany/common/runHandler");
   const handlerPath = require.resolve("../multiCompany/tpCompany/unitedIndiaTP/unitedIndiaTP");
@@ -347,8 +347,8 @@ function handlerOptions(data = {}, deps = { openMenu: async () => ({ url: "menu-
   delete require.cache[handlerPath];
   require.cache[runHandlerPath] = { id: runHandlerPath, filename: runHandlerPath, loaded: true, exports: { runHandler: (opts) => opts } };
   try {
-    const { fillUnitedIndiaTP, NOT_BUILT } = require(handlerPath);
-    return { opts: fillUnitedIndiaTP(data, deps), NOT_BUILT };
+    const handler = require(handlerPath);
+    return { opts: handler.fillUnitedIndiaTP(data, deps), NOT_BUILT: handler.NOT_BUILT, handler };
   } finally {
     if (saved) require.cache[runHandlerPath] = saved;
     else delete require.cache[runHandlerPath];
@@ -392,6 +392,19 @@ test("with BREAKER_ENABLED=true and BREAKER_STOP_AT=stopthis-location it stops a
     openMenu: async (driver, o) => menuCalls.push({ step: "menu", driver, log: typeof o.log }),
     chooseProduct: async (driver, o) => menuCalls.push({ step: "product", driver, log: typeof o.log }),
     fillRisk: async (driver, data, o) => menuCalls.push({ step: "risk", driver, data, log: typeof o.log }),
+    fillDates: async (driver, o) => menuCalls.push({ step: "dates", driver, log: typeof o.log }),
+    answerQuestions: async (driver, o) => menuCalls.push({ step: "questions", driver, log: typeof o.log }),
+    fillInsured: async (driver, data, o) => menuCalls.push({ step: "insured", driver, data, log: typeof o.log }),
+    fillPin: async (driver, data, o) => menuCalls.push({ step: "pin", driver, data, log: typeof o.log }),
+    fillContact: async (driver, data, o) => menuCalls.push({ step: "contact", driver, data, log: typeof o.log }),
+    chooseRto: async (driver, data, o) => menuCalls.push({ step: "rto", driver, data, log: typeof o.log }),
+    openMore: async (driver, o) => menuCalls.push({ step: "more-covers", driver, log: typeof o.log }),
+    fillTppd: async (driver, data, o) => menuCalls.push({ step: "tppd", driver, data, log: typeof o.log }),
+    fillPa: async (driver, data, o) => menuCalls.push({ step: "pa", driver, data, log: typeof o.log }),
+    compute: async (driver, o) => menuCalls.push({ step: "compute", driver, log: typeof o.log }),
+    quote: async (driver, data, o) => menuCalls.push({ step: "quote", driver, data, log: typeof o.log, downloadDir: o.downloadDir, jobId: o.jobId }),
+    proposal: async (driver, data, o) => menuCalls.push({ step: "proposal", driver, data, log: typeof o.log, jobId: o.jobId }),
+    kyc: async (driver, data, how, o) => menuCalls.push({ step: "kyc", driver, data, how, log: typeof o.log }),
   });
   const { lines, ctx } = handlerCtx();
   await withEnv({ BREAKER_ENABLED: "true", BREAKER_STOP_AT: "stopthis-location" }, async () => {
@@ -411,9 +424,68 @@ test("with BREAKER_ENABLED=true and BREAKER_STOP_AT=stopthis-location it stops a
       { step: "menu", driver: ctx.driver, log: "function" },
       { step: "product", driver: ctx.driver, log: "function" },
       { step: "risk", driver: ctx.driver, data: ctx.data, log: "function" },
+      { step: "dates", driver: ctx.driver, log: "function" },
+      { step: "questions", driver: ctx.driver, log: "function" },
+      { step: "insured", driver: ctx.driver, data: ctx.data, log: "function" },
+      { step: "pin", driver: ctx.driver, data: ctx.data, log: "function" },
+      { step: "contact", driver: ctx.driver, data: ctx.data, log: "function" },
+      { step: "rto", driver: ctx.driver, data: ctx.data, log: "function" },
+      { step: "more-covers", driver: ctx.driver, log: "function" },
+      { step: "tppd", driver: ctx.driver, data: ctx.data, log: "function" },
+      { step: "pa", driver: ctx.driver, data: ctx.data, log: "function" },
+      { step: "compute", driver: ctx.driver, log: "function" },
+      { step: "quote", driver: ctx.driver, data: ctx.data, log: "function", downloadDir: ctx.downloadDir, jobId: ctx.jobId },
+      { step: "proposal", driver: ctx.driver, data: ctx.data, log: "function", jobId: ctx.jobId },
+      { step: "kyc", driver: ctx.driver, data: ctx.data, how: { modify: false, ifShown: true }, log: "function" },
     ],
-    "the menu, the product, then Risk Details (with the job data), on the logged-in browser - before the Breaker"
+    "the menu, the product, Risk Details (with the job data), the dates, PUC / Delhi - NCR, the insured, the Pin Code, the contact details, the RTO, More Covers, then the TPPD Limit (with the job data), on the logged-in browser - before the Breaker"
   );
+});
+
+test("Generate Quote not there after Compute Premium: the Quote / Worksheet tried again AFTER Update; never there = a warning, not a failure", async () => {
+  const calls = [];
+  const quoteFake = (answers) => async (driver, data, o) => {
+    calls.push(`quote ${o.where} ifShown=${o.ifShown}`);
+    return answers.shift();
+  };
+  const deps = (answers) => ({
+    openMenu: async () => {},
+    chooseProduct: async () => {},
+    fillRisk: async () => {},
+    fillDates: async () => {},
+    answerQuestions: async () => {},
+    fillInsured: async () => {},
+    fillPin: async () => {},
+    fillContact: async () => {},
+    chooseRto: async () => {},
+    openMore: async () => {},
+    fillTppd: async () => {},
+    fillPa: async () => {},
+    compute: async () => {},
+    quote: quoteFake(answers),
+    proposal: async () => {
+      calls.push("proposal");
+      return { proposalNumber: "202611131194829" };
+    },
+    kyc: async () => null,
+  });
+  for (const [answers, want, warned] of [
+    [[{ quotePdf: {} }], ["quote after Compute Premium ifShown=true", "proposal"], false],
+    [[null, { quotePdf: {} }], ["quote after Compute Premium ifShown=true", "proposal", "quote after Update ifShown=true"], false],
+    [[null, null], ["quote after Compute Premium ifShown=true", "proposal", "quote after Update ifShown=true"], true],
+  ]) {
+    calls.length = 0;
+    const { opts } = handlerOptions({}, deps(answers));
+    const { lines, ctx } = handlerCtx();
+    await withEnv({ BREAKER_ENABLED: "false" }, async () => {
+      await assert.rejects(opts.body(ctx), (e) => {
+        if (typeof e.acknowledge === "function") e.acknowledge();
+        return require("../automationStopper").isAutomationStop(e);
+      });
+    });
+    assert.deepEqual(calls, want);
+    assert.equal(lines.some((l) => /Generate Quote was not on the page before or after Update - the Quote PDF and Worksheet were not kept/.test(l)), warned);
+  }
 });
 
 test("a menu step that fails is a failure, not a Breaker stop (the Breaker is never reached)", async () => {
@@ -431,11 +503,11 @@ test("without the Breaker it still stops after the product's Submit: the rest is
     await assert.rejects(opts.body(ctx), (e) => {
       const { isAutomationStop, stoppedResult } = require("../automationStopper");
       assert.ok(isAutomationStop(e));
-      assert.equal(e.message, NOT_BUILT);
+      assert.equal(e.message, `${NOT_BUILT} (no Update Ckyc button on the page after Update)`);
       const result = stoppedResult(e);
       assert.equal(result.retryable, false);
       assert.equal(result.stage, "risk-details");
-      assert.match(NOT_BUILT, /New Vehicle, Chassis, Engine Number, Vehicle Manufacturer and Make entered/);
+      assert.match(NOT_BUILT, /New Vehicle, Chassis, Engine Number, Vehicle Manufacturer, Make, Date of Purchase, Month and Year of Manufacture, Valid PUC \(Yes\), Delhi - NCR \(No\), Client Type, High Risk \(No\), Title, Insured Name, Address, Pin Code \(State and District filled\), Mobile, Email, Date of Birth and RTO entered, More Covers N Info opened, TPPD Limit and PA Cover set, back on Risk Details and Compute Premium done, Quote PDF and Worksheet kept, Update pressed and the proposal saved, the KYC is not built yet/);
       assert.equal(result.inProgress, true);
       return true;
     });
@@ -516,4 +588,335 @@ test("the profile folder: one per run under cloned_profiles_united_india, no spa
     process.chdir(cwd);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+/* ------------------------------------------------------------------------------------------------------------------ */
+/* a proposal made before: opened from Proposal Modification, never made again (the owner, 2026-11-13)                */
+/* ------------------------------------------------------------------------------------------------------------------ */
+
+const resumeDeps = (plan, calls) => {
+  const step = (name) => async (...args) => {
+    calls.push(name === "openSaved" ? `${name} ${args[1].proposalNumber} ${args[1].referenceDate}` : name);
+    return {};
+  };
+  return {
+    loadPlan: async (data, o) => {
+      calls.push(`loadPlan ${o.jobId}`);
+      return plan;
+    },
+    openModification: step("openModification"),
+    openSaved: step("openSaved"),
+    setStartDate: step("setStartDate"),
+    setHighRisk: step("setHighRisk"),
+    kyc: async (driver, data, how) => {
+      calls.push(`kyc modify=${how.modify} ifShown=${!!how.ifShown}`);
+      return how.modify ? { said: ["KYC details saved successfully"], page: {}, aadhaar: "XXXXXXXX1234" } : null;
+    },
+    openMenu: step("openMenu"),
+    chooseProduct: step("chooseProduct"),
+    fillRisk: step("fillRisk"),
+    fillDates: step("fillDates"),
+    answerQuestions: step("answerQuestions"),
+    fillInsured: step("fillInsured"),
+    fillPin: step("fillPin"),
+    fillContact: step("fillContact"),
+    chooseRto: step("chooseRto"),
+    openMore: step("openMore"),
+    fillTppd: step("fillTppd"),
+    fillPa: step("fillPa"),
+    compute: step("compute"),
+    quote: step("quote"),
+    proposal: step("proposal"),
+  };
+};
+
+test("a proposal made before: Proposal Modification -> High Risk No -> More Covers -> TPPD -> PA -> Back + Compute, then the stop; NO new proposal", async () => {
+  const calls = [];
+  const { opts } = handlerOptions({}, resumeDeps({ skipProposal: true, proposalNumber: "202611131375485", referenceDate: "13/11/2026", startAt: "kyc" }, calls));
+  const { lines, ctx } = handlerCtx();
+  await withEnv({ BREAKER_ENABLED: "false" }, async () => {
+    await assert.rejects(opts.body(ctx), (e) => {
+      const { isAutomationStop } = require("../automationStopper");
+      assert.ok(isAutomationStop(e));
+      assert.equal(
+        e.message,
+        'United India - the proposal was made before, so it was opened from Proposal Modification (not made again), Policy Start Date today, High Risk (No), More Covers N Info, TPPD Limit and PA Cover set again, Compute Premium and Modify done, the CKYC window opened, Offline KYC with the Aadhaar card (Verified, Same as above) entered and Save pressed; what comes after Save is not built yet - proposal 202611131375485 of 13/11/2026 - United India said "KYC details saved successfully"'
+      );
+      if (typeof e.acknowledge === "function") e.acknowledge();
+      return true;
+    });
+  });
+  assert.deepEqual(calls, [
+    "loadPlan tp_united india_A_1",
+    "openModification",
+    "openSaved 202611131375485 13/11/2026",
+    "setStartDate",
+    "setHighRisk",
+    "openMore",
+    "fillTppd",
+    "fillPa",
+    "compute",
+    "kyc modify=true ifShown=false",
+  ]);
+  assert.ok(lines.some((l) => /📌 United India - proposal 202611131375485 of 13\/11\/2026 was made before - opening it from Proposal Modification \(not making a new one\)/.test(l)));
+});
+
+test("a proposal made before WITHOUT its Reference Date: [E306] at once, not retried, nothing clicked", async () => {
+  const calls = [];
+  const { opts } = handlerOptions({}, resumeDeps({ skipProposal: true, proposalNumber: "202611131375485", referenceDate: null, startAt: "kyc" }, calls));
+  const { ctx } = handlerCtx();
+  await assert.rejects(opts.body(ctx), (e) => {
+    assert.equal(e.code, "E306");
+    assert.equal(e.retryable, false);
+    assert.match(e.message, /proposal 202611131375485 is saved without its Reference Date, so it cannot be found in Proposal Modification and the run stopped there\. Add the Reference Date in Edit -> Status, then run the policy again\./);
+    return true;
+  });
+  assert.deepEqual(calls, ["loadPlan tp_united india_A_1"]);
+});
+
+test("no proposal yet (or one without a number): the full form as before - Proposal Modification is never opened", async () => {
+  for (const plan of [{ skipProposal: false, proposalNumber: null, startAt: "proposal" }, null]) {
+    const calls = [];
+    const { opts } = handlerOptions({}, resumeDeps(plan, calls));
+    const { ctx } = handlerCtx();
+    await withEnv({ BREAKER_ENABLED: "false" }, async () => {
+      await assert.rejects(opts.body(ctx), (e) => {
+        if (typeof e.acknowledge === "function") e.acknowledge();
+        return true;
+      });
+    });
+    assert.ok(!calls.includes("openModification") && !calls.includes("openSaved"), calls.join());
+    assert.deepEqual(calls.slice(0, 3), ["loadPlan tp_united india_A_1", "openMenu", "chooseProduct"]);
+    assert.ok(calls.includes("proposal"));
+    assert.equal(calls[calls.length - 1], "kyc modify=false ifShown=true", "a new proposal: the KYC only when its page offers it");
+  }
+});
+
+test("a NEW proposal whose page offers Update Ckyc: the KYC done after Update, the stop says so (with United India's words)", async () => {
+  const calls = [];
+  const deps = resumeDeps(null, calls);
+  deps.proposal = async () => ({ proposalNumber: "202611131394000", referenceDate: "13/11/2026" });
+  deps.kyc = async (driver, data, how) => {
+    calls.push(`kyc modify=${how.modify} ifShown=${!!how.ifShown}`);
+    return { said: [], page: {}, aadhaar: "XXXXXXXX1234" };
+  };
+  const { opts, handler } = handlerOptions({}, deps);
+  const { ctx } = handlerCtx();
+  await withEnv({ BREAKER_ENABLED: "false" }, async () => {
+    await assert.rejects(opts.body(ctx), (e) => {
+      assert.equal(e.message, `${handler.NEW_WITH_KYC} - proposal 202611131394000 of 13/11/2026`);
+      assert.match(e.message, /Update pressed and the proposal saved, the CKYC window opened, Offline KYC with the Aadhaar card \(Verified, Same as above\) entered and Save pressed; what comes after Save is not built yet/);
+      if (typeof e.acknowledge === "function") e.acknowledge();
+      return true;
+    });
+  });
+  assert.equal(calls[calls.length - 1], "kyc modify=false ifShown=true");
+});
+
+test("KYC: the policy's Aadhaar number is checked BEFORE anything is clicked; it shows only as XXXXXXXX1234", async () => {
+  const k = require("../multiCompany/tpCompany/unitedIndiaTP/unitedIndiaKyc");
+  const untouched = { executeScript: async () => assert.fail("the page was touched"), findElements: async () => assert.fail("the page was touched") };
+  for (const [data, why] of [
+    [{}, /the policy has no Aadhaar number, so the KYC cannot be done/],
+    [{ aadharNumber: "1234 5678 901" }, /the Aadhaar number on the policy \(XXXXXXX8901\) is not 12 digits/],
+  ]) {
+    await assert.rejects(k.unitedIndiaKyc(untouched, data, { modify: true }, { log: () => {} }), (e) => e.code === "E306" && e.retryable === false && why.test(e.message) && /Read Aadhaar & fill details/.test(e.message));
+  }
+  assert.equal(k.aadhaarOf({ aadharNumber: "1234 5678 9012" }), "123456789012");
+  assert.equal(k.aadhaarOf({ formData: { aadharNumber: "123456789012" } }), "123456789012");
+  assert.equal(k.maskAadhaar("123456789012"), "XXXXXXXX9012");
+  assert.equal(k.kycDataProblem({ aadharNumber: "123456789012" }), null);
+  // the owner's answers and buttons
+  assert.equal(k.PROOF.answer, "Aadhaar card");
+  assert.equal(k.VERIFICATION.answer, "Verified");
+  assert.ok(k.CONFIRMATION.test("GSTIN/UIN HAS NOT BEEN INSERTED ... Do you want to proceed?"));
+  assert.ok(!k.CONFIRMATION.test("Please select the Zone"), "an error popup is never just pressed OK after Modify");
+  assert.ok(k.MODIFY.target.every((t) => !String(t.value || t).includes("#updt")), "Modify by its picture, not by id=updt");
+});
+
+test("Proposal Modification: a saved proposal that cannot be looked up stops BEFORE the page is touched; OUR row only counts when it alone is checked", async () => {
+  const pm = require("../multiCompany/tpCompany/unitedIndiaTP/unitedIndiaProposalModification");
+  const untouched = { executeScript: async () => assert.fail("the page was touched"), findElements: async () => assert.fail("the page was touched") };
+  for (const [number, date] of [["R141026119597", "13/11/2026"], ["202611131375485", "2026-11-13"], ["202611131375485", ""]]) {
+    await assert.rejects(pm.openSavedProposal(untouched, { proposalNumber: number, referenceDate: date }, { log: () => {} }), (e) => e.code === "E306" && e.retryable === false && /cannot be looked up/.test(e.message));
+  }
+  const listing = (rows) => ({ executeScript: async (fn) => (fn === pm.readProposalListInPage ? { table: true, rows, checked: rows.filter((r) => r.checked).length } : null) });
+  const row = (number, checked) => ({ option: "0", number, date: "13/11/2026", name: "ANMOL", premium: "4545", checked });
+  assert.equal(await pm.ourRowChecked(listing([row("202611131393359", true), row("202611131375485", false)]), "202611131375485"), false, "the portal's pre-selected first row is NOT ours");
+  assert.equal(await pm.ourRowChecked(listing([row("202611131393359", false), row("202611131375485", true)]), "202611131375485"), true);
+  assert.equal(await pm.ourRowChecked(listing([row("202611131393359", true), row("202611131375485", true)]), "202611131375485"), false, "two checked = not sure");
+  assert.equal(await pm.ourRowChecked(listing([]), "202611131375485"), false);
+  // Next is found by its name, never by id="updt" (the Risk Details page's Update picture has that id too)
+  assert.ok(pm.NEXT.target.every((t) => !String(t.value || t).includes("#updt")));
+  assert.equal(pm.LIST_WAIT_MS, 20000);
+});
+
+test("KYC already done (Offline KYC disabled - the owner's live run): the part's KYC step = completed, offline, with the Result and Customer Id; a failed write is said, never a failure", async () => {
+  const k = require("../multiCompany/tpCompany/unitedIndiaTP/unitedIndiaKyc");
+  const marked = [];
+  const lines = [];
+  const ok = await k.markKycDone(
+    { _id: "6650aa", _partKey: "tp" },
+    { result: "Offline KYC Done", customerId: "23676065442", offlineDisabled: true },
+    { log: (l) => lines.push(l), jobId: "j1", deps: { markStage: async (data, stage, status, extra, opts) => (marked.push({ stage, status, extra, opts }), true) } }
+  );
+  assert.equal(ok, true);
+  assert.deepEqual(marked, [{ stage: "kyc", status: "completed", extra: { mode: "offline", result: "Offline KYC Done", customerId: "23676065442" }, opts: { jobId: "j1", insurer: "United India" } }]);
+  assert.ok(lines.some((l) => /✅ United India - KYC step = completed on the policy/.test(l)));
+  const failed = await k.markKycDone({}, {}, { log: (l) => lines.push(l), deps: { markStage: async () => { throw new Error("db down"); } } });
+  assert.equal(failed, false);
+  assert.ok(lines.some((l) => /the KYC is done at United India, but the KYC step could not be saved on the policy - set it to Completed by hand in Edit -> Status/.test(l)));
+});
+
+test("the stop says what the KYC found: already done / done by Save / Save only", async () => {
+  const { handler } = handlerOptions();
+  assert.equal(
+    handler.kycWords({ alreadyDone: true, result: "Offline KYC Done", stepSaved: true }),
+    'the CKYC window opened - the KYC was already done at United India (Offline KYC disabled, "Offline KYC Done"), KYC step = completed; what comes after the KYC is not built yet'
+  );
+  assert.match(handler.kycWords({ kycDone: true, result: "Offline KYC Done", stepSaved: true }), /Save pressed - the KYC is done \(Offline KYC disabled, "Offline KYC Done"\), KYC step = completed; what comes after the KYC is not built yet$/);
+  assert.equal(handler.kycWords({ said: [] }), handler.KYC_DONE, "Save only: the KYC step is left as it is");
+  assert.match(handler.kycWords({ alreadyDone: true, stepSaved: false }), /the KYC step could NOT be saved \(set it to Completed in Edit -> Status\)/);
+  assert.match(handler.kycWords({ alreadyDone: true, stepSaved: true, closed: "button" }), /KYC step = completed, the CKYC window closed; what comes after the KYC/);
+  assert.match(handler.kycWords({ kycDone: true, stepSaved: true, closed: "run" }), /KYC step = completed, the CKYC window closed \(by the run - its Close did not\); what comes after the KYC/);
+
+  // on a resume the handler stops with it
+  const calls = [];
+  const deps = resumeDeps({ skipProposal: true, proposalNumber: "202611131375485", referenceDate: "13/11/2026", startAt: "kyc" }, calls);
+  deps.kyc = async () => ({ alreadyDone: true, kycDone: true, result: "Offline KYC Done", stepSaved: true, said: [] });
+  const { opts } = handlerOptions({}, deps);
+  const { ctx } = handlerCtx();
+  await withEnv({ BREAKER_ENABLED: "false" }, async () => {
+    await assert.rejects(opts.body(ctx), (e) => {
+      assert.equal(e.message, `${handler.RESUME_BASE}, the CKYC window opened - the KYC was already done at United India (Offline KYC disabled, "Offline KYC Done"), KYC step = completed; what comes after the KYC is not built yet - proposal 202611131375485 of 13/11/2026`);
+      if (typeof e.acknowledge === "function") e.acknowledge();
+      return true;
+    });
+  });
+});
+
+test("the proposal kept FRESH: the list's moved Reference Date (date only), then after Modify the page's number + date (+ transaction, customer) - a NEW number taken too", async () => {
+  const calls = [];
+  const dates = [];
+  const fresh = [];
+  const deps = resumeDeps({ skipProposal: true, proposalNumber: "202611131393359", referenceDate: "13/11/2026", startAt: "kyc" }, calls);
+  deps.openSaved = async () => ({ row: { number: "202611131393359", date: "14/11/2026" } });
+  deps.saveDate = async (data, d) => (dates.push(`${d.proposalNumber} ${d.referenceDate}`), true);
+  deps.saveFresh = async (data, { was, fresh: f }) => (fresh.push(`${was} -> ${f.proposalNumber} ${f.referenceDate} ${f.transactionNo || "-"} ${f.customerId || "-"}`), true);
+  deps.kyc = async (driver, data, how, o) => {
+    await o.onModified({}); // a page without the block: the saved proposal kept
+    await o.onModified({ proposalNumber: "202611141761445", referenceDate: "14/11/2026", transactionNo: "GC202611140155999999", customerId: "23676065442" });
+    return { said: [] };
+  };
+  const { opts } = handlerOptions({}, deps);
+  const { lines, ctx } = handlerCtx();
+  await withEnv({ BREAKER_ENABLED: "false" }, async () => {
+    await assert.rejects(opts.body(ctx), (e) => {
+      assert.match(e.message, / - proposal 202611141761445 of 14\/11\/2026$/, "the stop names the fresh proposal");
+      if (typeof e.acknowledge === "function") e.acknowledge();
+      return true;
+    });
+  });
+  assert.deepEqual(dates, ["202611131393359 14/11/2026"], "the list's moved date, for the same number");
+  assert.deepEqual(fresh, ["202611131393359 -> 202611141761445 14/11/2026 GC202611140155999999 23676065442"]);
+  assert.ok(lines.some((l) => /the page after Modify shows no proposal number and Reference Date - proposal 202611131393359 of 14\/11\/2026 is kept/.test(l)));
+  assert.ok(lines.some((l) => /📄 United India - after Modify the page shows proposal 202611141761445 of 14\/11\/2026 \(a NEW number - it was 202611131393359\) - saved on the policy/.test(l)));
+
+  // a write that fails is said, never a failure
+  const deps2 = resumeDeps({ skipProposal: true, proposalNumber: "202611131393359", referenceDate: "13/11/2026", startAt: "kyc" }, []);
+  deps2.saveFresh = async () => false;
+  deps2.kyc = async (driver, data, how, o) => {
+    await o.onModified({ proposalNumber: "202611131393359", referenceDate: "14/11/2026" });
+    return { said: [] };
+  };
+  const second = handlerOptions({}, deps2);
+  const run2 = handlerCtx();
+  await withEnv({ BREAKER_ENABLED: "false" }, async () => {
+    await assert.rejects(second.opts.body(run2.ctx), (e) => {
+      if (typeof e.acknowledge === "function") e.acknowledge();
+      return require("../automationStopper").isAutomationStop(e);
+    });
+  });
+  assert.ok(run2.lines.some((l) => /⚠️ United India - after Modify the page shows proposal 202611131393359 of 14\/11\/2026 - it could not be saved on the policy, correct it in Edit -> Status/.test(l)));
+});
+
+test("United India's Error In Data Entry box the FIRST time (its wrong '(0)null'): the save-free steps once more, the page opened again by its address; the SECOND time = [E306]", async () => {
+  const nav = require("../multiCompany/tpCompany/unitedIndiaTP/unitedIndiaNavigate");
+  const boom = () => nav.portalDataError("Next", ["(0)null"], "united-india-proposal-modification");
+  const plan = { skipProposal: true, proposalNumber: "202611131375485", referenceDate: "13/11/2026", startAt: "kyc" };
+  for (const [times, wantStop] of [
+    [1, true],
+    [2, false],
+  ]) {
+    const calls = [];
+    const deps = resumeDeps(plan, calls);
+    deps.openModification = async (driver, o) => (calls.push(`openModification ${o.directUrl || "menu"}`), { url: "https://uiic/proposalModification.do?parameter=proposalModify" });
+    let failures = times;
+    deps.openSaved = async () => {
+      calls.push("openSaved");
+      if (failures-- > 0) throw boom();
+      return {};
+    };
+    const { opts } = handlerOptions({}, deps);
+    const { lines, ctx } = handlerCtx();
+    await withEnv({ BREAKER_ENABLED: "false" }, async () => {
+      await assert.rejects(opts.body(ctx), (e) => {
+        if (wantStop) {
+          assert.ok(require("../automationStopper").isAutomationStop(e), e.message);
+          if (typeof e.acknowledge === "function") e.acknowledge();
+        } else {
+          assert.equal(e.code, "E306");
+          assert.equal(e.retryable, false);
+          assert.match(e.message, /after "Next" the portal says "Error In Data Entry - \(0\)null" a second time \(the run had done it all once more\), so the run stopped there/);
+        }
+        return true;
+      });
+    });
+    assert.deepEqual(calls.slice(1, 5), ["openModification menu", "openSaved", "openModification https://uiic/proposalModification.do?parameter=proposalModify", "openSaved"]);
+    assert.ok(lines.some((l) => /⚠️ United India - after "Next" the portal said "Error In Data Entry - \(0\)null" - it sometimes shows a wrong error, so the proposal is opened from Proposal Modification and filled once more/.test(l)));
+    if (wantStop) assert.ok(calls.includes("kyc modify=true ifShown=false"), "then on to the KYC");
+    else assert.ok(!calls.some((c) => c.startsWith("kyc")), "nothing after the second box");
+  }
+});
+
+test("a new proposal: the box the first time = the form once more from Make New/Renew Policy by its address; other errors are never redone", async () => {
+  const nav = require("../multiCompany/tpCompany/unitedIndiaTP/unitedIndiaNavigate");
+  const calls = [];
+  const deps = resumeDeps(null, calls);
+  deps.openMenu = async (driver, o) => (calls.push(`openMenu ${o.directUrl || "menu"}`), { url: "https://uiic/MenuAction.do?method=strbtn" });
+  let once = 1;
+  deps.compute = async () => {
+    calls.push("compute");
+    if (once-- > 0) throw nav.portalDataError("Compute Premium", ["N002219, PolicyInception Date should be on or later to Proposal Date ."], "united-india-premium");
+  };
+  const { opts } = handlerOptions({}, deps);
+  const { lines, ctx } = handlerCtx();
+  await withEnv({ BREAKER_ENABLED: "false" }, async () => {
+    await assert.rejects(opts.body(ctx), (e) => {
+      if (typeof e.acknowledge === "function") e.acknowledge();
+      return require("../automationStopper").isAutomationStop(e);
+    });
+  });
+  assert.deepEqual(calls.filter((c) => c.startsWith("openMenu") || c === "compute"), ["openMenu menu", "compute", "openMenu https://uiic/MenuAction.do?method=strbtn", "compute"]);
+  assert.ok(lines.some((l) => /so the form is filled from the start once more/.test(l)));
+  assert.ok(calls.includes("proposal"), "on to Update after the second try");
+
+  // an ordinary failure ([E301]) is not redone
+  const calls2 = [];
+  const deps2 = resumeDeps(null, calls2);
+  deps2.compute = async () => {
+    calls2.push("compute");
+    throw Object.assign(new Error("[E301] United India - Compute Premium is not on the page"), { code: "E301" });
+  };
+  const second = handlerOptions({}, deps2);
+  await assert.rejects(second.opts.body(handlerCtx().ctx), /E301/);
+  assert.equal(calls2.filter((c) => c === "compute").length, 1);
+});
+
+test("after Save, United India's 'Offline data saved successfully' (the owner's live page) words the stop", async () => {
+  const { handler } = handlerOptions();
+  assert.match(
+    handler.kycWords({ kycDone: true, doneBy: "saved", result: "Offline data saved successfully", stepSaved: true, closed: "button" }),
+    /Save pressed - the KYC is done \(United India says "Offline data saved successfully"\), KYC step = completed, the CKYC window closed; what comes after the KYC is not built yet$/
+  );
 });

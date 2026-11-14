@@ -80,14 +80,19 @@ function riskPage(over = {}) {
   const boxes = {
     v_make: { options: opts(VEHICLE_CLASSES), selectedIndex: 0, shown: over.noVehicleClass !== true, changes: 0 },
     regst: { options: opts(over.states || STATES), selectedIndex: 0, shown: true, changes: 0 },
-    selectedNumNameCode: { options: opts(MANUFACTURERS), selectedIndex: 0, shown: true, changes: 0 },
+    selectedNumNameCode: {
+      options: opts(over.manufacturersNeverLoad ? [["0", "select"]] : MANUFACTURERS),
+      selectedIndex: 0,
+      shown: over.noManufacturerBox !== true,
+      changes: 0,
+    },
     makeMotorDisplay: { options: opts([["0", "select"]]), selectedIndex: 0, shown: over.noMakeBox !== true, changes: 0 },
   };
   // retrieveURL(): the manufacturer's choice fills the Make list (unless the portal never answers)
   const onChange = (id) => {
     if (id !== "selectedNumNameCode" || over.makesNeverLoad) return;
     const value = boxes.selectedNumNameCode.options[boxes.selectedNumNameCode.selectedIndex].value;
-    boxes.makeMotorDisplay.options = opts(MAKES[value] || [["0", "select"]]);
+    boxes.makeMotorDisplay.options = opts((over.makes && over.makes[value]) || MAKES[value] || [["0", "select"]]);
     boxes.makeMotorDisplay.selectedIndex = 0;
   };
   const state = {
@@ -97,6 +102,7 @@ function riskPage(over = {}) {
     inputs: { chasisNumber: "", engineNumber: "" },
     resetStateOnTick: !!over.resetStateOnTick,
     makesLateReads: over.makesLateReads || 0,
+    manufacturersLateReads: over.manufacturersLateReads || 0,
   };
   // the page upper-cases what is typed (onkeyup="toupper(...)")
   const input = (id) => ({
@@ -150,7 +156,7 @@ function riskPage(over = {}) {
       const v = String((locator && locator.value) || "");
       if (v.includes('"v_make"') && boxes.v_make.shown) return [box("v_make")];
       if (v.includes('"regst"')) return [box("regst")];
-      if (v.includes('"selectedNumNameCode"')) return [box("selectedNumNameCode")];
+      if (v.includes('"selectedNumNameCode"') && boxes.selectedNumNameCode.shown) return [box("selectedNumNameCode")];
       if (v.includes('"makeMotorDisplay"') && boxes.makeMotorDisplay.shown) return [box("makeMotorDisplay")];
       if (v === "#newvehchk1") return [checkbox];
       if (v === "#chasisNumber") return [input("chasisNumber")];
@@ -159,6 +165,11 @@ function riskPage(over = {}) {
     },
     async executeScript(script, ...args) {
       if (script === readSelectInPage) {
+        // populateManufacturer() answers late: the Vehicle Manufacturer list looks empty for the first reads
+        if (args[0] === "selectedNumNameCode" && state.manufacturersLateReads > 0) {
+          state.manufacturersLateReads -= 1;
+          return { selectedIndex: 0, value: "0", options: [{ value: "0", text: "select", disabled: false }] };
+        }
         // retrieveURL() answers late: the Make list looks empty for the first `makesLateReads` reads after the choice
         if (args[0] === "makeMotorDisplay" && state.makesLateReads > 0 && boxes.selectedNumNameCode.selectedIndex > 0) {
           state.makesLateReads -= 1;
@@ -336,7 +347,8 @@ test("no chassis or engine number on the policy: stops BEFORE the page is touche
 
 test("the handler's Risk Details step is the whole block (class, state, New Vehicle, chassis, engine)", () => {
   const src = require("fs").readFileSync(require.resolve("../multiCompany/tpCompany/unitedIndiaTP/unitedIndiaTP.js"), "utf8");
-  assert.match(src, /fillRisk = fillRiskDetails \}/);
+  assert.match(src, /fillRisk = fillRiskDetails[,}]/);
+  assert.match(src, /await fillRisk\(ctx\.driver, ctx\.data, \{ log: ctx\.log \}\);\n\s+await fillDates\(ctx\.driver, \{ log: ctx\.log \}\);\n\s+await answerQuestions\(ctx\.driver, \{ log: ctx\.log \}\);\n\s+await fillInsured\(ctx\.driver, ctx\.data, \{ log: ctx\.log \}\);\n\s+await fillPin\(ctx\.driver, ctx\.data, \{ log: ctx\.log \}\);\n\s+await fillContact\(ctx\.driver, ctx\.data, \{ log: ctx\.log \}\);\n\s+await chooseRto\(ctx\.driver, ctx\.data, \{ log: ctx\.log \}\);\n\s+await openMore\(ctx\.driver, \{ log: ctx\.log \}\);\n\s+await fillTppd\(ctx\.driver, ctx\.data, \{ log: ctx\.log \}\);\n\s+await fillPa\(ctx\.driver, ctx\.data, \{ log: ctx\.log \}\);\n\s+await compute\(ctx\.driver, \{ log: ctx\.log \}\);\n[\s\S]*let kept = await quote\(ctx\.driver, ctx\.data, \{ \.\.\.files, where: "after Compute Premium" \}\);\n\s+const made = \(await proposal\(ctx\.driver, ctx\.data, \{ log: ctx\.log, jobId: ctx\.jobId \}\)\) \|\| \{\};\n\s+if \(!kept\) kept = await quote\(ctx\.driver, ctx\.data, \{ \.\.\.files, where: "after Update" \}\);/, "... the Quote and Worksheet where their button is (before Update, else after), and Update = the proposal");
   assert.match(src, /const \{ fillRiskDetails \} = require\("\.\/unitedIndiaRisk"\);/);
 });
 
@@ -377,17 +389,112 @@ test("no exact manufacturer: stops, not retried, naming similar names United Ind
   assert.equal(selected(driver, "selectedNumNameCode").value, "0");
 });
 
-test("no exact Make in the list it loaded: stops, not retried, listing EVERYTHING United India offers", async () => {
+test("no exact Make in the list it loaded: stops, not retried, naming only the names LIKE it (not DIO)", async () => {
   const driver = riskPage();
   await assert.rejects(all(driver, { ...POLICY, vehicleModel: "ACTIVA" }).run(), (e) => {
     assert.equal(e.code, "E306");
     assert.equal(e.retryable, false);
     assert.match(e.message, /the Make list for "HONDA" has no "ACTIVA" \(the Model of this vehicle in the Make and Model master\)/);
     assert.match(e.message, /Correct the Model of the United India Make and Model row/);
-    assert.match(e.message, /United India offers "ACTIVA 6G", "ACTIVA 125", "DIO"\./);
+    assert.match(e.message, /Names like it that United India offers for "HONDA" are "ACTIVA 6G", "ACTIVA 125"\. /);
+    assert.doesNotMatch(e.message, /DIO/);
     return true;
   });
   assert.equal(selected(driver, "makeMotorDisplay").value, "0", "a near name is never taken");
+});
+
+test("no Make like it in a SHORT list: the whole list is named (it is short enough to read)", async () => {
+  const driver = riskPage();
+  await assert.rejects(all(driver, { ...POLICY, vehicleModel: "SHINE" }).run(), (e) => {
+    assert.equal(e.code, "E306");
+    assert.match(e.message, /United India offers "ACTIVA 6G", "ACTIVA 125", "DIO"\. Correct the Model/);
+    return true;
+  });
+});
+
+// HONDA's real Make list is long: 40 names here, 20 of them ACTIVA ones, in the portal's own order.
+const LONG_HONDA = [["0", "select"]]
+  .concat(Array.from({ length: 20 }, (_, i) => [`a${i}`, `ACTIVA ${100 + i} FI(2019 - 2023)@ALLOY BS VI`]))
+  .concat(Array.from({ length: 19 }, (_, i) => [`s${i}`, `SHINE ${i}`]))
+  .concat([["x", "ACTIVA 7G STD"]]);
+
+test("a long Make list: at most 15 names like it, the closest first, then 'and N more'", async () => {
+  const driver = riskPage({ makes: { "IBB4560@HONDA": LONG_HONDA } });
+  await assert.rejects(all(driver, { ...POLICY, vehicleModel: "ACTIVA 7G" }).run(), (e) => {
+    assert.equal(e.code, "E306");
+    assert.equal(e.retryable, false);
+    // ACTIVA 7G STD shares ACTIVA and 7G - it comes first although it is last on the page; then the portal's order
+    assert.match(e.message, /are "ACTIVA 7G STD", "ACTIVA 100 FI\(2019 - 2023\)@ALLOY BS VI", "ACTIVA 101/);
+    assert.match(e.message, / and 6 more\. Correct the Model/);
+    const named = /are (.*) and 6 more/.exec(e.message)[1];
+    assert.equal((named.match(/"ACTIVA /g) || []).length, 15, "15 names, not 21");
+    assert.doesNotMatch(e.message, /SHINE/);
+    return true;
+  });
+});
+
+test("a long Make list with nothing like it: says so with the count, lists none", async () => {
+  const driver = riskPage({ makes: { "IBB4560@HONDA": LONG_HONDA } });
+  await assert.rejects(all(driver, { ...POLICY, vehicleModel: "DIO" }).run(), (e) => {
+    assert.match(e.message, /has no "DIO" .*None of the 40 names United India offers for "HONDA" is like it\. Correct the Model/);
+    return true;
+  });
+});
+
+test("the closest Make names come first; a name is 'like' only by a 3+ letter word", () => {
+  const state = { options: opts([["0", "select"], ["1", "CB SHINE"], ["2", "SHINE SP 125"], ["3", "CB UNICORN"], ["4", "CB SHINE SP"], ["5", "DREAM BS VI"]]) };
+  // CB SHINE SP shares CB + SHINE + SP; CB SHINE and SHINE SP 125 share two (portal order between them); CB UNICORN only "CB"
+  assert.deepEqual(risk.similarModelNames(state, "CB SHINE SP 125"), ["CB SHINE SP", "CB SHINE", "SHINE SP 125"]);
+  assert.deepEqual(risk.similarModelNames(state, "125"), [], "a number alone is like nothing");
+  assert.deepEqual(risk.similarModelNames(state, "ACTIVA BS VI"), [], "sharing only BS / VI is not like it");
+});
+
+test("the Vehicle Manufacturer list that arrives late (populateManufacturer) is waited for - never 'has no HONDA'", async () => {
+  const driver = riskPage({ manufacturersLateReads: 6 });
+  await all(driver).run();
+  assert.equal(driver.state.manufacturersLateReads, 0);
+  assert.equal(selected(driver, "selectedNumNameCode").value, "IBB4560@HONDA");
+});
+
+test("the Vehicle Manufacturer list never loads: [E301] tried again later, NOT the 'has no HONDA' stop", async () => {
+  const driver = riskPage({ manufacturersNeverLoad: true });
+  await assert.rejects(all(driver).run(), (e) => {
+    assert.equal(e.code, "E301");
+    assert.notEqual(e.retryable, false);
+    assert.match(e.message, /the Vehicle Manufacturer list stayed empty after the Vehicle Class was chosen \(20 seconds\)/);
+    assert.doesNotMatch(e.message, /has no/);
+    return true;
+  });
+});
+
+test("no Vehicle Manufacturer box at all: [E301] naming it", async () => {
+  const driver = riskPage({ noManufacturerBox: true });
+  await assert.rejects(all(driver).run(), (e) => {
+    assert.equal(e.code, "E301");
+    assert.match(e.message, /the "Vehicle Manufacturer" box is not on the Risk Details page \(not visible after 20 seconds\)/);
+    return true;
+  });
+});
+
+test("a long manufacturer list of names like it is cut at 15 too", async () => {
+  const many = [["0", "select"]].concat(Array.from({ length: 18 }, (_, i) => [`h${i}`, `HONDA UNIT ${i}_NONGICOUNCIL`]));
+  const driver = riskPage();
+  driver.state.boxes.selectedNumNameCode.options = opts(many);
+  await assert.rejects(all(driver, { ...POLICY, vehicleMake: "HONDA" }).run(), (e) => {
+    assert.equal(e.code, "E306");
+    assert.match(e.message, /Vehicle Manufacturer has no "HONDA"/);
+    assert.match(e.message, / and 3 more\. Correct the Make/);
+    return true;
+  });
+});
+
+test("a name with a colon never breaks the sentence (beautifyError keeps only what follows the last colon)", async () => {
+  const driver = riskPage();
+  await assert.rejects(all(driver, { ...POLICY, vehicleModel: "ACTIVA: 7G" }).run(), (e) => {
+    assert.doesNotMatch(e.message, /:/);
+    assert.match(e.message, /has no "ACTIVA - 7G"/);
+    return true;
+  });
 });
 
 test("the Make list never loads after the manufacturer: [E301] after 20 seconds, naming the manufacturer", async () => {

@@ -48,12 +48,16 @@ const PRESETS = {
     timeoutMs: 20000,
     stopOnDialog: false,
   },
-  // United India (UIIC GCWebPortal, a page-per-request JSP portal). Its loader is NOT known yet: these are the common
-  // busy markers of such pages; the first live run will tell. The page finishing its own load is the signal the old
-  // project relied on.
+  // United India (UIIC GCWebPortal, a page-per-request JSP portal). ITS loader (the owner's markup, 2026-11-13): a small
+  // fixed "Loading..." box, <div id="dialog" class="window" style="position: fixed; z-index: 99999; ... display: block;">
+  // <img src="../resources/images/wait.gif" alt="Loading..."> ... </div> - none of the common markers below matched it, so the
+  // run went on while it showed and a click was lost (the owner clicked More Covers by hand). The common markers stay. The
+  // owner: wait for it at most 40 s.
   "united india": {
     label: "United India",
     busy: [
+      "#dialog.window",
+      "img[src*='wait.gif']",
       ".blockUI.blockOverlay",
       ".blockUI.blockMsg",
       "#loading",
@@ -64,7 +68,7 @@ const PRESETS = {
       "img[src*='loader']",
       ".spinner-border",
     ].join(", "),
-    timeoutMs: 30000,
+    timeoutMs: 40000,
     stopOnDialog: false,
     waitReady: true,
   },

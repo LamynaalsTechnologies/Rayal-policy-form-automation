@@ -70,7 +70,7 @@ are in the last column (they are *his* settings, not the code defaults).
 | `CLOSE_BROWSER_AFTER_COMPLETE` | true | a completed job closes its window and deletes its own profile (section 3) | **false** |
 | `HEADLESS` | off (only `true`) | headless Chrome (always closed at the end). Linux without a display is forced headless whatever this says | false |
 | `JOB_TIMEOUT_MS` | 900000 | one run's timeout (E302); once Reliance saved the proposal a timeout is never auto-re-run | — |
-| `RELIANCEMAXWINDOW` / `NATIONALMAXWINDOW` / `KSHEMAMAXWINDOW` / `DEFAULTMAXWINDOW` | `DEFAULTMAXWINDOW` = 1 | parallel windows per insurer (`<NAME>MAXWINDOW`, falls back to the default) | 2 / 2 / 2 / 1 |
+| `RELIANCEMAXWINDOW` / `NATIONALMAXWINDOW` / `KSHEMAMAXWINDOW` / `UNITEDINDIAMAXWINDOW` / `DEFAULTMAXWINDOW` | `DEFAULTMAXWINDOW` = 1 | parallel windows per insurer (`<NAME>MAXWINDOW`, the name without spaces - "united india" -> `UNITEDINDIAMAXWINDOW`; falls back to the default) | 2 / 2 / 2 / 2 (added 2026-11-11) / 1 |
 | `QUEUE_POLL_INTERVAL_MS` | 300000 (5 min) | queue poll period (the DB watcher also wakes it) | 300000 |
 | `FLOW_LOG_PREFIX_ENABLED` | true | the Reliance `Reliance TP \|` tag **and** the word in the KSHEMA bracket | true |
 | `BREAKER_ENABLED`, `BREAKER_STOP_AT` | off | debug checkpoints (`breaker.js`): a job stops "on purpose" (nothing submitted, no retry) at a named `Breaker.checkpoint("...")` | **true**, `stopthis-location` — the owner's own debug setup. **Checked 2026-10-19: `relianceForm.js` / `relianceMultiForm.js` no longer contain a `stopthis-location` checkpoint** (the owner removed it; KSHEMA's went on 2026-10-16), so these two lines stop nothing today. Never leave the Breaker on in production. |
@@ -629,8 +629,15 @@ The Breaker stop (`stopthis-location`) now comes **after** that page, before the
   - Both by the **exact** name (case and spaces do not count). The manufacturer list has "HONDA" (IBB4560) next to
     "HONDA_NONGICOUNCIL"; only the exact one is taken.
   - The Make list is filled by the portal's `retrieveURL()` after the manufacturer; it is waited for, up to 20 s, then `[E301]`.
-  - No exact manufacturer: the stop names similar ones United India offers. No exact Make: the stop lists everything that
-    manufacturer offers. Neither is retried; correct the United India Make & Model row.
+    Since 2026-11-13 the **Vehicle Manufacturer list is waited for the same way** (it is filled after the Vehicle Class); before,
+    a list that had not arrived yet read as "has no HONDA", which is never retried.
+  - No exact manufacturer / no exact Make (2026-11-13 wording): the stop names what United India offers that is **like** it,
+    **at most 15 names, then "and N more"** (HONDA alone has well over a hundred Makes). For the Make, "like" = shares a word of
+    3+ letters ("BS VI" alone is like nothing), the closest first ("ACTIVA 7G" puts "ACTIVA 7G STD" before "ACTIVA 6G");
+    nothing like it = the whole list when it is 15 or fewer, else "None of the N names ... is like it". Neither is retried;
+    correct the United India Make & Model row. Example: `[E306] United India - the Make list for "HONDA" has no "ACTIVA 7G" (the
+    Model of this vehicle in the Make and Model master), so the run stopped there. Names like it that United India offers for
+    "HONDA" are "ACTIVA 6G", "ACTIVA 125". Correct the Model of the United India Make and Model row, then run the policy again.`
   - The run never adds to the Vehicle Model lists (they are kept by hand). The Make & Model dialog offers their names, so the
     row holds the portal's exact spelling.
 - **Every one** follows the owner's rule: chosen or typed, read back, once more if it did not take, a missing box is its own
@@ -644,6 +651,536 @@ The Breaker stop (`stopthis-location`) now comes **after** that page, before the
     tick resetting the state), all pass.
   - 23 of 23 deliberate breaks caught across this round.
 - **Not seen live**: the real page's loader after each onchange, and what `getRegState()` really does.
+- **2026-11-13, first live run**: login -> menu -> product -> Risk Details -> HONDA / "ACTIVA 125 FI(2019 - 2023)@ALLOY BS VI"
+  -> the Breaker, all on the real portal (the owner's log).
+
+### United India Risk Details after the Make: dates, PUC, Delhi - NCR (the owner, 2026-11-13)
+`unitedIndiaTP/unitedIndiaDates.js` then `unitedIndiaTP/unitedIndiaQuestions.js`, after the Make; the Breaker
+(`stopthis-location`) is now after the Delhi - NCR answer.
+- **Date of Purchase** `#dtPurchaseStr` (`name="dateOfPurchaseString"`) = **today, in India time** (`lib/policyDates.js`
+  `indiaCalendarDay`; a UTC server would be a day early before 05:30 IST), **DD/MM/YYYY** (the format the old formFlow.js /
+  autofill.js typed). The box is **readonly** and its click opens the portal's calendar, so it is never clicked or typed into:
+  the date is put in, input / change / blur fire, and the page's own after-pick check **`registrationDateValidation`** (named
+  in the box's onclick) runs when the page has it. Its popup = `[E308]` in the portal's words, not retried; a date the page
+  empties is put in once more, then `[E306]`.
+- **Month of Manufacture** `select[name="makeMonthgc"]` (**no id**) = this month, by its value ("11"). `selectAndConfirm` now
+  takes `target` (selectors) for a box without an id.
+- **Year of Manufacture** `#yearOfManufacturing` = this year; the portal already shows it, so it is left as it is
+  (`fillAndConfirm` `keepIfSame`), typed only when it differs (New Year).
+- All three are read once more at the end; one that changed = `[E306]`, tried again later.
+- **Valid PUC** `select[name="ynPuc"]` = **Yes**, **plying in Delhi - NCR** `select[name="ynDncr"]` = **No** (the owner's
+  defaults). **Both boxes have `id="repository"`**, so they are found by NAME (an id lookup would answer the PUC box twice).
+  Both read once more at the end.
+- Tests: `test/unitedIndiaAfterMake.test.js` (20). Replica: the real markup (readonly box + onclick calendar, a page
+  `registrationDateValidation`, the month without id, the two `repository` boxes) in all three Risk scenarios, plus a real
+  `alert()` from the date check (Chrome reports it, the run says `[E308]` with its words): all pass. 17 of 17 deliberate breaks
+  caught in a scratch copy.
+- **Not seen live**: that the portal takes DD/MM/YYYY, what its calendar does after a pick beyond `registrationDateValidation`,
+  and whether the Delhi - NCR answer should follow the customer's state (today always No).
+
+### United India Risk Details: the insured (the owner, 2026-11-13)
+`unitedIndiaTP/unitedIndiaInsured.js` `fillInsuredDetails`, after Delhi - NCR; the Breaker is now after the Address.
+- **Client Type** `#clientType` = **Individual**, the portal's default, **not touched** when it shows it (the owner: "now it not
+  touch, continue with individual"); only a portal showing something else is set to Individual. **`clientTypeFor(data)` is
+  the one place where Individual / Corporate is decided later** (its `onchange` is `change(insuredname1.value)`, so Corporate
+  will also change the Title list).
+- **High Risk** `#ynHighRisk` = **No** (default).
+- **Title** `#insuredname1` = the policy's `proposerTitle` (Mr. -> MR., Ms. -> MS., Mrs. -> MRS.); none -> from the gender
+  (male Mr., female Ms., as the Online Policy does). **M/S stops** before the page is touched: a company needs Client Type
+  Corporate, not built yet.
+- **Insured Name** `#insuredname2` = the policy's **Full Name only** (the job's `firstName`), **not the Surname** (a live case
+  had Full Name "ANMOL ARORA" + Surname "MASTER"; KSHEMA leaves the Surname out too unless its switch is on). Letters and
+  spaces only (the page's `nodot()` drops dots: "K. RAMESH" -> "K RAMESH").
+- **Address** `#addressOfInsured` = the address boxes in one line (Flat / Door, Floor, Building, Block, Road / Street, Area and
+  Locality - KSHEMA's `kshemaAddressLine`, so a name written twice by an Aadhaar read is left out), then **every character
+  that is not a letter or a number becomes a space** (commas, dots, #, /, -, & ...; the owner: "not enter the special
+  characters"), single spaces, upper case, at most 200 (its maxlength), cut between words after the cleaning. Example:
+  `#272/A`, `1ST FLOOR`, `RAMANA APTS.`, `PILLAYAR KOVIL ST., 2ND CROSS`, `TONDUR, VILLUPPURAM - 604203` ->
+  `272 A 1ST FLOOR RAMANA APTS PILLAYAR KOVIL ST 2ND CROSS TONDUR VILLUPPURAM 604203`.
+- The policy's Title, Full Name and address are checked **before** the page is touched; all five boxes are read once more at
+  the end.
+- **Popups on choices and typing** (`unitedIndiaSteps.js`, every United India step): a popup that a box's onchange / onkeyup
+  opens is now `[E308]` in the portal's words, not retried - also one still open after the step. Before, a choice or a typed
+  box swallowed it into "shows X instead of Y". `fillAndConfirm` types with its own copy of `typeWithReadback`
+  (`typeInto`), because that one swallows the popup's error.
+- Tests: `test/unitedIndiaInsured.test.js` (22). Replica: the owner's markup in a `VehicleForm` with `change()`,
+  `toggleHighRisk()`, `setthevalue()`, `nodot()`, a messy Aadhaar-style address; plus a real `alert()` from High Risk's
+  onchange (`[E308]`, the Title untouched): all pass. 17 of 17 deliberate breaks caught in a scratch copy.
+- **Not seen live**: the portal's own words for these boxes' labels, and whether its Address takes digits-only words
+  (the pin code stays in the line when a box has it).
+
+### United India Risk Details: the Pin Code fills State and District (the owner, 2026-11-13)
+`unitedIndiaTP/unitedIndiaPinCode.js` `fillPinCode`, after the insured's Address; the Breaker is now after it.
+- **Pin Code** `#PIN_CODE` (`name="pincodeString"`, maxlength 6, `onblur="getStateDist()"`) = the policy's pin code (6 digits,
+  spaces dropped; missing / not 6 digits stops before the page is touched, not retried). Typed and read back, then the box is
+  **left** (focus, then away) so its onblur runs the portal's `getStateDist()`.
+- The portal fills **State** `#STATE_CODE1` and **District** `#STATE_CODE2` (both disabled). The run waits up to **10 s** per try for a
+  real District to be chosen (the owner, after his first live run: 10 s, not 20) (the State is read after it - read before, it could still show Select).
+- **Not filled**: the box is left **once more** (typed again only if the portal emptied it). Still not filled = `[E306] United
+  India - the Pin Code 999999 did not fill the District (the District stayed on Select, 2 tries), so the pin code may be
+  wrong and the run stopped there. Check the customer's pin code on the policy, then run it again.` - **not retried**, with
+  the run's screenshot (runHandler). A District list with nothing chosen says so. A popup = `[E308]` in the portal's words.
+- **The pin box is never emptied with Selenium's `clear()`**: that focuses, empties and LEAVES the box, so its onblur ran
+  `getStateDist()` with an EMPTY pin code (the real-Chrome replica counted 3 runs for 2 tries); the portal may answer that
+  with its own popup. `fillAndConfirm` got `clearQuietly` (empties by script, no focus change).
+- A pin code in another state than the customer's state on the policy: a **warning** in the log only, the run goes on.
+- Tests: `test/unitedIndiaPinCode.test.js` (13). Replica: the owner's markup and a `getStateDist()` that fills 1.5 s after its
+  loader (or nothing for an unknown pin code): all pass, `getStateDist()` runs exactly once per try. 14 of 14 deliberate
+  breaks caught in a scratch copy.
+- **Not seen live**: what `getStateDist()` does with an unknown pin code (nothing, a popup, or an empty list) - each case has
+  its own sentence.
+
+### United India Risk Details: Mobile, Email, Date of Birth, RTO (the owner, 2026-11-13)
+`unitedIndiaTP/unitedIndiaContact.js` `fillContactDetails`, then `unitedIndiaTP/unitedIndiaRto.js` `chooseRto`, after the
+Pin Code; the Breaker is now after the RTO.
+- **Mobile** `#mobile` = the policy's mobile number, 10 digits (a +91 / 91 / 0 in front and spaces dropped).
+- **Email** `#emailAddress` = the policy's email (trimmed, lower case), typed (emptied quietly), then the box is **left** so its
+  `onblur="validateEmail(this.value)"` runs; its popup = `[E308]` in the portal's words.
+- **Date of Birth** `#dateOfBirthString` = the policy's date of birth (the job's DD-MM-YYYY) as **DD/MM/YYYY**. Its click opens the
+  portal's calendar, so it is put in by script (`unitedIndiaDates.js putDate`, the Date of Purchase's way, now shared), never
+  clicked or typed; its blur event runs `checkDateValidation(this.value)`. Not a real day (31-02) or a future one stops.
+- Mobile, Email and Date of Birth are checked **before** the page is touched (one sentence naming each problem, not retried);
+  all three are read once more at the end.
+- **RTO** `select#rtaDesc` (`onchange="populateInvoiceZone()"`) = the policy's **RTO City/Location** (`rtoCityLocation`) by its
+  CODE: the RTO master writes "TN55", "TN-55", "TN 55", so a code is compared by its parts - 2 state letters, the number (TN5
+  = TN05) and letters stuck to it (DL1C is not DL1). The option's code is the start of its text ("TN55 SALEM", "TN-56
+  PERUNDURAI", "TN 57 DINDIGUL"); the bare "PY" option is not an RTO.
+  - one option with the code: chosen by its exact value, read back, `populateInvoiceZone()` + loader waited for;
+  - none: `[E306] United India - the RTO TN58 (the policy's RTO "TN-58") is not in United India's RTO list, so the run stopped
+    there. The nearest TN RTOs United India offers are "TN57 DINDIGUL", "TN59 MADURAI", ... Correct the policy, then run it
+    again.` - not retried, with its screenshot. When the list has no RTO of that state at all (it follows the Vehicle
+    Registration State = the customer's state), it says so and shows what it lists;
+  - two with the same code: stops and lists them (never a guess); no usable code on the policy: stops before the page.
+- Tests: `test/unitedIndiaContactRto.test.js` (24). Replica: the owner's markup with a `getRegNoRta()` that fills the RTO list
+  from the chosen state (his Pondicherry list, a Tamil Nadu one), `validateEmail` / `checkDateValidation` /
+  `populateInvoiceZone` recorded: TN-55 -> TN55 SALEM, PY-01 -> PY01 PONDICHERRY, validateEmail ran once, the calendar never
+  opened, TN-58 stops with the nearest, a real validateEmail popup = `[E308]`; all pass. 17 deliberate breaks caught in a
+  scratch copy (an 18th, dropping the `0*`, changes nothing: `Number("05")` is 5 already).
+- **Not seen live**: whether the portal's DOB check wants an 18+ age, and the real wording of its RTO options outside PY.
+
+### United India: More Covers N Info, then the TPPD Limit (the owner, 2026-11-13)
+`unitedIndiaTP/unitedIndiaMoreCovers.js`, after the RTO; the Breaker is now after the TPPD Limit, on the More Covers page.
+- **More Covers N Info** `<img src="...MoreCoversNInfo.JPG" onclick="fnSubmit('morecoversninfo')">`: the portal SUBMITS the
+  Risk Details and opens its next page. The run waits **up to 20 s** (the owner); no page = `[E301] United India - after
+  "More Covers N Info" was clicked the next page did not open within 20 seconds ...`, tried again later, with the screenshot.
+  A popup = `[E308]` in its words; a page in a new window is followed.
+  - The page change is seen by a **mark** put on Risk Details before the click: a loaded page without it is the next page.
+  - **Never submitted twice**: the button is clicked a second time (the owner's rule) only when, 5 s after the first click,
+    the page shows NO sign of the submit (not unloading, no loader, no pending page seen).
+  - **ChromeDriver's page-load wait**: while a page is on its way, EVERY WebDriver command - the click too - waits for it, up
+    to the page-load limit (300 s by default), so a hung submit hung the run far past 20 s (the real-Chrome replica did).
+    For this wait only the limit is **2 s** (`PAGE_LOAD_POLL_MS`), then put back. A click that comes back as that timeout is a
+    click that WORKED (`clickOnce`): the shared `clickWithFallback` took it for a failed click and clicked again by script -
+    the replica's portal got the form TWICE. At 20 s `window.stop()` cancels the hung submit (it cannot land later; the
+    error's screenshot is taken at once).
+- **TPPD Limit** `select[name="tppdLimit"]` (no id): the policy's **TPPD Restrict ticked = "Upto 6000"**; not ticked = "Upto
+  100000", which the portal shows already, so normally not touched (a portal showing 6000 is set back to 100000). The owner
+  picked this rule on 2026-11-13 - the one Reliance and KSHEMA follow - so our premium (worked out with the same tick) and
+  United India's agree. (His first wording was the other way round; asked, he chose this.)
+- Tests: `test/unitedIndiaMoreCovers.test.js` (20). Replica: a real `fnSubmit()` form post to a More Covers page with the
+  owner's TPPD box (1.5 s), a swallowed first click (clicked again, ONE post), and a submit the server never answers
+  (`[E301]` at 22 s, ONE post, screenshot in 18 ms, page-load limit back to 300 s): all pass. 16 of 16 deliberate breaks
+  caught in a scratch copy.
+- **Not seen live**: the More Covers page itself (its address, its loader), and whether the morecoversninfo submit saves
+  anything at the portal (a retry starts again from the login, so a second Risk Details would be sent).
+- **Note for the other insurers' flows**: the Products page's Submit still uses `clickWithFallback` under the 300 s limit; a
+  hung submit there is ended by the stuck-step watch (90 s), not double-clicked within it.
+
+### United India: a wrong "Error In Data Entry" once = the steps once more; "Offline data saved successfully" = the KYC done (the owner's live runs, 2026-11-14)
+1. **Once more, then the error.** Live: after Next in Proposal Modification the portal showed "Error In Data Entry - (0)null"
+   and the run stopped for good. The owner: the portal sometimes shows a wrong error - try again, and only a SECOND time is
+   the error. `unitedIndiaTP.js onceMore`: the steps that save nothing at United India - a resume from Proposal Modification
+   to Compute Premium, a new proposal from Make New/Renew Policy to Compute Premium - are done once more on the FIRST box
+   (logged with the portal's words); the page is opened again BY ITS ADDRESS (the run keeps it from the first opening -
+   `unitedIndiaMenu.js openDirect`, a GET like the link: an error page may have no sidebar); the box again = `[E306]` not retried,
+   "... the portal says "Error In Data Entry - (0)null" a second time (the run had done it all once more)". Other errors are not
+   redone. Update, Modify and the KYC are never redone (they would make a second proposal / KYC). The error carries the portal's
+   words (`portalError`, `portalLines`, `portalLabel`).
+2. **"Offline data saved successfully".** Live: after Save the window showed "CKYC Status-Offline" with "Offline data saved
+   successfully" and the details - no Offline KYC button there - so the run had left the KYC step as it was and the window open.
+   `readCkycStatusInPage` reads that message (`saved`); after Save it - or Offline KYC disabled - = the KYC done: the KYC step
+   completed (its message and Customer Id kept), then Close. The stop: "Save pressed - the KYC is done (United India says
+   "Offline data saved successfully"), KYC step = completed, the CKYC window closed".
+- Tests: `unitedIndiaLogin.test.js` +3 (once more on a resume / the second box = E306 / a new proposal from its address / an
+  E301 never redone / the saved wording). Replica: the after-Save page copied from the owner's screenshot (no popup, except
+  in `kyc-new` so the words-after-Save path stays checked), `resume-error-once` (the first Next answers "(0)null": Proposal
+  Modification opened again by its address, Next again, on to the KYC), `resume-error-twice` (every Next: E306 "a second time").
+
+### United India resume, from two live runs (the owner, 2026-11-14): search to TODAY, the proposal kept FRESH, a reopened PA Cover re-ticked
+1. **The search** (`unitedIndiaProposalModification.js`): From = the saved Reference Date, **To = today** (India). A resume puts the
+   Policy Start Date to today and Modify, and United India then moves the proposal's Reference Date to today - his live run
+   searched 13/11 to 13/11 and stopped "proposal 202611131393359 is not in the Proposal Modification list". The "not listed"
+   sentence names the span ("for 13/11/2026 to 14/11/2026").
+2. **The proposal kept fresh** (`unitedIndiaTP.js`): the list row's Reference Date, when it moved, is saved (date ONLY, same
+   number - `unitedIndiaProposal.js saveReferenceDate`); after **Modify** the page's proposal block is read FRESH - number,
+   Reference Date, Transaction NO, Customer ID - and saved (`saveFreshProposal`: the part's Proposal step and
+   `unitedIndiaProposal`, only while the step is still the old number; a NEW number keeps the old one as
+   `previousProposalNumber` and takes the list's `proposalNumber` column when it held the old one). Never a step status (a
+   "proposal completed" write would put a done KYC back to pending). The stop names the fresh proposal. A page with no block keeps
+   the saved one (said).
+3. **A reopened PA Cover** (`unitedIndiaPaCover.js`): it comes TICKED while CPA Cover and the nominee boxes stay hidden until its
+   `checkdriv()` runs - his live run stopped "[E301] "CPA Cover" is not on the page". Ticked but CPA Cover not shown in 3 s =
+   unticked and ticked again, then filled as usual; ticked WITH its boxes shown = not clicked.
+- Live note: the reopened page (`gc_initiateAshokLeyland.do?parameter=proposalModify`) has no `polStartDateValidation` - the start
+  date is put in and read back only (logged "the page has no polStartDateValidation").
+- Tests: PA +2, proposal +2 (date only / fresh: the exact writes, never a status), handler (the list's date, the fresh proposal, a
+  new number, a page without the block, a failed write). Replica: `resume-date-moved` (ours listed with today's date - the
+  range finds it, the date saved), the list filtered by From..To, after Modify the page shows ours with today's date (saved
+  fresh), `resume-pa` (PA ticked with hidden boxes - re-ticked, 5 Year, DEVA, Son).
+
+### United India: Offline KYC disabled = the KYC is ALREADY DONE -> KYC step completed (the owner's live run, 2026-11-14)
+Live: the CKYC window opened on "CKYC Status-Online Search" (Customer Id 23676065442, Result "Offline KYC Done") with
+`<button type="submit" name="param" value="Offline" class="btn btn-default" disabled>` - the run clicked the disabled button
+twice and failed `[E301] ... after "Offline KYC" was clicked the next page did not open within 20 seconds`. The owner: "if the
+Offline KYC button is disabled, the KYC is already finished - update KYC finished".
+- `unitedIndiaKyc.js`: the window's status is read FIRST (`readCkycStatusInPage`: Offline KYC there / disabled, the Result and
+  Customer Id next to their labels) and logged (`CKYC window: Customer Id ..., Result "...", Offline KYC disabled`).
+  **Disabled** = nothing entered, the part's **KYC step = completed** (`markKycDone` -> `relianceStages.markStage(data, "kyc",
+  "completed", { mode: "offline", result, customerId }, { insurer: "United India" })`, never throws), then the stop
+  "... the CKYC window opened - the KYC was already done at United India (Offline KYC disabled, "Offline KYC Done"), KYC step =
+  completed; what comes after the KYC is not built yet". After a fresh **Save** the status is read again: disabled there too =
+  the KYC step completed ("Save pressed - the KYC is done (...)"); not disabled = the step is left as it is.
+- A write that fails is said ("the KYC step could NOT be saved (set it to Completed in Edit -> Status)"), never a failure.
+- **Then the window's own Close** (the owner, same day - his live run saved the KYC but left the window open):
+  `<button type="submit" name="param" value="Close" class="btn btn-default" onclick="window.close();">Close</button>` pressed
+  (`closeCkycWindow`), the window checked GONE, the run back on the proposal page (the stop's screenshot is that page); a click
+  that reports the window gone counts as done; a Close that does nothing is pressed once more, then the run closes the window
+  itself (said in the log and the stop: "the CKYC window closed (by the run - its Close did not)"). A short page-load limit
+  around the presses (Close is a submit), the run's own limit put back. Not finished after Save = the window stays open.
+  Tests: `unitedIndiaKycClose.test.js` (5); replica `resume`, `resume-kyc-done`, `kyc-new` (closed by its Close),
+  `resume-close-stuck` (a Close without window.close() - closed by the run). 5 of 5 deliberate breaks caught.
+- A later resume (KYC completed) still opens the CKYC window, finds it done and stops there - the payment is the next step.
+- Tests: `unitedIndiaLogin.test.js` +2 (the step written / a failed write; the stop sentences). Replica: the CKYC window copied
+  from the owner's screenshot (Customer Id, Result, Search / Close / Offline KYC / Online EKYC buttons), `resume-kyc-done`
+  (Offline KYC disabled: NOT pressed, nothing entered or saved, the status in the log), and after Save the window shows
+  "Offline KYC Done" with Offline KYC disabled (`resume`, `kyc-new`: "the KYC is done").
+
+### United India: a resumed proposal's Policy Start Date = today; the portal's "Error In Data Entry" box stops the run (the owner, 2026-11-14)
+A proposal made yesterday and opened again keeps yesterday as its start: United India then shows, at the top of the page,
+`<div id="err"><div class="errorMsg"><ul><div class="errormsgbox">Error In Data Entry<ul><li> N002219, PolicyInception Date
+should be on or later to Proposal Date .</li></ul></div></ul></div></div>`.
+- **Policy Start Date** `#dateOfIssueOfPolicyString` (readonly calendar, `showCalender(this, 'dateOfIssueOfPolicyString',
+  'polStartDateValidation','fuel')`) = **today, India time**, FIRST on the resumed page (before High Risk) -
+  `unitedIndiaDates.js setPolicyStartToday`: put in by script (never clicked), the calendar's own check run as
+  `polStartDateValidation('fuel')` (`putDate` / `setDateInPage` now pass a check argument), read back, once more, else `[E306]`.
+  Date of Purchase is not changed (not asked).
+- **The "Error In Data Entry" box** (`unitedIndiaNavigate.js throwIfPortalError`, `portalErrorsInPage`: shown `.errormsgbox li`
+  lines) is looked for whenever a watched press goes quiet (Compute Premium, Update, Modify, Fetch, Save, after a refresh) and
+  whenever a next page has opened (More Covers, Back, Next, Offline KYC), and after the start date: shown = `[E306]` not retried,
+  "after "X" the portal says "Error In Data Entry - N002219, ..."", with the screenshot - never waited out as a slow portal.
+- Tests: `unitedIndiaResumeStart.test.js` (4), Compute +1 (the box after Compute = E306 at once, no refresh), More Covers +1,
+  handler order (start date before High Risk). Replica: the resumed page's real start-date box (13/11) + check, the server
+  answering with the owner's box for a start before today, `resume-portal-error` (the box = E306 in its words, nothing after it).
+
+### United India: the KYC - Modify, Update Ckyc (a new window), Offline KYC with the Aadhaar card, Save (the owner, 2026-11-13)
+`unitedIndiaTP/unitedIndiaKyc.js unitedIndiaKyc`. The policy's data FIRST: its Aadhaar number (`aadharNumber`, 12 digits) -
+none / not 12 digits = `[E306]` not retried ("Add the Aadhaar number on the policy (Read Aadhaar & fill details)"), nothing
+clicked. Never a made-up number.
+1. **Modify** (a resumed proposal) `<img src=".../Modify.JPG" onclick="fnSubmit('update')" id="updt" name="updtimg">` - found by
+   its picture, not by `id="updt"`. Its confirmation is pressed OK only when it reads like one (`CONFIRMATION`: GSTIN / proceed /
+   modify / update / sure / confirm / continue); any other popup = `[E308]` in its words. The loader watched, 20 s, else `[E302]`.
+2. The page's end, **Update Ckyc** `input[name=verifykyc]` -> `kycVerify(...)` opens a **NEW window** (CkycMandate): the click
+   counts only when the window exists; the run switches to it (it stays there to the end) and waits for it to load (20 s).
+3. **Offline KYC** `button[name=param][value=Offline]` (the next page, 20 s).
+4. **Proof of Identity** `#proofOfIdentity` = "Aadhaar card", **Document No** `#documentNo` = the Aadhaar number, **Verification**
+   `#origVerificationStat` = "Verified", **Same as above** `#sameAsAbove` ticked - each read back, all four again together.
+5. **Save** `button[name=param][value=Save]` is `disabled` at first: pressed only once enabled (10 s, else `[E306]` not retried
+   with the screenshot - United India wants another detail). Every popup after Save is pressed OK and its WORDS kept: they go into
+   the stop ("- United India said "..."") - what comes after Save is the owner's next step.
+- **Where it runs**: a resumed proposal after Compute Premium (Modify first); a NEW proposal right after Update when the page
+  shows Update Ckyc (`ifShown`; none = the old stop "... (no Update Ckyc button on the page after Update)"). The Breaker
+  `stopthis-location` is now after Save.
+- The Aadhaar number shows only as `XXXXXXXX9012` in the log and the errors (`fillAndConfirm`'s new `mask` option).
+- Tests: `unitedIndiaLogin.test.js` (32: the KYC in both paths, the stop sentences, the data check before any click, the
+  owner's answers). Replica (real Chrome): Modify.JPG on the resumed page, Update Ckyc after Modify / Update, a REAL new window,
+  Offline KYC, a Save disabled until all four are in, a "saved" popup - `resume`, `resume-paged`, `kyc-new`: Save posted
+  Aadhaar card / the number / Verified / on, United India's words in the stop, the number never in full in the log; the replica's
+  Save comes enabled 1.5 s after the last detail (so the wait for it is proved). Full replica 248 pass; 13 of 13 deliberate
+  breaks caught.
+- **Not seen live**: the Modify confirmation's words, whether a NEW proposal shows Update Ckyc right after Update, the CKYC
+  pages (only the owner's markup), what United India answers after Save.
+
+### United India: a proposal made before is OPENED again, never made again - Proposal Modification (the owner, 2026-11-13)
+"The proposal is finished - how does it resume?" When the TP part's Proposal step is completed with its number AND Reference
+Date (the run saves both; Edit -> Status asks both), the next run (`unitedIndiaTP.js`, `loadResumePlan` -> `planResume`, which
+now also returns `referenceDate`) does, after the login:
+1. Policy Transaction > **Proposal Modification** (`unitedIndiaMenu.js openProposalModification`; the owner's link
+   `../motor/proposalModification.do?...parameter=proposalModify`).
+2. **From / To Reference Date** = the saved date, both the same (`fromRefDateString`, `toRefDateString` - calendar boxes, put in
+   by script, never clicked: `putDate`), **Fetch** (`input[name=fetch]`, loader watched, 20 s).
+3. The list `table#data` (Select | Proposal Number | Reference Date | Insured Name | Total Premium): OUR number's row (exact) ->
+   its radio `proposalOption`, read back. **The portal pre-selects the FIRST row** - Next is pressed only when the checked radio
+   is ours and the only one (read again right before Next): never another customer's proposal. Not listed = `[E306]` not retried,
+   naming what is listed ("Check the United India proposal number and its Reference Date in Edit -> Status"). Page links after
+   the list (a link whose text is the next page number) are followed up to 20 pages - **their markup is not seen live**.
+4. **Next** (`input[name=next]` - it has `id="updt"` like Risk Details' Update picture, so never found by that id) -> the
+   proposal's page. Then (the owner, same day: "these changes must be done on a resume"): **High Risk "No" again**
+   (`unitedIndiaInsured.js setHighRiskNo`), **More Covers N Info**, the TPPD Limit checked (only changed when it differs from the
+   policy), the **PA Cover** set again, **Back**, **Compute Premium** - the same steps and rules as a new proposal.
+5. Breaker `stopthis-location`, else the stop "... the proposal was made before, so it was opened from Proposal Modification (not
+   made again), High Risk (No), More Covers N Info, TPPD Limit and PA Cover set again, back on Risk Details and Compute Premium
+   done; what comes after (Update, the KYC) is not built yet - proposal N of DD/MM/YYYY". A completed proposal WITHOUT its
+   Reference Date stops at once (`[E306]`, not retried: add the date in Edit -> Status).
+- Tests: `unitedIndiaLogin.test.js` +4 (the resume order, no new proposal; the missing date; a fresh plan = the full form; the
+  look-up checks and "ours only when it alone is checked"), `relianceStages.test.js` +1 (planResume's referenceDate). Replica:
+  `resume`, `resume-paged`, `resume-not-listed` through the REAL handler (18 checks: From/To sent, ONE Fetch, Next sent OUR row
+  `option 1` never the pre-selected 0, page 2 followed, High Risk "No" posted with More Covers, Back once, the stop + ONE
+  screenshot; not listed = Next never pressed). Full replica 235 pass; 11 of 11 deliberate breaks caught.
+- **Not seen live**: the page Next opens (assumed the proposal's Risk Details: High Risk, More Covers N Info, Compute Premium are
+  looked for there), the list's paging markup, a "no records" answer (an empty list = `[E306]`).
+
+### United India: a slow answer is never thrown away - the page-load limit = the time left, never 2 s (the owner, 2026-11-13, 4th)
+The owner: "if I click the browser's refresh and then Compute Premium by hand it works - why not the automation?" Found in a real
+Chrome (`scratchpad` probes, then the replica): **the run itself cancelled United India's answer.** Compute Premium SENDS the page
+(live: `gc_ashokleyland1.do`); while United India works, the old page shows its loader. ChromeDriver holds every command until
+that page arrives, up to the page-load limit, and when the limit runs out it **cancels the page**. The run waited with a **2 s**
+limit (chosen earlier so a hung submit could not hold it for 300 s), so any answer slower than 2 s was thrown away: the old
+page kept its loader up for good (his "loader spinning"), the refresh reloaded that old page, the second press was thrown away
+the same way, then `[E302]`. His own click just waits. Probe: an answer at 6 s - under 2 s: cancelled at ~3 s, loader up
+forever; under 20 s: the premium page at 6 s. (The refresh itself was fine.)
+- **Now** (`unitedIndiaNavigate.js limitToTimeLeft`): while a step waits, the limit is **the time left of its wait**, set again
+  before every look (at least 0.5 s): More Covers / Back 20 s, Compute Premium 15 s then 20 s, Update 15 s, the Quote PDF /
+  Worksheet 40 s (`unitedIndiaQuote.js`). A slow answer is waited for; only one that misses the owner's time is cancelled -
+  exactly when his rule says refresh / error. A click that itself waited for its page counts in the time (`startedAt`).
+- While a look is held by a page on its way, a line every 5 s (`sayWhileHeld`, real timers):
+  `   5 s after "Compute Premium": the page is on its way - United India is still answering` (More Covers: "the next page is on
+  its way", the quote: "its file is on its way"); then `   the page changed 6.1 s after "Compute Premium" (.../gc_ashokleyland1.do)`.
+- A loader that has already stopped when the time runs out gets its 2 s to prove it stays off (an answer at 14 s of 15 is done,
+  not refreshed). `PAGE_LOAD_POLL_MS` (2 s) is gone.
+- Tests: the fakes now act like ChromeDriver with a page on its way (held looks, cancelled past the limit): Compute +6 (6 s and
+  14 s answers waited for; no answer -> cancelled AT 15 s, refreshed, the second press answered; a click that waits; a page sent
+  late is cancelled at 15 s, not later), More Covers +5, Quote +2. 289 United India tests pass. 12 of 12 new deliberate breaks
+  caught (+ the 17 before). Replica (real Chrome) `compute-submits-slow` (Compute sends the page, 6 s; the Quote PDF 6 s) and
+  `morecovers-slow` (6 s): pass on the new code; **on the old code they fail exactly like his live run** (`posts 2`,
+  `loader: block`, `[E302] ... still spinning 20 seconds after "Compute Premium" was pressed again`). Full replica 217 pass.
+  `ONLY=a,b node test/manual/uiicReplica/loginCheck.js` runs just those scenarios.
+
+### United India: Compute Premium and Update - press ONCE, WATCH the loader, refresh, press again (the owner, 2026-11-13, 3rd rule)
+"I think there is some lag - only click the button and wait for the loader to stop; still spinning, then refresh, the loader
+stops, click Compute Premium again; still not stopping in 20 sec, then the error - same for Update - and watch the loader
+carefully, its start and whether it is loading." Replaces the two sections below.
+- **One press, nothing else touched** (`unitedIndiaNavigate.js pressAndWatch` / `watchAfter`): the page's end, the button
+  pressed once, the GSTIN question OK, then a look about every quarter second, said in the log:
+  ```
+  🧮 United India - "Compute Premium" pressed - watching the portal's loader (up to 15 seconds)
+  ✓ United India - after "Compute Premium" the portal asked "GSTIN/UIN HAS NOT BEEN INSERTED. ..." - OK pressed
+  ⏳ United India - the portal's loader is showing (div#dialog.window) 0.3 s after "Compute Premium"
+     5 s after "Compute Premium": loader showing (div#dialog.window), page loaded
+     the loader stopped 7.4 s after "Compute Premium"
+  ✅ United India - "Compute Premium" done (the loader ran 7.1 s)
+  ```
+  plus "the page changed N s after ..." when the portal opens a new page. `portalBusyInPage` also looks inside the page's
+  frames now. **Done** = the page loaded and the loader **off for 2 s** (a loader that blinks off for a moment is not done) -
+  for Compute Premium after a loader was seen, or (no loader seen) after the press did something and the Update button is on the
+  page; for Update when the Proposal Number is on the page.
+- **Times**: Compute Premium **15 s**, Update **15 s**. Not done: `⟳ United India - 15 seconds after "Compute Premium" the
+  portal's loader is still spinning - refreshing the page`, then **the refresh** (`unitedIndiaCompute.js refreshAndSettle`):
+  the reload and the loader stopping together at most **20 s** ("the page reloaded in 2.4 s - watching the portal's loader"),
+  then `after the refresh the loader has stopped - pressing "Compute Premium" again` - **20 s** for Compute Premium, **15 s**
+  for Update (unless the refreshed page already shows the proposal: then Update is NOT pressed again).
+- **Errors** (`[E302]`, retried later, screenshot): the refreshed page did not load / its loader did not stop within 20 s
+  ("... after the page was refreshed it did not load within 20 seconds" / "its loader did not stop within 20 seconds"), or the
+  second press still not done ("... 20 seconds after "Compute Premium" was pressed again (after a refresh)"). When no loader
+  was seen the sentence says so instead of "spinning".
+- **Proved in real Chrome (2026-11-13)**: a `refresh()` that meets its page-load limit is **stopped** by ChromeDriver - the old
+  page stays and the portal's answer is thrown away (a 6 s reload under the clicks' 2 s limit). So the refresh runs under a
+  20 s limit; the replica's stuck-page refresh answers in 3 s and is waited for.
+- Removed: `clickAndSettle`, `updateOnce`, `waitForProposal`, `waitForButton`, `waitForPremium`, `refreshPage` (nothing used them).
+- Tests: `unitedIndiaCompute.test.js` (17, incl. the 20 s refresh limit, the blink, the 5 s lines), `unitedIndiaProposal.test.js`
+  (13); all 275 United India tests pass. Replica (real Chrome): 211 checks pass - the loader's start and stop said for both
+  buttons, a Compute that never stops (refreshed, pressed again, [E302] at 15 s with 6 s limits), a stuck first Compute (slow
+  3 s reload, pressed again, done), a stuck first Update (refreshed, pressed again, proposal saved). 17 of 17 deliberate breaks
+  caught. Full suite: 1649 pass, 1 old failure (the two `reliance_captcha_*.png` files in the repo root).
+- **Not seen live**: whether the post-Compute page's loader is `div#dialog.window` (his last log said "no loader was seen"
+  while he saw it spinning) - the new lines will show what the run sees, second by second.
+
+### United India: Compute Premium is done only when Generate Quote shows; 20 s, then refresh once (the owner, 2026-11-13) - SUPERSEDED, see above
+His live run: after Compute Premium the loader went quiet for a moment and the next page (gc_ashokleyland.do) was there, so the
+run called it done - but the portal was still working and **Generate Quote was not on the page** ([E301] "Generate Quote is not
+on the page"). His rule: "the loader still running - refresh the page and click the button again; still loading, then the
+error"; "only 20 sec, then refresh".
+- **Done** = the Generate Quote button on the page AND the portal idle (its loader, its requests, the page's load) -
+  `unitedIndiaCompute.js waitForPremium`; a quiet loader alone is no proof any more.
+- **One try = 20 s** from the click (`COMPUTE_WAIT_MS`; the other steps keep 40 s). Still loading / no Generate Quote / nothing
+  happened: the page is **refreshed** (F5 - proved in real Chrome that an automated Chrome sends the form again without the
+  "Confirm Form Resubmission" question), and Compute Premium pressed **once more** (the GSTIN question OK again). Still not:
+  `[E302] United India - after "Compute Premium" its loader was still running, also after the page was refreshed and Compute
+  Premium pressed again (20 seconds each) - a loader issue at United India ...`. A popup is never refreshed away ([E308]).
+- Tests: `test/unitedIndiaCompute.test.js` rewritten (13). Replica: Generate Quote / Worksheet / Update hidden until the premium
+  is there; a first try whose loader never stops (refreshed, pressed again, on to the premium) and one that never stops at all
+  ([E302] after the refresh): all pass. 6 of 6 deliberate breaks caught.
+
+### United India: Compute 15 s -> refresh -> Update button 20 s; Update 15 s -> refresh + press again; Quote where it shows (the owner, 2026-11-13, after a 2nd live run) - Compute / Update parts SUPERSEDED (press-and-watch section above); the Quote part stands
+His live run: Compute Premium went to gc_ashokleyland1.do, no loader was seen, and **Generate Quote never showed** (nor after a
+refresh and a second press) -> [E302]. His rules:
+- **Compute Premium** (`unitedIndiaCompute.js computePremium`): the GSTIN question OK; DONE = the **Update button** on the page
+  and the portal idle, at most **15 s** (`COMPUTE_FIRST_MS`). Not done: the page **refreshed** (the form sent again) - Compute
+  Premium is **NOT pressed again** - and the Update button waited for, at most **20 s** (`AFTER_REFRESH_MS`). Still not:
+  `[E302] United India - 15 seconds after "Compute Premium" the portal was still loading, and after the page was refreshed the
+  Update button did not come within 20 seconds - a loader issue at United India ...`.
+- **Update** (`unitedIndiaProposal.js`): **15 s** a try (`UPDATE_WAIT_MS`), then refresh + Update pressed once more (never over
+  a proposal the refreshed page already shows), 15 s; still not = [E302].
+- **Quote PDF / Worksheet** (`quoteAndWorksheet` `ifShown`): taken where Generate Quote IS - before Update, else after Update; a
+  page without the button = "no Generate Quote button after Compute Premium / after Update" in the log, not an error; never
+  there = one warning line, the run goes on (the files are just not kept).
+- Tests: `unitedIndiaCompute.test.js`, `unitedIndiaProposal.test.js`, `unitedIndiaQuote.test.js` (+2), `unitedIndiaLogin.test.js`
+  (+1, the order). Replica: a stuck Compute whose refreshed page is the worked-out one (no second press), a Compute that never
+  works out ([E302]), a stuck Update, and a page where Generate Quote / Worksheet only show after Update (taken there): all pass.
+  7 of 7 deliberate breaks caught.
+
+### United India: Update gets the same 20 s + refresh (the owner, 2026-11-13) - SUPERSEDED (press-and-watch section above)
+"Update button click then also want to reload like thing." `unitedIndiaProposal.js updateOnce` / `updateAndSaveProposal`:
+- **Done** = the Proposal Number on the page AND the portal idle (`waitForProposal`), at most **20 s** from the click
+  (`UPDATE_WAIT_MS`).
+- Still loading / no Proposal Number / nothing happened: the page is **refreshed** (`unitedIndiaCompute.js refreshPage`, now with
+  the button's name for a popup's sentence) and Update pressed **once more** (the GSTIN question OK again) - **unless the
+  refreshed page already shows the proposal**: the first Update finished meanwhile, a second press would make a SECOND
+  proposal, so it is taken as it is ("the refreshed page already shows proposal N - Update is NOT pressed again").
+- Still nothing: `[E302] United India - after "Update" its loader was still running / no Proposal Number came on the page, also
+  after the page was refreshed and Update pressed again (20 seconds each) - a loader issue at United India ...`.
+- Tests: `test/unitedIndiaProposal.test.js` (10). Replica: a first Update whose loader never stops - refreshed, pressed once on
+  the new page, the proposal read and saved: pass. 5 of 5 deliberate breaks caught (one is the second press over a shown proposal).
+
+### United India: Quote PDF, Worksheet, then Update = the PROPOSAL (the owner, 2026-11-13)
+After Compute Premium (`unitedIndiaTP/unitedIndiaQuote.js`, `unitedIndiaTP/unitedIndiaProposal.js`); the Breaker is now after the
+proposal is saved, and without the Breaker the run stops with "... Update pressed and the proposal saved, the KYC is not built yet
+- proposal 202611131194829 of 13/11/2026".
+- **Generate Quote** (`fnSubmit('quote')`) and **Worksheet** (`fnSubmit('worksheet')`, a new page): the page scrolled to its end,
+  the portal ready, ONE click each, at most 40 s for the file. Taken whichever way it comes: a download (the job's browser saves
+  PDFs straight to its folder - `ctx.downloadDir`, new in runHandler; a finished file, never a `.crdownload`), a new window with a
+  PDF (fetched there with the same login), a new window with a page (printed to PDF; kept as the page `.html` when this Chrome
+  cannot print), the same window (taken, then back). The worksheet window is closed, the run is back on the main page. Uploaded to
+  S3 `proposals/united-india/` and saved on the policy as **`quotePdf`** / **`worksheetPdf`** - the View page lists them in Files
+  ("Quote PDF", "Worksheet"; frontend + backend model).
+- **Update** (`#updt`, `fnSubmit('update')`): the GSTIN/UIN question OK (read first), the loader at most 40 s. Then the
+  **proposal** read off the page by its labels (the owner's markup): Proposal Number, Transaction NO (or the hidden
+  `#transactionId`), Reference Date, Customer ID. No number = `[E301]`. Saved:
+  - the part's **Proposal step = completed** with them (`relianceStages.<part>.proposal`, the Reliance/KSHEMA step helper worded
+    United India; KYC and Payment back to pending) - History and Edit -> Status show it (the backend now gives United India parts
+    their steps: `relianceStagesDao.js STAGED_INSURERS`);
+  - `unitedIndiaProposal` { proposalNumber, referenceDate, transactionNo, customerId, at };
+  - `proposalNumber` (the list) ONLY when the policy has none - on Reliance OD + United India TP it stays Reliance's.
+  A write that fails never fails the run; the log then says the proposal was made at United India and to complete it by hand.
+- **By hand** (Edit -> Status, both rule copies `shared/relianceStagesCore.js` = `lib/relianceStagesCore.js`, the frontend's
+  `utils/relianceStages.js`): a United India Proposal is completed with ITS number - digits only, like 202611131194829 (a Reliance
+  "R..." referral number is refused); it is kept on `unitedIndiaProposal`, `proposalNumber` only when empty. The dialog says
+  "United India proposal number".
+- **Not built (the owner will say)**: going straight to the KYC on a later run with the saved proposal - today a retry after the
+  proposal makes a new one.
+- Tests: `test/unitedIndiaQuote.test.js` (8), `test/unitedIndiaProposal.test.js` (8); backend `test/stagesByHand.test.js` +2 (in-memory
+  MongoDB); frontend `StageStatusDialog.test.js` +2, `ViewOnlinePolicy.live.test.js` +2. Replica: a real quote download, a real
+  worksheet window printed to PDF, Update with the real GSTIN confirm() and the owner's proposal markup read exactly: all pass.
+  Deliberate breaks: automation 10 of 10, backend 3 of 4 (the 4th cannot change anything - the shared rule refuses first),
+  frontend 4 of 4.
+
+### United India: wait for the portal's loader before every step (the owner, 2026-11-13, after a live run)
+His live run: the run's **More Covers click was lost** (he clicked it by hand; the run then saw the new page). His words: "the
+loader opens for some time, then the click does not work - wait for the loader". His loader's markup:
+`<div id="dialog" class="window" style="... position: fixed; z-index: 99999; ... display: block;"><img src="../resources/images/wait.gif"
+alt="Loading..."> ... <span>Loading...</span></div>` - a SMALL fixed box (270 x 103), which matched none of the common loader
+markers, so the run never saw it.
+- `multiCompany/common/loader.js` "united india": **`#dialog.window` and `img[src*='wait.gif']`** added (the common markers stay),
+  limit **40 s** (was 30). Every `waitForLoader(.., "united india")` now waits for it (after each choice's onchange too: the
+  RTO's invoice zone, ...).
+- `unitedIndiaSteps.js waitPortalReady` (`portalBusyInPage`): before EVERY box (`showOnScreen`): the portal's loader showing
+  anywhere, or a page-wide layer drawn over the box (any name - what `elementFromPoint` finds there); before a SUBMIT button
+  (More Covers N Info, Back, Compute Premium) also the page loaded and no jQuery request running (`jQuery.active`). At most
+  40 s, then `[E302] United India - the portal was still busy before "<step>" after 40 seconds (its loader (div#dialog.window)
+  is showing, 1 request still running) - a loader issue at United India ...`. The log says when it had to wait and for what.
+- A click something COVERS is no longer pushed through by a script click: what covers it is logged ("is covered by <div ...>"),
+  the portal is waited for, and it is clicked again for real.
+- While the page has not changed after a submit button, a line at 5, 10 and 15 s says what the run sees (submit started, page
+  load seen, loader, requests running).
+- Tests: `test/unitedIndiaPortalReady.test.js` (11). Replica: the owner's real loader box over the button (Compute Premium 3 s;
+  the RTO's invoice zone 4 s + a request 6 s - More Covers then clicked ONCE, posted once) and an unknown page-wide layer: all
+  pass. **With the old behaviour put back the replica reproduced his live case**: the first More Covers click lost, the
+  Compute Premium loader "waited 0 ms", a loader that never stops gave no error. 9 of 9 deliberate breaks caught.
+
+### United India: Back, then Compute Premium (the owner, 2026-11-13)
+`unitedIndiaTP/unitedIndiaCompute.js` `backAndComputePremium`, after the PA Cover; the Breaker is now after it.
+- **Back** `<img src="...Back.JPG" onclick="fnSubmit('back')">` on the More Covers page: the portal goes back to Risk Details
+  (20 s, else `[E301]`).
+- The page is **scrolled to its very end** (the owner), then **Compute Premium** `#compute` (`fnSubmit('computepremium')`).
+- **The GSTIN/UIN question** ("GSTIN/UIN HAS NOT BEEN INSERTED ... Do you want to proceed? If Yes, Click On Ok. If No, Click on
+  Cancel to update GSTIN/UIN.") is a confirm(): **OK** is pressed (the owner). It is read BEFORE anything else touches the page:
+  ChromeDriver closes an open popup with CANCEL as soon as another command meets it (= "update GSTIN"). Proved with a real
+  confirm() in real Chrome. Any OTHER popup is the portal's answer: `[E308]` in its words, closed with Cancel (nothing
+  unexpected goes ahead).
+- (The loader, second-click and `clickAndSettle` bullets below are replaced by "Compute Premium and Update - press ONCE, WATCH
+  the loader" above.)
+- **The loader**: the premium may come on the same page behind the portal's loader. Waited for while the page loads or the
+  loader is up; done when it has been gone for 1 s. **At most 40 s** (the owner): `[E302] United India - after "Compute
+  Premium" the portal's loader was still running after 40 seconds (a loader issue at United India), so the run stopped there.
+  It will try again shortly.` with the screenshot. The log says how long it ran ("the portal's loader ran 3.1 s").
+- No sign at all 5 s after the click (no question, no loader, no page): clicked once more; still nothing = `[E301] ... was
+  clicked twice but nothing happened`.
+- **One page change for every submit button** (`unitedIndiaTP/unitedIndiaNavigate.js`): `clickToNextPage` (More Covers N Info,
+  Back) and `clickAndSettle` (Compute Premium) share the page mark, the single click, the 2 s page-load limit while waiting (NOW the
+  time left - see "a slow answer is never thrown away"),
+  `window.stop()` on a timeout, and popups read first (`onPopup` says which is a step of the flow).
+- Tests: `test/unitedIndiaCompute.test.js` (11; the fake closes a popup with Cancel when another command meets it, like
+  ChromeDriver). Replica: Back posted once, the real GSTIN confirm() answered OK, the loader (3 s) waited for and the premium
+  shown, "Please select the Zone" = `[E308]`, a loader that never stops = `[E302]` (6 s limit there): all pass. 10 of 10
+  deliberate breaks caught.
+- **Not seen live**: the portal's loader markup after Compute Premium (`loader.js "united india"` looks for blockUI, #loading,
+  #loader, .loading, .loader, a loading image, .spinner-border) - if it is something else, the run would not see it and
+  would carry on as soon as the page is quiet. The page after it (the premium) is not read yet.
+
+### United India: the PA Cover on the More Covers page (the owner, 2026-11-13)
+`unitedIndiaTP/unitedIndiaPaCover.js` `fillPaCover`, after the TPPD Limit; the Breaker is now after it.
+- **PA bought with United India** (`paCover` on for this part - lib/partRunner.js gives it only to the part that buys the PA - and
+  not Brisk's, read from `settings.PACompany`; the same reading as National's TP, `nationalTP/tpPa.js`):
+  `#ynPAcover` ticked (never clicked when ticked already; disabled = a stop), then **CPA Cover** `select[name="cpaCover"]` = the
+  policy's `paCoverYears` (1 or 5 - the Online Policy asks it, no default; the backend refuses another), **Nominee Name**
+  `#nomineeName` (letters and spaces, upper case, 100 max) and **Relation** `#rltnshpstat` (the form offers United India's own 17;
+  "GRAND-SON" as saved = "Grand-Son"; one not offered stops listing what it offers). All read once more at the end.
+- **Otherwise** (no PA, or Brisk's certificate): `#ynPAcover` ticked and unticked again - its `checkdriv('1')` then shows the
+  **Owner-Driver CPA** question - and `select[name="ynOwnerDrivCpaOpt"]` = **No** (the owner's steps). Brisk's nominee is never
+  typed at United India.
+- The policy's year / nominee / relation are checked before the page is touched (one sentence, not retried).
+- Tests: `test/unitedIndiaPaCover.test.js` (13). Replica: the owner's markup with a `checkdriv()` that shows the PA fields when
+  ticked and the Owner-Driver CPA question after an untick, `checkfun2()` recorded: PA with United India (5 Year, DEVA K,
+  Grand-Son, the question untouched) and none (ticked + unticked, "No"): all pass. 12 of 12 deliberate breaks caught.
+- **Not seen live**: whether the portal shows the Owner-Driver CPA question only after an untick (the owner's steps say so), and
+  whether a 5-year PA changes the premium United India quotes (the Online Policy's PA amount is not changed by the year).
+- Frontend / backend (same day): the form asks United India's 17 relations and the year (1 or 5, no default); the server
+  refuses another year (frontend README "United India", backend README §25).
+
+### United India: every box in the middle of the screen, for the run's video (the owner, 2026-11-13)
+"The field filling goes below but the screen does not scroll, so the video does not show it." `unitedIndiaSteps.js`
+`showOnScreen` (`centerInPage`) runs before every box the run **fills, chooses, clicks, checks or waits for**: the choice the
+portal already shows (Client Type Individual, Title Mr), the Year it already shows, the Date of Purchase, and the District
+while it is waited for after the Pin Code. (Before, only a click / a first choice / typing scrolled, and a box that was only
+checked or waited for stayed off the screen.)
+- **`behavior: "instant"`**: the old call followed the page's own scrolling, and with smooth scrolling (Bootstrap - the portal's
+  classes are Bootstrap's - turns it on for the whole page) the boxes were typed into while the screen was still on its way:
+  the real-Chrome replica measured the Year and the Address 1,100 - 2,000 px BELOW the screen. Now every box ends in the
+  middle (0.50 of the screen's height, measured).
+- A box still not on the screen after that: the window itself is scrolled to it.
+- **0.2 s pause only when the screen really moved** (40 px or more), so the video shows the box before it changes; a box
+  already in the middle costs nothing.
+- Scrolling trouble never stops a run; a popup (`[E308]`) and a Hold / Breaker stop always go on up.
+- Tests: `test/unitedIndiaOnScreen.test.js` (9). Replica: a TALL page (1,100 px between the groups) with
+  `scroll-behavior: smooth`: the Year (only checked), the Address and the District (only waited for) are in the middle. 10 of
+  10 deliberate breaks caught, plus the real-Chrome one (the old scroll with smooth scrolling -> boxes far below the screen).
+
+### United India: a screenshot for every error and every stop (the owner, 2026-11-13)
+"Every error want to take the screenshot."
+- **Errors** already got one (`multiCompany/common/runHandler.js` -> `screenshot.js captureFailure`, one per attempt, S3
+  `screenshots/multiCompany/united_india/`, shown under the policy's Issues).
+- **Stops** now get one too: the Breaker (`stopthis-location`) and "the rest of the TP form is not built yet". `runHandler`
+  option `screenshotOnStop`, **on for United India only** (`unitedIndiaTP.js`); Reliance OD and the login-only handlers are
+  unchanged. A **Hold** never takes one (the operator's own choice). Console: `📸 [job] united india TP - screenshot of the page
+  at the stop saved`.
+- **A portal popup open at the picture**: Chrome refuses the first try (and closes the popup as it says so), so it is taken
+  ONCE more; the popup's words go to the console. Before, such an error had no picture. This is `captureFailure`, so it holds
+  for every runHandler company (only ever one extra try, only for that error).
+- **Still no picture**, because no page exists yet: errors before the window opens (no portal login E205, the feature gate
+  E110, the part runner's data checks). A job timeout (E302) has the stall watch's picture only when the page went quiet.
+- Tests: `test/unitedIndiaScreenshots.test.js` (9), `test/unitedIndiaRisk.test.js` (now 33). Replica
+  (`test/manual/uiicReplica/loginCheck.js`, S3 replaced by an in-memory fake): late manufacturer list, Model not in the list,
+  a real `alert()` open at the picture, the handler's stop and error pictures (real PNGs): 65 of 65 pass. 15 of 15
+  deliberate breaks caught in a scratch copy, plus the real-Chrome one (no retry -> no picture with a popup open).
 
 ### Reliance's Appointee Name: only for a nominee under 18 (2026-11-11)
 The owner: on the Online Policy a Reliance nominee may now be under 18 (no 18+ limit on the Nominee DOB), and the Appointee

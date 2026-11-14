@@ -13,6 +13,31 @@
  */
 const { uploadScreenshotToS3, generateScreenshotKey } = require("../../s3Uploader");
 
+/** The error a command gets while a portal alert() / confirm() is open. */
+const isPopupError = (e) =>
+  !!e && (e.name === "UnexpectedAlertOpenError" || /unexpected alert open/i.test(String(e.message || "")));
+
+/**
+ * The page's picture. A portal popup that is still open refuses the first try (Chrome closes it as it says so - its
+ * default), so it is tried ONCE more; the popup is closed (Cancel, the same as Chrome's own) if it is still there.
+ * (2026-11-13, the owner: every error gets its screenshot - a popup at the failure used to leave it without one.)
+ */
+async function takePicture(driver) {
+  try {
+    return await driver.takeScreenshot();
+  } catch (e) {
+    if (!isPopupError(e)) throw e;
+    const said = /Alert text\s*:\s*([^}]*)\}?/i.exec(String(e.message || ""));
+    console.warn(`[multiCompany] a portal popup was open at the screenshot${said && said[1].trim() ? ` ("${said[1].trim()}")` : ""} - it was closed and the picture taken again`);
+    try {
+      await driver.switchTo().alert().dismiss();
+    } catch (gone) {
+      /* already closed by Chrome */
+    }
+    return driver.takeScreenshot();
+  }
+}
+
 /**
  * @param {WebDriver} driver
  * @param {{company: string, jobId: string, attempt?: number}} ctx
@@ -21,7 +46,7 @@ const { uploadScreenshotToS3, generateScreenshotKey } = require("../../s3Uploade
 async function captureFailure(driver, ctx = {}) {
   try {
     if (!driver) return {};
-    const base64 = await driver.takeScreenshot();
+    const base64 = await takePicture(driver);
     const key = generateScreenshotKey(
       String(ctx.jobId || "job"),
       ctx.attempt || 1,
@@ -36,4 +61,4 @@ async function captureFailure(driver, ctx = {}) {
   }
 }
 
-module.exports = { captureFailure };
+module.exports = { captureFailure, takePicture, isPopupError };
