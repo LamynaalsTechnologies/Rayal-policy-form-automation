@@ -22,6 +22,41 @@ node --require ./test/support/noRealWorld.js --test test/kshemaFinancier.test.js
 database (8 real Chrome windows and S3 uploads once happened when a default changed). After changing a default behaviour, grep `test/` for tests
 that rely on the old one. Restart the runner after editing `.env` (every switch is read at call time, but `.env` is read at start).
 
+### KSHEMA financier-name collector (hand-run, 10 windows)
+
+`scripts/collectKshemaFinanciers.js` (logic `lib/kshemaFinancierCollect.js`, tests `test/kshemaFinancierCollect.test.js`). Options:
+`--policy <KSHEMA policy id>`, `--windows N` (1-10, default 10), `--show`, `--resume`, `--no-db`.
+
+- **`--policy <id>` (automatic, headless):** each window logs in with that policy's KSHEMA login (same resolver as the Make/Model
+  collectors), walks the normal KSHEMA steps to the nominee page, answers the financier question Yes and searches the "Financier Name"
+  box. **It saves a quote at KSHEMA in every window** (the nominee page exists only after the quote is saved); it never presses Save
+  and Finalize, never clicks a financier, pays nothing, and is given NO policy id, so it cannot read or write the policy. The only
+  change to the working KSHEMA code is one inert hook at the top of `fillFinancier` (`kshemaFinancier.js`, shared by the full and TP
+  flows, used by no other company); a queued job never carries a function, so a normal run never takes it. The flow's last result is
+  `COLLECTED_MARKER`, and its one failure screenshot is the only extra side effect. `--show` shows the windows.
+- **Without `--policy`:** 10 visible windows; you log in and open the nominee page (Financier = Yes) in each, press Enter once.
+
+1. **Probe first** (window 1): the fewest letters that open the list (1, then 2, then 3), whether it matches the START of a name or
+   any part, and the most rows it shows (a cap is assumed when the same biggest list appears twice). Printed and kept in the JSON.
+2. **Shared search list**: every window takes its next prefix from one queue, so no search is done twice. A list as long as the cap
+   (or 5 when no cap was seen) is split into longer prefixes, up to 8 letters (`KSHEMA_COLLECTOR_MAX_PREFIX_LENGTH`).
+3. **Saved once, for KSHEMA, into Master > Financier** (collection `financier`, 2026-11-18): each new name is added at once as a row
+   with `financierName` UPPER CASE, `companies: ["KSHEMA"]`, `clientId: "COMMON"`, `createdBy: "kshema-financier-collector"`, and an EMPTY
+   `financierType` / `financierAddress` (KSHEMA's list gives only the name - nothing is invented; the Financier page asks for them
+   when a row is edited). Never a second row: names are compared ignoring case and spacing; a name already there for KSHEMA, or with
+   no company (= every company), is skipped; a name that exists only for other companies gets "KSHEMA" added to its companies. The
+   master and the JSON file are read first. Copy and checkpoint: `../Data/kshema-financiers-export.json`.
+4. **Every console line starts with `[window N]`** (also the KSHEMA flow's own lines). **A window with a problem is restarted**
+   (`--policy` mode only; up to 3 restarts, 5 s apart, new browser + login; the others keep working from the shared queue). Not
+   restarted: finished, Ctrl+C, nothing left, the list never opened, or the Yes answer / box not found (the same on every window).
+   A search given back twice is listed as failed and left for `--resume`. The list is read in ONE call (a 143-name list was 430).
+   With no cap seen a list is split only when it is as long as the longest the probe saw. Undo:
+   `db.financier.deleteMany({ createdBy: "kshema-financier-collector" })`.
+   **`node scripts/kshemaFinanciersToMaster.js [--apply] [--file <json>]`** copies the names the first runs saved in
+   `insurerFinancier` into the master (dry run without `--apply`; `insurerFinancier` is only read). Done live 2026-11-18: 6475 rows.
+5. `buildKshemaFlowData` mirrors `server.js buildFormDataFromPolicy`; a test fails if server.js gains a field the collector lacks.
+6. Ctrl+C finishes the current searches and saves; `--resume` continues. Not run live yet.
+
 ---
 
 ## 1. Where things are
