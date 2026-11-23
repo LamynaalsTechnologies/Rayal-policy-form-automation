@@ -368,8 +368,37 @@ async function dumpAvailableControls(driver, label) {
   }
 }
 
+// readMatSelectValue inside the page in ONE call: the selectors in order, inside the mat-select; the first SHOWN
+// element (selenium's own isDisplayed - getText gives "" for a hidden one) with text wins.
+const MAT_SELECT_VALUE_SCRIPT = `${pageReads.IS_SHOWN}${pageReads.FIND_ALL}
+  var root = arguments[0];
+  var selectors = arguments[1] || [];
+  if (!root) return "";
+  for (var i = 0; i < selectors.length; i++) {
+    try {
+      var els = root.querySelectorAll(selectors[i]);
+      for (var j = 0; j < els.length; j++) {
+        try {
+          var text = isShown(els[j]) ? textOf(els[j]).trim() : "";
+          if (text) return text;
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  return "";
+`;
+
 /** What a mat-select currently displays, or "" when it is empty. */
 async function readMatSelectValue(driver, selectElement) {
+  // ONE browser call (speed round 3); when it cannot run, the selectors are read one by one below, as before.
+  if (selectElement && driver && typeof driver.executeScript === "function") {
+    try {
+      const text = await driver.executeScript(MAT_SELECT_VALUE_SCRIPT, selectElement, SELECT_VALUE_SELECTORS);
+      if (typeof text === "string") return text.trim();
+    } catch (e) {
+      /* one call per selector / element below */
+    }
+  }
   for (const selector of SELECT_VALUE_SELECTORS) {
     try {
       const els = await selectElement.findElements(By.css(selector));
@@ -414,8 +443,9 @@ async function searchInPanel(driver, term) {
     // Some search boxes only re-filter on a real keystroke, so the text is
     // typed rather than set.
     await box.element.sendKeys(String(term || ""));
-    // The list is filtered client-side or fetched — either way it needs a beat.
-    await driver.sleep(800);
+    // The list is filtered client-side or fetched — either way it needs a beat. (2026-11-23: still up to the same
+    // 800 ms, but no longer than it takes until every option on show contains what was typed - the filter has run.)
+    await waitForFilteredList(driver, term, 800);
     return true;
   } catch (e) {
     warn(`   Could not type into the dropdown's search box: ${e.message}`);
@@ -450,6 +480,76 @@ async function readTextsAtOnce(driver, els) {
   return texts;
 }
 
+// The texts of the options on show (the first option selector that matches anything; "" for one not shown).
+const SHOWN_OPTION_TEXTS_SCRIPT = `${pageReads.IS_SHOWN}${pageReads.FIND_ALL}
+  var optionSelectors = arguments[0] || [];
+  for (var k = 0; k < optionSelectors.length; k++) {
+    try {
+      var els = document.querySelectorAll(optionSelectors[k]);
+      if (!els.length) continue;
+      return Array.prototype.map.call(els, function (el) {
+        try { return isShown(el) ? textOf(el) : ""; } catch (e) { return ""; }
+      });
+    } catch (e) {}
+  }
+  return [];
+`;
+
+/**
+ * After typing in a panel's search box: wait up to `maxMs` (the old fixed pause), but stop as soon as every option on
+ * show contains the typed term - the portal's filter has then been applied. An empty term, a page that cannot be
+ * read, or a list that does not look filtered: the whole `maxMs` is waited, exactly as before.
+ * @returns {Promise<boolean>} true when it stopped early
+ */
+async function waitForFilteredList(driver, term, maxMs) {
+  const wanted = norm(term);
+  const until = Date.now() + maxMs;
+  if (wanted && driver && typeof driver.executeScript === "function") {
+    while (Date.now() < until) {
+      await driver.sleep(100);
+      let texts = null;
+      try {
+        texts = await driver.executeScript(SHOWN_OPTION_TEXTS_SCRIPT, OPTION_PANEL_SELECTORS);
+      } catch (e) {
+        texts = null;
+      }
+      if (!Array.isArray(texts)) break;
+      const shown = texts.map((t) => norm(t)).filter(Boolean);
+      if (shown.length && shown.every((t) => t.includes(wanted))) return true;
+    }
+  }
+  const left = until - Date.now();
+  if (left > 0) await driver.sleep(left);
+  return false;
+}
+
+// collectOptions' look, inside the page in ONE call: is an option panel shown (asked only until one was - selenium's
+// own isDisplayed), and the elements of the FIRST option selector that matches anything (shown or not, as
+// findElements gave them).
+const COLLECT_OPTIONS_SCRIPT = `${pageReads.IS_SHOWN}
+  var panelSelector = arguments[0];
+  var optionSelectors = arguments[1] || [];
+  var askPanel = arguments[2] === true;
+  var panelOpened = false;
+  if (askPanel) {
+    try {
+      var panels = document.querySelectorAll(panelSelector);
+      for (var i = 0; i < panels.length; i++) {
+        try {
+          if (isShown(panels[i])) { panelOpened = true; break; }
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  for (var k = 0; k < optionSelectors.length; k++) {
+    try {
+      var els = document.querySelectorAll(optionSelectors[k]);
+      if (els.length) return { panelOpened: panelOpened, options: Array.prototype.slice.call(els) };
+    } catch (e) {}
+  }
+  return { panelOpened: panelOpened, options: [] };
+`;
+
 /**
  * Watch for an open panel and the options inside it.
  *
@@ -462,6 +562,24 @@ async function collectOptions(driver, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
+    // ONE browser call per look (speed round 3); when it cannot run, this look is made one call at a time below.
+    if (driver && typeof driver.executeScript === "function") {
+      let res = null;
+      try {
+        res = await driver.executeScript(COLLECT_OPTIONS_SCRIPT, PANEL_SELECTOR, OPTION_PANEL_SELECTORS, !panelOpened);
+      } catch (e) {
+        res = null;
+      }
+      if (res && typeof res === "object" && Array.isArray(res.options)) {
+        if (res.panelOpened === true) panelOpened = true;
+        if (res.options.length) {
+          options = res.options;
+          break;
+        }
+        await driver.sleep(200);
+        continue;
+      }
+    }
     if (!panelOpened) {
       try {
         const panels = await driver.findElements(By.css(PANEL_SELECTOR));
@@ -773,16 +891,12 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
 
   // Read the value back. Material's click can land on the ripple layer instead
   // of the option, which looks like it worked and leaves the field unchanged.
-  await driver.sleep(400);
-  // Re-found for the same reason the text boxes are: choosing an option
-  // re-renders this form, and reading a detached mat-select gives "" — which
-  // would report a selection that plainly worked as a failure.
-  const verifyAgainst =
-    (await findVisible(driver, selectSelectors, null, 3000)).element || found.element;
-  const after = await readMatSelectValue(driver, verifyAgainst);
   // On a fuzzy pick the field will read back the OPTION's wording, not what was
   // asked for, so it is checked against the option that was actually clicked.
   const expected = fuzzy ? norm(target.text) : want;
+  // 2026-11-23: read every 100 ms instead of once after a fixed 400 ms - see readBackChoice. The decision below is
+  // the same one as before, on the reading it returns.
+  const after = await readBackChoice(driver, selectSelectors, found.element, expected);
   if (norm(after) !== expected && !norm(after).includes(expected)) {
     return {
       ok: false,
@@ -795,6 +909,34 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
 
   log(`   ✓ ${label} set to "${after}"`);
   return { ok: true, value: after, reason: null, matchedScore, matchedCandidate };
+}
+
+/**
+ * What a mat-select shows after an option was clicked. Read every `stepMs`, the select re-found each time (choosing an
+ * option re-renders this form, and reading a detached mat-select gives "" — which would report a selection that
+ * plainly worked as a failure). Returns as soon as TWO readings in a row show `expected` (a re-render right after the
+ * click shows up in the second one); otherwise it reads until `minMs` (the old fixed pause) have passed and returns
+ * that reading, so a miss is decided exactly as before. Never reads past `maxMs`.
+ */
+async function readBackChoice(driver, selectSelectors, fallbackElement, expected, { minMs = 400, maxMs = 1000, stepMs = 100 } = {}) {
+  const shows = (v) => norm(v) === expected || norm(v).includes(expected);
+  const started = Date.now();
+  let after = "";
+  let seenOnce = false;
+  for (;;) {
+    await driver.sleep(stepMs);
+    const verifyAgainst = (await findVisible(driver, selectSelectors, null, 3000)).element || fallbackElement;
+    after = await readMatSelectValue(driver, verifyAgainst);
+    const elapsed = Date.now() - started;
+    if (shows(after)) {
+      if (seenOnce) return after;
+      seenOnce = true;
+    } else {
+      seenOnce = false;
+      if (elapsed >= minMs) return after;
+    }
+    if (elapsed >= maxMs) return after;
+  }
 }
 
 /**
@@ -944,9 +1086,18 @@ async function typeIntoField(driver, selectors, value, label, opts = {}) {
       await clickElement(driver, found.element, `the "${label}" box`);
       await found.element.clear();
       await found.element.sendKeys(text);
-      // Let Angular finish whatever the keystrokes set off before reading back.
-      await driver.sleep(250);
+      // Let Angular finish whatever the keystrokes set off before reading back. (2026-11-23: read at once; a value that
+      // is already there must still be there 100 ms later - Angular replacing the box right after typing shows up as a
+      // stale or different second reading. Anything else waits the old 250 ms and is read again, as before.)
       landed = await found.element.getAttribute("value");
+      if (landed === text) {
+        await driver.sleep(100);
+        landed = await found.element.getAttribute("value");
+      }
+      if (landed !== text) {
+        await driver.sleep(250);
+        landed = await found.element.getAttribute("value");
+      }
     } catch (e) {
       // A stale-element error here means the re-render happened mid-type. That
       // is the case the retry exists for, so it is not fatal yet.
@@ -1505,4 +1656,7 @@ module.exports = {
   collectOptions,
   searchInPanel,
   readTextsAtOnce,
+  // tests (test/kshemaFieldPace.test.js)
+  _readBackChoice: readBackChoice,
+  _waitForFilteredList: waitForFilteredList,
 };

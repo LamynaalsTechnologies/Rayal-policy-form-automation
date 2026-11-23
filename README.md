@@ -158,6 +158,26 @@ full suite 1881 of 1898 pass (16 skipped; 1 = two old `reliance_captcha_*.png` l
 Note: `test/kshemaKycDocument.test.js` "download: a file over the size ceiling" can fail under parallel test load (it
 waits a fixed 50 ms) - passes 5/5 alone; the code it tests is unchanged.
 
+### Speed fixes, round 3 (2026-11-23): KSHEMA fields checked sooner - same checks, same decisions
+Per field on the server: the click ~0.39 s and the typing ~0.49 s are the portal's own JavaScript on the slow core
+(only a faster CPU shortens them); the fixed safety pauses after each field are ours. They now end as soon as the SAME
+check passes, and wait exactly as long as before when it does not (`fullPolicycompany/kshema/kshemaFields.js`, both flows):
+- typing (`typeIntoField`): read back at once; a match must still be there 100 ms later (a box Angular replaces right
+  after typing shows up then); anything else waits the old 250 ms and reads again.
+- picking an option (`readBackChoice`): read every 100 ms; two readings in a row showing the choice end it; a miss is
+  still decided at 400 ms on the last reading, as before (never past 1 s).
+- a panel's search box (`waitForFilteredList`): up to the same 800 ms, ended early only when EVERY option on show
+  contains the typed term; an empty term or a page it cannot read waits the full 800 ms.
+- `collectOptions` (is the list open? which options?) and `readMatSelectValue` (what the select shows): one browser call
+  each, same selectors, same visibility rule; the old one-by-one read is the fallback.
+Not changed: the 0.3 s before looking for a loader, the 4 s after opening Two-Wheeler, the KYC / after-Finalize waits -
+they give the portal time to start or finish, and the owner asked not to run ahead of a slow portal.
+Checked: the deployed helpers (R2) and the new ones (R3) side by side in real headless Chrome on a replica (plain list,
+searchable list with a 200 ms filter, three text boxes, one REPLACED 60 ms after typing): identical results; plain
+list 761 -> 514 ms, a typed field ~310 -> ~165 ms. Value / option reads old-vs-new identical (hidden placeholder,
+nested spans, display:none stale value, hidden panel). `test/kshemaFieldPace.test.js` (9, fake clock); 10 of 10
+deliberate breaks caught; full suite 1890 of 1907 (16 skipped, 1 = the old captcha PNGs).
+
 ---
 
 ## 2. The switches (`.env`)
