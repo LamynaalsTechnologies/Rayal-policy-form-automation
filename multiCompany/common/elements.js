@@ -4,13 +4,29 @@
  * each existed three times).
  */
 const { By } = require("selenium-webdriver");
+// one browser call per page read instead of one per element (speed round 2)
+const pageReads = require("../../lib/pageReads");
+
+/** firstVisible's selectors as the page reads them: a string here is always CSS (By.css below). */
+const asPageSelectors = (selectors) =>
+  selectors.map((s) => (typeof s === "string" ? { using: "css selector", value: s } : s));
 
 /**
  * First element matching any of `selectors` that is actually displayed.
  * `selectors` are CSS strings, or By locators for xpath/name/id lookups.
  * Returns null when none is visible.
+ * Asked in ONE browser call (lib/pageReads.js: same order, selenium's own isDisplayed); when that call cannot run, the
+ * selectors are tried one by one exactly as before.
  */
 async function firstVisible(driver, selectors) {
+  if (driver && typeof driver.executeScript === "function") {
+    try {
+      const found = await pageReads.findFirstShown(driver, asPageSelectors(selectors));
+      return found.element || null;
+    } catch (e) {
+      /* one call per selector / element below */
+    }
+  }
   for (const selector of selectors) {
     const locator = typeof selector === "string" ? By.css(selector) : selector;
     let elements = [];

@@ -141,8 +141,10 @@ test("a run prints one line per step and one end line: sleeps, waits, commands a
   const { sleepTop, cmdTop } = proposal;
   delete proposal.sleepTop;
   delete proposal.cmdTop;
-  assert.match(sleepTop, /^test\/stepTiming\.test\.js:\d+:1\/2000$/, sleepTop);
-  assert.match(cmdTop, /^test\/stepTiming\.test\.js:\d+:\d+\/\d+(,test\/stepTiming\.test\.js:\d+:\d+\/\d+)*$/, cmdTop);
+  const SITE = "test\\/stepTiming\\.test\\.js:\\d+(<test\\/stepTiming\\.test\\.js:\\d+)?";
+  assert.match(sleepTop, new RegExp(`^${SITE}:1\\/2000$`), sleepTop);
+  assert.match(cmdTop, new RegExp(`^${SITE}:\\d+\\/\\d+(,${SITE}:\\d+\\/\\d+)*$`), cmdTop);
+  assert.ok(cmdTop.includes("<"), "a command made through a helper also names the line that called the helper");
   assert.ok(!/stepTiming\.js|node_modules|holdStop|stallWatch/.test(sleepTop + cmdTop), "never the wrappers");
   assert.deepEqual(proposal, {
     event: "step",
@@ -281,8 +283,8 @@ test("database connects: a slow one gets its own line and counts on its run", as
   assert.equal(lines.length, 3);
   const slowLine = fieldsOf(lines[0]);
   const outsideLine = fieldsOf(lines[1]);
-  assert.match(slowLine.site, /^test\/stepTiming\.test\.js:\d+$/, "where the connect was made");
-  assert.match(outsideLine.site, /^test\/stepTiming\.test\.js:\d+$/);
+  assert.match(slowLine.site, /^test\/stepTiming\.test\.js:\d+(<test\/stepTiming\.test\.js:\d+)?$/, "where the connect was made");
+  assert.match(outsideLine.site, /^test\/stepTiming\.test\.js:\d+(<test\/stepTiming\.test\.js:\d+)?$/);
   delete slowLine.site;
   delete outsideLine.site;
   assert.deepEqual(slowLine, { event: "db-connect", ms: "1800", run: "1a2b3c4d", company: "reliance", part: "od", job: data._jobId });

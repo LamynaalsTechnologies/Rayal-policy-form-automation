@@ -33,6 +33,8 @@
 const { By } = require("selenium-webdriver");
 const kshemaFields = require("./kshemaFields");
 const { log, warn, debug } = require("./kshemaLog");
+// one browser call per page read instead of one per option (speed round 2)
+const pageReads = require("../../lib/pageReads");
 
 const OFF_WORDS = new Set(["false", "0", "no", "off"]);
 /** ON unless false / 0 / no / off. Read at call time. */
@@ -137,8 +139,60 @@ async function describeYesNoGroups(driver) {
   }
 }
 
+// readOffered's page side, in ONE browser call (speed round 2: it ran every 0.2 s while the list settled, with three
+// calls per option). For every selector, in order: how many elements matched, and for each SHOWN one (selenium's own
+// isDisplayed) its element, rendered text and aria-disabled. The filters stay in Node, below, exactly as before.
+const READ_OFFERED_SCRIPT = `${pageReads.IS_SHOWN}${pageReads.FIND_ALL}
+  var selectors = arguments[0] || [];
+  var out = [];
+  for (var i = 0; i < selectors.length; i++) {
+    var els;
+    try {
+      els = Array.prototype.slice.call(document.querySelectorAll(selectors[i]));
+    } catch (e) {
+      els = [];
+    }
+    var rows = [];
+    for (var j = 0; j < els.length; j++) {
+      try {
+        if (!isShown(els[j])) continue;
+        rows.push({ element: els[j], text: textOf(els[j]), ariaDisabled: els[j].getAttribute("aria-disabled") });
+      } catch (e) {}
+    }
+    out.push({ count: els.length, rows: rows });
+  }
+  return out;
+`;
+
+/** readOffered in one browser call; throws when that call cannot run (the caller then reads one by one). */
+async function readOfferedAtOnce(driver) {
+  const perSelector = await driver.executeScript(READ_OFFERED_SCRIPT, OPTION_SELECTORS);
+  if (!Array.isArray(perSelector) || perSelector.length !== OPTION_SELECTORS.length) {
+    throw new Error("the page did not answer for every selector");
+  }
+  for (const found of perSelector) {
+    if (!found || !found.count) continue;
+    const out = [];
+    for (const row of found.rows || []) {
+      const text = String((row && row.text) || "").replace(/\s+/g, " ").trim();
+      if (!text || NO_RESULT_TEXT.test(text)) continue;
+      if (String((row && row.ariaDisabled) || "") === "true") continue;
+      out.push({ element: row.element, text });
+    }
+    if (out.length) return out;
+  }
+  return [];
+}
+
 /** The financier options on offer right now: visible, not disabled, not the list's own "no results" row. [{ element, text }] */
 async function readOffered(driver) {
+  if (driver && typeof driver.executeScript === "function") {
+    try {
+      return await readOfferedAtOnce(driver);
+    } catch (e) {
+      /* one call per selector / option below, exactly as before */
+    }
+  }
   for (const selector of OPTION_SELECTORS) {
     let els = [];
     try {

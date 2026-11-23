@@ -129,6 +129,35 @@ Measured on the server first (KSHEMA motor, after the timing deploy): browser co
 - Next (round 2, from the server's `sleepTop` / `cmdTop`, per insurer): the biggest fixed pauses, database connects
   (`site=`), Selenium Manager on every browser start (no chromedriver file on the server).
 
+### Speed fixes, round 2 (2026-11-23): one browser call per page read, every insurer
+Why each click / type is slow on the server: its CPU core is ~2.8x slower than the laptop (Xeon E5-2680 v4 2.4 GHz,
+2016, KVM, vs i5-1155G7 up to 4.5 GHz; the same JS loop: 3.4 s vs 1.2 s). KSHEMA's page runs a lot of JavaScript on
+every click and key, so a click costs ~0.3 s there (~0.1 s on the laptop). A short test with the job video OFF on the
+server: click p50 284 ms vs 313 ms with video - the video is NOT the main cause (it is back on).
+What changed (no click, key, wait, retry, error or decision changed - only how the page is READ):
+- `lib/pageReads.js`: `findFirstShown`, `readTexts`, `firstShownText` ask the page ONCE; "visible" is selenium's own
+  isDisplayed atom (the exact script `WebElement.isDisplayed()` runs); selectors in the same order (strings: "//" or "("
+  = XPath; selenium Bys: CSS / XPath / id / name converted, anything else falls back); the caller gets its own selector
+  object back. Every helper throws when the call cannot run, and every caller then reads one by one exactly as before.
+- KSHEMA: field lookup (`kshemaFields.findVisibleOnce`, used by almost every field), toast reader (`kshemaToast.readToast`,
+  after every settling field: 11 calls with no toast -> 1), financier options (`kshemaFinancier.readOffered`), dropdown
+  texts (`readTextsAtOnce`, now with the isDisplayed atom). One server run had 410 toast calls (11.4 s) and 94 lookup calls
+  (5.7 s).
+- National (full + TP): `firstPresentLocator`, used ~20 times per flow, polls every 120 ms - one call per look.
+- United India + every multiCompany login (Reliance / National / United): `multiCompany/common/elements.firstVisible`,
+  `portalMessages.readPortalMessage`.
+- Kept on purpose: the waits for the PORTAL (KYC review screen ~15 s, after Finalize, the 0.3 s before looking for a
+  loader) - cutting them would move before the portal is ready.
+- Timing: `sleepTop` / `cmdTop` / `site=` now name `file:line<caller:line`, so a call through a small helper
+  (`const sleep = (ms) => driver.sleep(ms)`) still points at the line that used it.
+Checked: real headless Chrome on replica pages, old way vs new way, for every read (hidden / see-through parent /
+zero-size / clipped / XPath / broken selector / inside a section / toast quirks / financier filters): all identical;
+local timings: field lookup 15 -> 3 ms, toast check 31 -> 3 ms, 301-option list 1.5 s -> 0.09 s.
+`test/pageReads.test.js` (9) + the earlier ones; 14 of 14 deliberate breaks caught (3 only by the real-Chrome check);
+full suite 1881 of 1898 pass (16 skipped; 1 = two old `reliance_captcha_*.png` left in the repo folder).
+Note: `test/kshemaKycDocument.test.js` "download: a file over the size ceiling" can fail under parallel test load (it
+waits a fixed 50 ms) - passes 5/5 alone; the code it tests is unchanged.
+
 ---
 
 ## 2. The switches (`.env`)

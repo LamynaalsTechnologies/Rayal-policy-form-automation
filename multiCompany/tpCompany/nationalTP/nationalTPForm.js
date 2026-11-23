@@ -46,6 +46,8 @@ const { beautifyError } = require("../../../lib/errorHandler");
 const { armLiveHold, disarmLiveHold, liveHoldStopOf, isHoldStop } = require("../../../lib/holdStop");
 // the time each step took in this run, on the job's run record (History -> Runs)
 const runHistory = require("../../../lib/runHistory");
+// one browser call per page look instead of one per locator / element (speed round 2)
+const pageReads = require("../../../lib/pageReads");
 const { isAutomationStop, stoppedResult } = require("../../../automationStopper");
 require("../../../breaker"); // defines the global `Breaker` for a standalone run of this file
 // Shared with Reliance — National previously had NO Brisk handling at all, so
@@ -732,6 +734,22 @@ async function firstPresentLocator(
   const deadline = Date.now() + timeout;
 
   do {
+    // ONE browser call per look (lib/pageReads.js: same order, selenium's own isDisplayed); when that call cannot run,
+    // the locators are tried one by one below, exactly as before.
+    if (typeof driver.executeScript === "function") {
+      let found = null;
+      try {
+        found = await pageReads.findFirstShown(driver, list, null, { requireVisible });
+      } catch (onceError) {
+        found = null;
+      }
+      if (found) {
+        if (found.element) return { element: found.element, locator: found.selector };
+        if (Date.now() >= deadline) break;
+        await driver.sleep(pollInterval);
+        continue;
+      }
+    }
     for (const locator of list) {
       try {
         const found = await driver.findElements(locator);
@@ -5280,5 +5298,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  fillNationalForm
+  fillNationalForm,
+  // tests (test/pageReads.test.js)
+  _firstPresentLocator: firstPresentLocator,
 };

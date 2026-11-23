@@ -26,6 +26,8 @@
  * payment) reports its errors through the same snackbar.
  */
 const { By } = require("selenium-webdriver");
+// one browser call per page read instead of one per element (speed round 2)
+const pageReads = require("../../lib/pageReads");
 
 /** Where the message text lives, most specific first. */
 const TOAST_TEXT_SELECTORS = [
@@ -86,8 +88,75 @@ function classifyToast(text) {
   return { isError, isSuccess };
 }
 
+// The whole readToast below, worked out inside the page in ONE browser call (speed round 2: with no toast on screen the
+// one-by-one way costs 11 calls, and it runs after every settling field). Same order, same rules: a text selector's
+// first SHOWN element with text wins, with the class of the FIRST mat-snack-bar-container (shown or not, as
+// findElement gave it); else the first shown container; else nothing.
+const READ_TOAST_SCRIPT = `${pageReads.IS_SHOWN}${pageReads.FIND_ALL}
+  var textSelectors = arguments[0] || [];
+  var containerSelectors = arguments[1] || [];
+  for (var i = 0; i < textSelectors.length; i++) {
+    var els;
+    try {
+      els = Array.prototype.slice.call(document.querySelectorAll(textSelectors[i]));
+    } catch (e) {
+      continue;
+    }
+    for (var j = 0; j < els.length; j++) {
+      try {
+        if (!isShown(els[j])) continue;
+        var text = textOf(els[j]).trim();
+        if (!text) continue;
+        var containerClass = "";
+        try {
+          var first = document.querySelector("mat-snack-bar-container");
+          containerClass = first ? first.getAttribute("class") || "" : "";
+        } catch (e) {}
+        return { kind: "text", index: i, text: text, containerClass: containerClass };
+      } catch (e) {}
+    }
+  }
+  for (var k = 0; k < containerSelectors.length; k++) {
+    try {
+      var boxes = document.querySelectorAll(containerSelectors[k]);
+      for (var m = 0; m < boxes.length; m++) {
+        if (isShown(boxes[m])) return { kind: "container", index: k, containerClass: boxes[m].getAttribute("class") || "" };
+      }
+    } catch (e) {}
+  }
+  return { kind: "none" };
+`;
+
+/** readToast in one browser call; throws when that call cannot run (the caller then reads one by one). */
+async function readToastAtOnce(driver) {
+  const res = await driver.executeScript(READ_TOAST_SCRIPT, TOAST_TEXT_SELECTORS, TOAST_CONTAINER_SELECTORS);
+  if (!res || typeof res !== "object") throw new Error("the page did not answer");
+  if (res.kind === "none") return null;
+  if (res.kind === "text" && TOAST_TEXT_SELECTORS[res.index] && res.text) {
+    const text = String(res.text).trim();
+    return { text, selector: TOAST_TEXT_SELECTORS[res.index], containerClass: String(res.containerClass || ""), ...classifyToast(text) };
+  }
+  if (res.kind === "container" && TOAST_CONTAINER_SELECTORS[res.index]) {
+    return {
+      text: "",
+      selector: TOAST_CONTAINER_SELECTORS[res.index],
+      containerClass: String(res.containerClass || ""),
+      isError: false,
+      isSuccess: false,
+    };
+  }
+  throw new Error("the page gave an answer that does not fit");
+}
+
 /** Read whatever toast is on screen right now, or null. */
 async function readToast(driver) {
+  if (driver && typeof driver.executeScript === "function") {
+    try {
+      return await readToastAtOnce(driver);
+    } catch (e) {
+      /* one call per selector / element below, exactly as before */
+    }
+  }
   for (const selector of TOAST_TEXT_SELECTORS) {
     let elements = [];
     try {

@@ -12,6 +12,8 @@
  * follows from the meaning, so it is decided once, here — not per insurer.
  */
 const { By } = require("selenium-webdriver");
+// one browser call per page read instead of one per element (speed round 2)
+const pageReads = require("../../lib/pageReads");
 
 /** Snack-bars / toasts / alerts / validation text, most specific first. */
 const MESSAGE_SELECTORS = {
@@ -50,6 +52,19 @@ const MESSAGE_SELECTORS = {
  */
 async function readPortalMessage(driver, company) {
   const selectors = [...(MESSAGE_SELECTORS[company] || []), ...MESSAGE_SELECTORS.common];
+  // ONE browser call (lib/pageReads.js: same order, selenium's own isDisplayed, the rendered text); when that call cannot
+  // run, the selectors are tried one by one exactly as before. Selectors here are CSS, as By.css below reads them.
+  if (driver && typeof driver.executeScript === "function") {
+    try {
+      const found = await pageReads.firstShownText(
+        driver,
+        selectors.map((s) => ({ using: "css selector", value: String(s) }))
+      );
+      return found.text;
+    } catch (e) {
+      /* one call per selector / element below */
+    }
+  }
   for (const selector of selectors) {
     let elements = [];
     try {

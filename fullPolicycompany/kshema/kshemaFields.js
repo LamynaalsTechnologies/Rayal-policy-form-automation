@@ -21,6 +21,8 @@ const { By, Key } = require("selenium-webdriver");
 const { log, debug, warn } = require("./kshemaLog");
 const { isAutomationStop } = require("../../automationStopper");
 const { throwIfHeld } = require("../../lib/holdStop");
+// one browser call per page read instead of one per element (speed round 2)
+const pageReads = require("../../lib/pageReads");
 
 /** The open panel itself — present but empty means "no choices", which is a
  *  different problem from "the dropdown never opened". */
@@ -213,8 +215,18 @@ const asLocator = (selector) =>
     ? By.xpath(selector)
     : By.css(selector);
 
-/** One pass over the selectors, no waiting. */
+/**
+ * One pass over the selectors, no waiting. Asked in ONE browser call (lib/pageReads.js: same selectors, same order,
+ * selenium's own isDisplayed); when that call cannot run, the selectors are tried one by one exactly as before.
+ */
 async function findVisibleOnce(driver, selectors, root = null) {
+  if (driver && typeof driver.executeScript === "function") {
+    try {
+      return await pageReads.findFirstShown(driver, selectors, root);
+    } catch (e) {
+      /* one call per selector / element below */
+    }
+  }
   for (const selector of selectors) {
     let elements = [];
     try {
@@ -411,45 +423,19 @@ async function searchInPanel(driver, term) {
   }
 }
 
-// The visible text of every element, worked out inside the page in ONE browser call. The rules follow WebDriver's
-// getText: "" for an element that is not shown (display none, visibility hidden, no box, or an ancestor at opacity 0),
-// a non-breaking space reads as a space.
-const READ_TEXTS_SCRIPT = `
-  var els = arguments[0] || [];
-  function shown(el) {
-    if (!el || !el.isConnected) return false;
-    var s = window.getComputedStyle(el);
-    if (s.display === "none" || s.visibility === "hidden" || el.getClientRects().length === 0) return false;
-    for (var p = el; p && p.nodeType === 1; p = p.parentElement) {
-      if (Number(window.getComputedStyle(p).opacity) === 0) return false;
-    }
-    return true;
-  }
-  return els.map(function (el) {
-    try {
-      return shown(el) ? String(el.innerText || "").replace(/\\u00a0/g, " ") : "";
-    } catch (e) {
-      return "";
-    }
-  });
-`;
-
 /**
  * The visible text of each element - same order and count as `els`, trimmed, "" for one that is not shown.
  *
  * 2026-11-23: on the server one KSHEMA run read a Make list one option at a time - 2,143 browser calls, 49 s. Now
- * the whole list costs ONE call. When that call cannot run (a fake driver in a test, a page that is changing under
- * it) it falls back to one getText per element - exactly the old way, so a pick is never decided differently.
+ * the whole list costs ONE call (lib/pageReads.js: selenium's own isDisplayed decides "shown", innerText with a
+ * non-breaking space as a space gives the text). When that call cannot run (a fake driver in a test, a page that is
+ * changing under it) it falls back to one getText per element - exactly the old way, so a pick is never decided
+ * differently.
  */
 async function readTextsAtOnce(driver, els) {
   if (!els || !els.length) return [];
   try {
-    if (driver && typeof driver.executeScript === "function") {
-      const texts = await driver.executeScript(READ_TEXTS_SCRIPT, els);
-      if (Array.isArray(texts) && texts.length === els.length) {
-        return texts.map((t) => String(t == null ? "" : t).trim());
-      }
-    }
+    if (driver && typeof driver.executeScript === "function") return await pageReads.readTexts(driver, els);
   } catch (e) {
     /* one call per element below */
   }
