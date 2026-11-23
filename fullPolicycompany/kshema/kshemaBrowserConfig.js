@@ -16,6 +16,7 @@ const chrome = require("selenium-webdriver/chrome");
 const path = require("path");
 const fs = require("fs");
 const { log, debug, warn } = require("./kshemaLog");
+const stepTiming = require("../../lib/stepTiming");
 
 const CONFIG = {
   // The portal's entry point. A stored ProviderCredential.loginUrl wins over
@@ -125,10 +126,12 @@ function createJobProfileOptions(profileInfo) {
 
 /** Build a driver against a job's profile directory. */
 async function createJobBrowserDriver(profileInfo) {
+  const openStartedAt = stepTiming.clock(); // [timing] browser start time
   debug("Starting browser...");
   const options = createJobProfileOptions(profileInfo);
 
   let serviceBuilder = null;
+  let serviceDriverPath = null;
   const candidateDrivers = [
     process.env.CHROMEDRIVER_PATH,
     path.join(process.cwd(), "chromedriver"),
@@ -141,6 +144,7 @@ async function createJobBrowserDriver(profileInfo) {
       if (fs.existsSync(driverPath)) {
         const { ServiceBuilder } = require("selenium-webdriver/chrome");
         serviceBuilder = new ServiceBuilder(driverPath);
+        serviceDriverPath = driverPath;
         debug(`Using ChromeDriver: ${driverPath}`);
         break;
       }
@@ -151,6 +155,7 @@ async function createJobBrowserDriver(profileInfo) {
   if (serviceBuilder) builder = builder.setChromeService(serviceBuilder);
 
   const driver = await builder.build();
+  stepTiming.browserOpened(driver, { flow: "kshema-or-united", startedAt: openStartedAt, options, driverPath: serviceDriverPath });
   debug("✓ Browser ready");
   return driver;
 }

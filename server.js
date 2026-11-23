@@ -10,6 +10,15 @@ flowLog.install();
 // job's lines, so it wraps console too.
 const stallWatch = require("./lib/stallWatch");
 stallWatch.install();
+// [timing] lines (lib/stepTiming.js): per run step, where the time went - fixed pauses, waits for the page, browser
+// commands, the rest - and slow database connects. Installed once on the classes; a run's driver is linked to its run
+// by lib/holdStop.js armLiveHold. Nothing about a command changes.
+const stepTiming = require("./lib/stepTiming");
+{
+  const { WebDriver, WebElementPromise } = require("selenium-webdriver");
+  stepTiming.installDriverTiming(WebDriver, { WebElementPromise });
+  stepTiming.installDbConnectTiming(require("mongodb").MongoClient, { currentKey: stallWatch.currentKey });
+}
 // One record per run on the job (who started it, which login, step times) - lib/runHistory.js
 const runHistory = require("./lib/runHistory");
 // legacy (no-parts) runs in progress: job id -> { runId, startedAt } - closed by runPolicyJob's wrapper

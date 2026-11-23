@@ -5,6 +5,7 @@ const path = require("path");
 const fs = require("fs");
 const { execSync } = require("child_process");
 const { getCaptchaScreenShot, getCaptchaText } = require("./captchaUtils");
+const stepTiming = require("./lib/stepTiming");
 require("dotenv").config();
 const mongoose = require("mongoose");
 const { ProviderCredential } = require("./models");
@@ -486,6 +487,7 @@ async function createMasterBrowser() {
  * @returns {Promise<WebDriver>} Selenium WebDriver instance
  */
 async function createClonedBrowser(clonedProfileInfo) {
+  const openStartedAt = stepTiming.clock(); // [timing] browser start time
   console.log("→ Creating cloned browser instance...");
   const options = createClonedProfileOptions(clonedProfileInfo);
 
@@ -494,6 +496,7 @@ async function createClonedBrowser(clonedProfileInfo) {
     .setChromeOptions(options)
     .build();
 
+  stepTiming.browserOpened(driver, { flow: "reliance", startedAt: openStartedAt, options, driverPath: null });
   console.log("✓ Cloned browser created");
   return driver;
 }

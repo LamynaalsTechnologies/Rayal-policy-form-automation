@@ -90,6 +90,28 @@ that rely on the old one. Restart the runner after editing `.env` (every switch 
 | `Reliance TP+OD \|`, `Reliance TP    \|`, `Reliance OD    \|` | the Reliance flow tag (`lib/flowLogPrefix.js`, `FLOW_LOG_PREFIX_ENABLED`) |
 | `[Breaker] checkpoint "X" reached` | `BREAKER_ENABLED`; the job stops there only when `BREAKER_STOP_AT` equals X |
 | `⏳` / `↻` / `↺` / `🔎` / `▶` | loader being waited for / a field's second try / a field the portal had cleared, filled again / looking at the page to see why / flow banner |
+| `[timing] event=step ...` / `event=end ...` | where a run's time went (`lib/stepTiming.js`, see "Timing lines" just below) |
+
+### Timing lines `[timing]` (2026-11-23, branch `fast-optimise`)
+Why: on the server every insurer is slower than on the laptop; these lines show where each step's time goes. Always on
+(no `.env` switch), a few lines per run, they change nothing about a command. Only ids and numbers are printed (insurer,
+part, job `_id`, 8 characters of the run id, step, ms, counts) - never a customer name, phone, number, login or URL.
+Read them: `pm2 logs <app> --lines 5000 --nostream | grep -F '[timing]'`.
+
+| Line | What it says |
+|---|---|
+| `event=browser-open` | browser start ms; `headless`, `window`, `gpu`; `driver=` chromedriver file or `selenium-manager` |
+| `event=step` (proposal / kyc / payment) | `wallMs` = `sleepMs` (our fixed pauses) + `waitMs` (waiting for the page, `driver.wait`) + `cmdMs` (browser commands outside waits; `cmds` = how many) + `otherMs` (our code, database, uploads, captcha). `top=` the commands that took longest: `name:count/totalMs/p50Ms/p90Ms`. `dbConnects` / `dbConnectMs` = new database connections made in the step |
+| `event=end` | the same for the whole run, `totalMs` from the run start, `browserStartMs`, `windows` (run windows open when it opened, itself included), `loopLate*Ms` (how late Node's event loop ran: 0 = never; 300 = the whole process froze 300 ms) |
+| `event=db-connect` | a new database connection that took over 200 ms |
+| `event=recorder` / `event=recorder-encode` | job video: capture mode, frames Chrome sent vs kept, still-page top-ups; ffmpeg ms and how many other runs were going |
+
+How it is wired: installed once on selenium's `WebDriver` class and on `MongoClient.connect` (`server.js`, top);
+`lib/holdStop.js armLiveHold` links a run's window to its run (a lookup table - the driver itself is not changed, so the
+stuck-step watch and the hold keep their own wrappers exactly as before); `lib/runHistory.js` gives the run's insurer
+(start), its step ends and its end. Reading it: command p50s of tens of ms are normal (laptop: find 6 ms, click 36 ms,
+type 53 ms); much higher = the browser itself is slow on that machine; a big `sleepMs` = our fixed pauses; a big
+`waitMs` = waiting for the portal. Tests: `test/stepTiming.test.js` (11; 10 of 10 deliberate breaks caught).
 
 ---
 

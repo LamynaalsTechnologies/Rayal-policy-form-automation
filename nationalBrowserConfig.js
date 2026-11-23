@@ -4,6 +4,7 @@ const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const { execSync } = require("child_process");
+const stepTiming = require("./lib/stepTiming");
 
 /**
  * Wait for loader to disappear
@@ -519,11 +520,13 @@ async function createMasterBrowser() {
  * @returns {Promise<WebDriver>} Selenium WebDriver instance
  */
 async function createClonedBrowser(clonedProfileInfo) {
+  const openStartedAt = stepTiming.clock(); // [timing] browser start time
   console.log("→ Creating National cloned browser instance...");
   const options = createClonedProfileOptions(clonedProfileInfo);
 
   // ChromeDriver service builder detection
   let serviceBuilder = null;
+  let serviceDriverPath = null;
   const candidateDrivers = [
     process.env.CHROMEDRIVER_PATH,
     path.join(process.cwd(), "chromedriver"),
@@ -536,6 +539,7 @@ async function createClonedBrowser(clonedProfileInfo) {
       if (fs.existsSync(driverPath)) {
         const { ServiceBuilder } = require("selenium-webdriver/chrome");
         serviceBuilder = new ServiceBuilder(driverPath);
+        serviceDriverPath = driverPath;
         break;
       }
     } catch (e) { }
@@ -549,6 +553,7 @@ async function createClonedBrowser(clonedProfileInfo) {
 
   const driver = await builder.build();
 
+  stepTiming.browserOpened(driver, { flow: "national", startedAt: openStartedAt, options, driverPath: serviceDriverPath });
   console.log("✓ National cloned browser created");
   return driver;
 }
