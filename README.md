@@ -112,6 +112,22 @@ stuck-step watch and the hold keep their own wrappers exactly as before); `lib/r
 (start), its step ends and its end. Reading it: command p50s of tens of ms are normal (laptop: find 6 ms, click 36 ms,
 type 53 ms); much higher = the browser itself is slow on that machine; a big `sleepMs` = our fixed pauses; a big
 `waitMs` = waiting for the portal. Tests: `test/stepTiming.test.js` (11; 10 of 10 deliberate breaks caught).
+`sleepTop` / `cmdTop` (round 1) say WHERE: `file:line:count/totalMs` in our code, biggest first; `db-connect` lines
+carry `site=` too.
+
+### Speed fixes, round 1 (2026-11-23, branch `fast-optimise`)
+Measured on the server first (KSHEMA motor, after the timing deploy): browser commands are fast (find 17 ms, read
+21 ms p50); about half of every run is our fixed pauses; one run spent 49 s in 2,143 separate option reads.
+- **KSHEMA dropdowns read in ONE browser call** (`kshemaFields.readTextsAtOnce`, used by `selectMatOption` and
+  `selectOtherMatOption`, both KSHEMA flows): the same texts, same order, "" for a hidden option, a non-breaking space as
+  a space - checked in real Chrome on a 301-option replica (tricky names, hidden, see-through parent): identical to the
+  old way, 1,368 ms -> 41 ms. If the call cannot run, it reads one by one exactly as before.
+- **Job video built one at a time, at most 2 ffmpeg threads, low priority (nice 10)** (`lib/jobRecorder.js`), so a
+  video never takes the CPU from a job's browser that is still running. Checked with a real ffmpeg encode.
+- Tests: `test/kshemaReadTexts.test.js` (4), `test/recordingEncode.test.js` (3), timing sites in
+  `test/stepTiming.test.js`; 9 of 9 deliberate breaks caught (2 of them only by the real-Chrome check).
+- Next (round 2, from the server's `sleepTop` / `cmdTop`, per insurer): the biggest fixed pauses, database connects
+  (`site=`), Selenium Manager on every browser start (no chromedriver file on the server).
 
 ---
 

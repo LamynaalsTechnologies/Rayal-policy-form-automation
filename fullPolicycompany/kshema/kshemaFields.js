@@ -411,6 +411,59 @@ async function searchInPanel(driver, term) {
   }
 }
 
+// The visible text of every element, worked out inside the page in ONE browser call. The rules follow WebDriver's
+// getText: "" for an element that is not shown (display none, visibility hidden, no box, or an ancestor at opacity 0),
+// a non-breaking space reads as a space.
+const READ_TEXTS_SCRIPT = `
+  var els = arguments[0] || [];
+  function shown(el) {
+    if (!el || !el.isConnected) return false;
+    var s = window.getComputedStyle(el);
+    if (s.display === "none" || s.visibility === "hidden" || el.getClientRects().length === 0) return false;
+    for (var p = el; p && p.nodeType === 1; p = p.parentElement) {
+      if (Number(window.getComputedStyle(p).opacity) === 0) return false;
+    }
+    return true;
+  }
+  return els.map(function (el) {
+    try {
+      return shown(el) ? String(el.innerText || "").replace(/\\u00a0/g, " ") : "";
+    } catch (e) {
+      return "";
+    }
+  });
+`;
+
+/**
+ * The visible text of each element - same order and count as `els`, trimmed, "" for one that is not shown.
+ *
+ * 2026-11-23: on the server one KSHEMA run read a Make list one option at a time - 2,143 browser calls, 49 s. Now
+ * the whole list costs ONE call. When that call cannot run (a fake driver in a test, a page that is changing under
+ * it) it falls back to one getText per element - exactly the old way, so a pick is never decided differently.
+ */
+async function readTextsAtOnce(driver, els) {
+  if (!els || !els.length) return [];
+  try {
+    if (driver && typeof driver.executeScript === "function") {
+      const texts = await driver.executeScript(READ_TEXTS_SCRIPT, els);
+      if (Array.isArray(texts) && texts.length === els.length) {
+        return texts.map((t) => String(t == null ? "" : t).trim());
+      }
+    }
+  } catch (e) {
+    /* one call per element below */
+  }
+  const texts = [];
+  for (const el of els) {
+    try {
+      texts.push((await el.getText()).trim());
+    } catch (e) {
+      texts.push("");
+    }
+  }
+  return texts;
+}
+
 /**
  * Watch for an open panel and the options inside it.
  *
@@ -622,18 +675,8 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
     };
   }
 
-  /** Read the text of whatever options are currently rendered. */
-  const readOptionTexts = async (els) => {
-    const texts = [];
-    for (const option of els) {
-      try {
-        texts.push((await option.getText()).trim());
-      } catch (e) {
-        texts.push("");
-      }
-    }
-    return texts;
-  };
+  /** Read the text of whatever options are currently rendered (one browser call for the whole list). */
+  const readOptionTexts = (els) => readTextsAtOnce(driver, els);
 
   let seen = await readOptionTexts(options);
 
@@ -809,14 +852,7 @@ async function selectOtherMatOption(driver, selectSelectors, opts = {}) {
     };
   }
 
-  const texts = [];
-  for (const option of options) {
-    try {
-      texts.push((await option.getText()).trim());
-    } catch (e) {
-      texts.push("");
-    }
-  }
+  const texts = await readTextsAtOnce(driver, options);
 
   const index = pickOtherOption(texts, avoid);
   if (index < 0) {
@@ -1482,4 +1518,5 @@ module.exports = {
   // read-only dropdown helpers, exported for the Make / Model / Variant collector (lib/kshemaModelCollect.js)
   collectOptions,
   searchInPanel,
+  readTextsAtOnce,
 };
