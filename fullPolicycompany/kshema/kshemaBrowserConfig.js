@@ -83,6 +83,10 @@ function createJobProfileOptions(profileInfo) {
   options.addArguments(`--profile-directory=${profileInfo.profileDirectory}`);
   options.addArguments("--no-first-run");
   options.addArguments("--no-default-browser-check");
+  // Speed round 4: never let Chrome treat the portal tab as "in the background" (lower priority, slower timers).
+  options.addArguments("--disable-background-timer-throttling");
+  options.addArguments("--disable-backgrounding-occluded-windows");
+  options.addArguments("--disable-renderer-backgrounding");
   options.addArguments("--disable-dev-shm-usage");
   options.addArguments("--disable-extensions");
   options.addArguments("--window-size=1366,768");

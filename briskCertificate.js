@@ -570,7 +570,7 @@ async function uploadBriskCertificate(briskPdfPath, certificateNo, data, jobId =
     }
 
     const { MongoClient } = require("mongodb");
-    const client = new MongoClient(process.env.MONGODB_URI);
+    const client = require("./lib/sharedDb").clientFor(MongoClient, process.env.MONGODB_URI); // the server's open connection when there is one (speed round 4)
     try {
       await client.connect();
       const db = client.db();

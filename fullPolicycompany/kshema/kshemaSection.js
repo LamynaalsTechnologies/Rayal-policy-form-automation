@@ -136,8 +136,9 @@ async function fillSection(driver, data, fields, sectionName, capture = null, de
     const result = await fillOneField(driver, data, field, value, ctx);
     if (result.ok && field.settleMs) {
       // Some fields kick off an async lookup that re-renders the ones below them. Wait it out rather than typing into
-      // a form that is mid-rebuild.
-      await driver.sleep(300);
+      // a form that is mid-rebuild. The short pause (old: a flat 300 ms, so the loader has time to show) ends early when
+      // Angular says twice that nothing is pending - no request, no timer, so no loader is on its way (speed round 4).
+      await require("./kshemaSettle").fieldSettlePause(driver, 300);
       await waitForLoader(driver, 20000);
       // Check if an error toast appeared after the reload (e.g. "Quotation already converted to proposal")
       const toast = await readToast(driver);

@@ -50,6 +50,7 @@ const {
 } = require("../../../fullPolicycompany/kshema/kshemaFields");
 const { log, debug, warn, err } = require("../../../fullPolicycompany/kshema/kshemaLog");
 const { idvRecovery, paToggleRecovery, recoverSectionAfterPortalError } = require("../../../fullPolicycompany/kshema/kshemaSlowFields");
+const kshemaSettle = require("../../../fullPolicycompany/kshema/kshemaSettle"); // speed round 4: "ready, or the old pause"
 
 /** Build the `data-iid` selector list for a control. */
 const byIid = (iid, tag = "input") => [
@@ -1027,7 +1028,7 @@ async function downloadProposal(driver, data, jobBrowser, jobId, capture = null)
     const button = await findVisible(driver, buttonSelectors, null, 10000);
     if (button && button.element) {
       await clickElement(driver, button.element, "Save and Finalize (Add-ons)");
-      await driver.sleep(1000); // Wait for API and toast
+      await driver.sleep(250); // the answer (error toast or the Summary tab) is looked for below - old: 1000 ms first (speed round 4)
 
       // Wait for next page or error toast
       const deadline = Date.now() + 15000;
@@ -1046,7 +1047,7 @@ async function downloadProposal(driver, data, jobBrowser, jobId, capture = null)
           }
         } catch (e) { }
 
-        await driver.sleep(500);
+        await driver.sleep(200); // old: 500 ms between looks (speed round 4)
       }
 
       if (!movedForward) {
@@ -1297,7 +1298,9 @@ async function fillNomineeDetails(driver, data, capture = null) {
   try {
     const nextBtn = await driver.findElement(By.xpath('//mat-icon[contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "navigate_next")]'));
     await clickElement(driver, nextBtn, "navigate next button");
-    await driver.sleep(2000); // Wait for transition
+    // Wait for the transition: the Other Details step (its Add Entry button or the Hypothecation Details box) on screen and
+    // staying there. Old: a flat 2 s; never longer now (speed round 4).
+    await kshemaSettle.untilShown(driver, kshemaSettle.OTHER_DETAILS_SIGNS, { capMs: 2000, everyMs: 150, quietMs: 300 });
   } catch (e) {
     return { ok: false, error: `Could not find or click the next button to go to nominee details: ${e.message}` };
   }
@@ -1310,7 +1313,8 @@ async function fillNomineeDetails(driver, data, capture = null) {
     try {
       const addEntryBtn = await driver.findElement(By.xpath('//span[contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "add entry")]/ancestor::button | //button[contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "add entry")]'));
       await clickElement(driver, addEntryBtn, "Add Entry button");
-      await driver.sleep(1500); // Wait for modal or fields to open
+      // Wait for the nominee row's boxes to open (old: a flat 1.5 s; never longer now - speed round 4).
+      await kshemaSettle.untilShown(driver, kshemaSettle.NOMINEE_NAME_BOX, { capMs: 1500, everyMs: 150, quietMs: 200 });
       
       const { Key } = require("selenium-webdriver");
 
@@ -1429,7 +1433,12 @@ async function fillNomineeDetails(driver, data, capture = null) {
       try {
         const saveBtn = await driver.findElement(By.xpath('//button[contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "save")]'));
         await clickElement(driver, saveBtn, "Save Nominee button");
-        await driver.sleep(1500); // Wait for modal to close
+        // Wait for the nominee row to close (its Nominee Name box gone). Old: a flat 1.5 s; never longer now (speed round 4).
+        await kshemaSettle.untilReady(driver, async () => !(await kshemaSettle.isShown(driver, kshemaSettle.NOMINEE_NAME_BOX)), {
+          capMs: 1500,
+          everyMs: 150,
+          quietMs: 200,
+        });
       } catch (e) {
         log(`   ⚠️ Could not find or click the Save button for nominee: ${e.message}`);
       }
@@ -1470,7 +1479,9 @@ async function fillNomineeDetails(driver, data, capture = null) {
     if (!blocked.ok) return { ok: false, error: blocked.error };
     
     await clickElement(driver, finalizeBtn, "Save and Finalize button");
-    await driver.sleep(2000); // Wait for navigation
+    // Wait for navigation: until KSHEMA's saving loader shows (the wait below then follows it to the end), at most the old
+    // 2 s - with no loader the look below runs exactly as before (speed round 4).
+    await kshemaSettle.untilShown(driver, kshemaSettle.LOADER, { capMs: 2000, everyMs: 150 });
 
     // The loader that opens while KSHEMA saves: wait for it to end (progress in the log), then read the Financier Name box
     // again — a box the portal marks invalid means it refused to move on. KSHEMA_AFTER_FINALIZE_ENABLED.
@@ -1610,6 +1621,12 @@ async function readKycError(driver) {
 async function waitForKycRefusal(driver, timeoutMs = 30000, pollMs = 1000) {
   const deadline = Date.now() + timeoutMs;
   let described = false;
+  // Speed round 4 (owner's choice, 2026-11-26): KSHEMA's own "KYC Verified" page (kyc/ack?status=success) ends the watch
+  // early - once it has been seen, the watch goes on at least AFTER_KYC_SUCCESS_MS and until the KYC page has sent the
+  // browser back to KSHEMA (that hand-back is what moves the proposal on to Payment). A refusal is still caught at any
+  // moment; no "KYC Verified" page = the full watch as before.
+  let verifiedAt = null;
+  let backToKshema = false;
 
   while (Date.now() < deadline) {
     let handles = [];
@@ -1623,6 +1640,7 @@ async function waitForKycRefusal(driver, timeoutMs = 30000, pollMs = 1000) {
       handles = [];
     }
 
+    let onProviderThisPass = false; // a tab still on the KYC provider's pages (or one whose address could not be read)
     for (const handle of [...handles].reverse()) {
       try {
         // Switched to unconditionally. Comparing against getWindowHandle()
@@ -1631,6 +1649,16 @@ async function waitForKycRefusal(driver, timeoutMs = 30000, pollMs = 1000) {
         await driver.switchTo().defaultContent();
 
         const found = await readKycError(driver);
+
+        let here = "";
+        try {
+          here = await driver.getCurrentUrl();
+        } catch (e) { }
+        if (!here || kshemaSettle.isOnKycProvider(here)) onProviderThisPass = true;
+        if (!found && verifiedAt === null && kshemaSettle.isKycSuccessUrl(here)) {
+          verifiedAt = Date.now();
+          log(`   ✓ KSHEMA says the identity is verified - watching ${kshemaSettle.AFTER_KYC_SUCCESS_MS / 1000}s more and until the KYC page sends the browser back to KSHEMA`);
+        }
 
         if (!described) {
           // One line per tab, once, so a run that finds nothing still says
@@ -1646,6 +1674,17 @@ async function waitForKycRefusal(driver, timeoutMs = 30000, pollMs = 1000) {
       } catch (e) { }
     }
     described = true; // only list the tabs on the first pass
+
+    if (verifiedAt !== null) {
+      // Back to KSHEMA = no tab left on the KYC provider's pages (the verified page counted down and went back, or closed).
+      if (!backToKshema) backToKshema = !onProviderThisPass && handles.length > 0;
+      if (backToKshema && Date.now() - verifiedAt >= kshemaSettle.AFTER_KYC_SUCCESS_MS) {
+        log(`   ✓ No refusal ${Math.round((Date.now() - verifiedAt) / 1000)}s after "KYC Verified" and the KYC page went back to KSHEMA - the KYC is accepted`);
+        return null;
+      }
+      await driver.sleep(Math.min(pollMs, 500));
+      continue;
+    }
 
     await driver.sleep(pollMs);
   }
@@ -1723,8 +1762,9 @@ async function fillKYCDetails(driver, data, capture = null) {
     for (let handle of handles) {
       if (handle !== originalWindow) {
         await driver.switchTo().window(handle);
-        // Wait for page to load
-        await driver.sleep(3000);
+        // Wait for page to load: the KYC page's own address, loaded and settled (old: a flat 3 s; never longer now -
+        // speed round 4). The buttons are waited for below as before.
+        await kshemaSettle.untilReady(driver, () => kshemaSettle.kycPageLoaded(driver), { capMs: 3000, everyMs: 200, quietMs: 500 });
         kycUrl = await driver.getCurrentUrl();
         
         // Interact with KYC page elements
@@ -1772,7 +1812,9 @@ async function fillKYCDetails(driver, data, capture = null) {
               await driver.executeScript("arguments[0].scrollIntoView({block:'center'});", submitBtn);
               await clickElement(driver, submitBtn, "Submit for Verification Button");
               log(`   🚀 Clicked Submit for Verification`);
-              await driver.sleep(2000); // Wait for dialog to open
+              // Wait for dialog to open: its Confirm & Verify button on screen (old: a flat 2 s; never longer now - speed
+              // round 4). The wait below still finds the button exactly as before.
+              await kshemaSettle.untilShown(driver, kshemaSettle.CONFIRM_VERIFY_BUTTON, { capMs: 2000, everyMs: 150, quietMs: 200 });
               
               // 4. Click Confirm & Verify in the dialog
               const confirmBtn = await driver.wait(
@@ -1921,6 +1963,7 @@ module.exports = {
   fillNomineeDetails,
   fillKYCDetails,
   recoverKycWithDocumentUpload,
+  waitForKycRefusal, // tests (speed round 4)
   proceedToPayment,
   CUSTOMER_FIELDS,
   VEHICLE_FIELDS,
@@ -2000,7 +2043,9 @@ async function proceedToPayment(driver, capture = null, jobId = "", { paymentMet
     await driver.executeScript("arguments[0].scrollIntoView({block:'center'});", makePaymentBtn);
     await clickElement(driver, makePaymentBtn, "Make Payment Button");
     log("   🚀 Clicked Make Payment");
-    await driver.sleep(4000); // Wait for transition to payment gateway
+    // Wait for transition to payment gateway: KSHEMA's payment page loaded (old: a flat 4 s; never longer now - speed
+    // round 4). Its cards / options are waited for below as before.
+    await kshemaSettle.untilReady(driver, () => kshemaSettle.paymentPageLoaded(driver), { capMs: 4000, everyMs: 200, quietMs: 300 });
 
     // WALLET policy: not the customer's Razorpay QR. Keep this page's address, try the CD Balance card and hand back - the
     // form stops here on purpose (kshemaWalletPayment.js). Everything below is the link flow, untouched.

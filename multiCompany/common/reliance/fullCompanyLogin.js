@@ -35,6 +35,7 @@ const fs = require("fs");
 const path = require("path");
 const { extractCaptchaText } = require("../../../Captcha");
 const { MultiCompanyError } = require("../errors");
+const relianceSettle = require("../../../fullPolicycompany/reliance/relianceSettle"); // speed round 4
 
 // The values performLogin reads from browserv2.js's CONFIG. LOGIN_URL / USERNAME / PASSWORD are only a fallback
 // there (filled from the database by the master-session code); the Reliance flow always passes both, so they
@@ -280,21 +281,19 @@ async function performLogin(driver, options = {}) {
 async function waitForDashboard(driver) {
   // === STEP 1.1: Close popup modal if present ===
   try {
-    await driver.sleep(2000);
+    // Speed round 4: until the popup's close button is on screen, or the Motors menu is on screen and the page has been
+    // idle 1.5 s with no popup - at most the old 2 s + 5 s.
     console.log("Checking for modal close button...");
-    const closeBtn = await driver.wait(
-      until.elementLocated(By.id("Closebutton")),
-      5000
-    );
-    await driver.wait(until.elementIsVisible(closeBtn), 5000);
+    const closeBtn = await relianceSettle.dashboardPopup(driver, 7000);
+    if (!closeBtn) throw new Error("no popup");
     await driver.executeScript("arguments[0].click();", closeBtn);
     console.log("Modal closed!");
-    await driver.sleep(2000);
+    await relianceSettle.idleOrPause(driver, 2000);
   } catch (err) {
     console.log("No modal detected, continuing...");
   }
 
-  await driver.sleep(2000);
+  await relianceSettle.idleOrPause(driver, 2000);
 
   // === STEP 2: wait for Motors menu ===
   const motorsMenu = await driver.wait(

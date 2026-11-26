@@ -44,12 +44,12 @@ const TIMING = {
   policyPageWaitMs: 40000, // the owner: "maximum 40 sec waiting to navigate then error"
   toastGraceMs: 5000, // an error toast: a few seconds for the policy page to open anyway before it counts
   numberWaitMs: 20000,
-  pollMs: 1000,
+  pollMs: 500, // old 1000 - these loops only READ the page (Pay button, policy page, number, icon); speed round 4
   logEveryMs: 10000,
   iconWaitMs: 15000,
   pdfWaitMs: 60000,
   pdfPollMs: 500,
-  pdfStableMs: 1500,
+  pdfStableMs: 500, // old 1500 - Chrome renames the .crdownload only when the file is complete (checked too); speed round 4
 };
 
 const norm = (s) => String(s == null ? "" : s).replace(/\s+/g, " ").trim();

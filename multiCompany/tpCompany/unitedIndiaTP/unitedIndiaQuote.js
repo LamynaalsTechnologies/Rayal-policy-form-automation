@@ -280,7 +280,7 @@ async function keepOnPolicy(file, { field, kind, data, jobId }, { upload, presig
 /** The policy's file field, written straight to the onlinePolicy collection (KSHEMA's proposal PDF is saved the same way). */
 async function defaultSavePolicyFile(policyId, field, doc) {
   const { MongoClient, ObjectId } = require("mongodb");
-  const client = new MongoClient(process.env.MONGODB_URI || "mongodb://localhost:27017/rayal");
+  const client = require("../../../lib/sharedDb").clientFor(MongoClient, process.env.MONGODB_URI || "mongodb://localhost:27017/rayal"); // the server's open connection when there is one (speed round 4)
   try {
     await client.connect();
     const id = typeof policyId === "string" ? new ObjectId(policyId) : policyId;

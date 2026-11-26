@@ -425,6 +425,10 @@ function createClonedProfileOptions(clonedProfileInfo) {
   );
   options.addArguments("--no-first-run");
   options.addArguments("--no-default-browser-check");
+  // Speed round 4: never let Chrome treat the portal tab as "in the background" (lower priority, slower timers).
+  options.addArguments("--disable-background-timer-throttling");
+  options.addArguments("--disable-backgrounding-occluded-windows");
+  options.addArguments("--disable-renderer-backgrounding");
 
   // Per-JOB download directory. Without it every window downloaded into the
   // same place and the PDF pick-up ("newest file in reliance_pdf/") could grab

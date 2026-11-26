@@ -270,11 +270,11 @@ test("letting go of the box is only for looks: if it fails the pick still succee
 test("the pauses are hand-sized: a look, a pause before the click, the list opening, the choice, then the page settling", async () => {
   const slow = fakePage({ listNeeded: true });
   await pick(slow, "Mr.", { random: () => 0 });
-  assert.deepEqual(slow.pauses, [250, 150, 300, 300, 1200]);
+  assert.deepEqual(slow.pauses, [60, 40, 100, 100, 300]); // speed round 4 (2026-11-26): shorter, same steps
 
   const fast = fakePage({ listNeeded: true });
   await pick(fast, "Mr.", { random: () => 0.9999 });
-  assert.deepEqual(fast.pauses, [450, 300, 500, 500, 1700]);
+  assert.deepEqual(fast.pauses, [120, 80, 160, 160, 500]);
 });
 
 test("the caller's own settle replaces the default pause at the end", async () => {

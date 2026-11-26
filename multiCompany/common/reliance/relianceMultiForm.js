@@ -130,6 +130,8 @@ const {
 } = require("../../../fullPolicycompany/reliance/relianceKycFallback");
 // "Hold" pressed while this runs: stop at the next safe step, close the window, Release continues from the step
 const { stopIfHeld, isHoldStop, armLiveHold, disarmLiveHold, liveHoldStopOf } = require("../../../lib/holdStop");
+const sharedDb = require("../../../lib/sharedDb");
+const relianceSettle = require("../../../fullPolicycompany/reliance/relianceSettle"); // speed round 4: "ready, or the old pause"
 // Reliance in three stages — proposal, KYC, payment — each remembered on the policy, so a later run does not redo a
 // finished one; the payment only after the KYC is finished; a failed KYC stops at the KYC.
 const {
@@ -261,7 +263,7 @@ async function safeSendKeys(driver, locator, text, timeout = 10000) {
       "arguments[0].scrollIntoView({block: 'center'});",
       element
     );
-    await driver.sleep(500);
+    await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
 
     try {
       await element.clear();
@@ -296,7 +298,7 @@ async function safeSelectDropdown(driver, selectId, value, timeout = 10000) {
       "arguments[0].scrollIntoView({block: 'center'});",
       selectElement
     );
-    await driver.sleep(500);
+    await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
 
     await driver.executeScript(`
       var select = document.getElementById("${selectId}");
@@ -307,7 +309,7 @@ async function safeSelectDropdown(driver, selectId, value, timeout = 10000) {
       }
     `);
 
-    await driver.sleep(2000);
+    await relianceSettle.idleOrPause(driver, 2000); // the change's own requests answered; old: a flat 2 s (speed round 4)
     return selectElement;
   } catch (error) {
     console.log(`Error in safeSelectDropdown for ${selectId}:`, error.message);
@@ -332,7 +334,7 @@ async function waitForElementAndRetry(
         "arguments[0].scrollIntoView({block: 'center'});",
         element
       );
-      await driver.sleep(500);
+      await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
 
       if (action === "click") {
         try {
@@ -847,7 +849,7 @@ async function saveProposalNumber(proposalNumber, data, jobId = "") {
   }
 
   const { MongoClient } = require("mongodb");
-  const client = new MongoClient(process.env.MONGODB_URI);
+  const client = sharedDb.clientFor(MongoClient, process.env.MONGODB_URI); // the server's open connection when there is one (speed round 4)
   try {
     await client.connect();
     const result = await client
@@ -889,7 +891,7 @@ async function saveKycUrls(urls, data, jobId = "") {
   }
 
   const { MongoClient } = require("mongodb");
-  const client = new MongoClient(process.env.MONGODB_URI);
+  const client = sharedDb.clientFor(MongoClient, process.env.MONGODB_URI); // the server's open connection when there is one (speed round 4)
   try {
     await client.connect();
     const result = await client
@@ -1051,7 +1053,7 @@ async function mergePDFsAndUpload(reliancePdfPath, briskPdfPath, data) {
       console.log('🔌 Connecting to MongoDB...');
       console.log('🔗 MongoDB URL:', mongoUrl.replace(/\/\/([^:]+):([^@]+)@/, '//*****:*****@')); // Hide credentials in log
 
-      const client = new MongoClient(mongoUrl);
+      const client = sharedDb.clientFor(MongoClient, mongoUrl); // the server's open connection when there is one (speed round 4)
       await client.connect();
       console.log('✅ Connected to MongoDB');
 
@@ -1394,21 +1396,19 @@ async function fillRelianceMultiForm( // [MC] 6
 
     // === STEP 1.1: Close popup modal if present ===
     try {
-      await driver.sleep(2000);
+      // Speed round 4: until the popup's close button is on screen, or the Motors menu is on screen and the page has been
+      // idle 1.5 s with no popup - at most the old 2 s + 5 s.
       console.log("Checking for modal close button...");
-      const closeBtn = await driver.wait(
-        until.elementLocated(By.id("Closebutton")),
-        5000
-      );
-      await driver.wait(until.elementIsVisible(closeBtn), 5000);
+      const closeBtn = await relianceSettle.dashboardPopup(driver, 7000);
+      if (!closeBtn) throw new Error("no popup");
       await driver.executeScript("arguments[0].click();", closeBtn);
       console.log("Modal closed!");
-      await driver.sleep(2000);
+      await relianceSettle.idleOrPause(driver, 2000);
     } catch (err) {
       console.log("No modal detected, continuing...");
     }
 
-    await driver.sleep(2000);
+    await relianceSettle.idleOrPause(driver, 2000);
 
     // === STEP 2: wait for Motors menu ===
     const motorsMenu = await driver.wait(
@@ -1532,7 +1532,7 @@ async function fillRelianceMultiForm( // [MC] 6
       );
     }
     // The next step waits for the product dropdown itself (15s) — no long sleep needed
-    await driver.sleep(1000);
+    await driver.sleep(200); // old 1000 (speed round 4)
     // === STEP 4: select "Two Wheeler Package Bundled (Only New Veh.)" ===
     console.log("Selecting Sub Product...");
 
@@ -1547,9 +1547,9 @@ async function fillRelianceMultiForm( // [MC] 6
       15000
     );
     await driver.executeScript("arguments[0].scrollIntoView(true);", dropdown);
-    await driver.sleep(500);
+    await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
     await dropdown.click();
-    await driver.sleep(1000); // Wait for dropdown animation
+    await driver.sleep(300); // Wait for dropdown animation (old 1000; the option's own visible-wait follows - speed round 4)
 
     // [MC] 3: the product of THIS part (RELIANCE_OD_PRODUCT / RELIANCE_TP_PRODUCT), not the bundled one. When it is not
     // configured the run lists what the portal offers and stops here: nothing is chosen, nothing is bought.
@@ -1569,7 +1569,7 @@ async function fillRelianceMultiForm( // [MC] 6
     await optionElement.click();
 
     console.log("Selected product by simulating user click.");
-    await driver.sleep(2000); // Give time for the API call to be made.
+    await relianceSettle.idleOrPause(driver, 2000); // Give time for the API call to be made (until answered, at most the old 2 s - speed round 4).
     // [MC] 5: look at the product before the form is filled (a no-op unless the Breaker is switched on in .env)
     Breaker.checkpoint(`${mcLabel}/product`); // [MC] 5
 
@@ -1585,7 +1585,13 @@ async function fillRelianceMultiForm( // [MC] 6
       );
       await driver.executeScript("arguments[0].click();", skipLink);
       console.log("Clicked 'Skip To Main Page'");
-      await driver.sleep(2000);
+      // Until the main page's vertical code box is there and the page is idle (the lookup right below has no wait of its
+      // own); old: a flat 2 s, never longer now (speed round 4)
+      await relianceSettle.untilReady(
+        driver,
+        async () => (await driver.findElements(By.id("ddlobjBranchDetailAgentsHnin"))).length > 0 && (await relianceSettle.portalIdleNow(driver)),
+        { capMs: 2000, everyMs: 150, quietMs: 400 }
+      );
     } catch (err) {
       console.log("No skip link detected, continuing...");
     }
@@ -1658,7 +1664,7 @@ async function fillRelianceMultiForm( // [MC] 6
 
       // Wait for form to be fully loaded (field lookups below have their own waits)
       await waitForLoaderToDisappear(driver);
-      await driver.sleep(1500);
+      await relianceSettle.idleOrPause(driver, 1500); // old: a flat 1.5 s (speed round 4)
 
       // === Fill mandatory fields with safe methods ===
       console.log("Filling form fields...");
@@ -1726,7 +1732,7 @@ async function fillRelianceMultiForm( // [MC] 6
         select: safeSelectDropdown,
         log: (line) => console.log(line),
       });
-      await driver.sleep(2000);
+      await relianceSettle.idleOrPause(driver, 2000); // the State's own requests answered; old: a flat 2 s (speed round 4)
 
       // 2. Use Pincode Search field and select first result
       // (verified with retries — the suggestion list sometimes loads slowly and
@@ -1815,7 +1821,7 @@ async function fillRelianceMultiForm( // [MC] 6
       );
 
       console.log("Filled all main form mandatory fields!");
-      await driver.sleep(2000);
+      await relianceSettle.idleOrPause(driver, 2000); // old: a flat 2 s (speed round 4)
 
       // === STEP 7: Submit Button ===
       console.log("Looking for submit button...");
@@ -1824,7 +1830,7 @@ async function fillRelianceMultiForm( // [MC] 6
 
       // Wait for submission to process (post-submission lookups have 15s waits)
       await waitForLoaderToDisappear(driver);
-      await driver.sleep(2000);
+      await relianceSettle.idleOrPause(driver, 2000); // old: a flat 2 s (speed round 4)
       console.log("Form submission attempted!");
 
       // Back to main content
@@ -1889,7 +1895,7 @@ async function fillRelianceMultiForm( // [MC] 6
           "arguments[0].scrollIntoView({block: 'center'});",
           validateButton
         );
-        await driver.sleep(500);
+        await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
 
         try {
           await validateButton.click();
@@ -1898,6 +1904,14 @@ async function fillRelianceMultiForm( // [MC] 6
         }
         console.log("Validate Customer button clicked!");
 
+        // Speed round 4: until the 'Customer Already Exists' dialog is on screen, or the portal has answered (idle 0.8 s)
+        // without it - at most the old 3 s. The same look below then takes it (or not) exactly as before.
+        const customerDialog = await relianceSettle.untilShownOrIdle(
+          driver,
+          ['div.ui-dialog[aria-describedby="divCustomerAlreadyExist"]'],
+          3000
+        );
+
         try {
           const dialog = await driver.wait(
             until.elementLocated(
@@ -1905,7 +1919,7 @@ async function fillRelianceMultiForm( // [MC] 6
                 'div.ui-dialog[aria-describedby="divCustomerAlreadyExist"]'
               )
             ),
-            3000 // wait up to 3 seconds for the popup to appear
+            customerDialog.shown ? 3000 : 100 // the look above already waited (speed round 4)
           );
 
           if (await dialog.isDisplayed()) {
@@ -1922,8 +1936,8 @@ async function fillRelianceMultiForm( // [MC] 6
           console.log("No pop-up detected, continuing...");
         }
 
-        // Wait for validation to process
-        await driver.sleep(3000);
+        // Wait for validation to process: the portal idle (old: a flat 3 s, never longer now - speed round 4)
+        await relianceSettle.idleOrPause(driver, 3000, { stableMs: 500 });
         console.log("Customer validation attempted!");
 
         // === STEP 9: Fill Vehicle Details ===
@@ -1999,6 +2013,7 @@ async function fillRelianceMultiForm( // [MC] 6
           const manufacturingMonth = data.manufacturingMonth || "10";
 
           await driver.executeScript(`
+            window.__rayalMfgMonthDone = false; // speed round 4: set when the month step below has run
             // Try to set manufacturing year
             var yearDropdown = document.getElementById('Manufacturing_YearVehicle');
             if (yearDropdown) {
@@ -2054,10 +2069,17 @@ async function fillRelianceMultiForm( // [MC] 6
                   }
                 }
               }
+              window.__rayalMfgMonthDone = true;
             }, 1000);
           `);
 
-          await driver.sleep(3000); // Wait for the JavaScript to execute
+          // Wait for the JavaScript to execute: its month step has run and the portal is idle (old: a flat 3 s, never
+          // longer now - speed round 4)
+          await relianceSettle.untilReady(
+            driver,
+            async () => (await driver.executeScript("return window.__rayalMfgMonthDone === true;")) && (await relianceSettle.portalIdleNow(driver)),
+            { capMs: 3000, everyMs: 150, quietMs: 300 }
+          );
           console.log(
             `Attempted to set manufacturing year to ${manufacturingYear} and month to ${manufacturingMonth} via JavaScript`
           );
@@ -2073,7 +2095,7 @@ async function fillRelianceMultiForm( // [MC] 6
         );
         await driver.executeScript("arguments[0].click();", newVehicleCheckbox);
         console.log("Checked 'Is New Vehicle' checkbox");
-        await driver.sleep(1000);
+        await relianceSettle.idleOrPause(driver, 1000); // old: a flat 1 s (speed round 4)
 
         // RTO City Location autocomplete (verified with retries — the old blind
         // first-item click was silently missing the selection ~2/10 runs)
@@ -2188,7 +2210,7 @@ async function fillRelianceMultiForm( // [MC] 6
             "arguments[0].scrollIntoView({block: 'center'});",
             discountInput
           );
-          await driver.sleep(500);
+          await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
 
           // Clear and set discount value
           await driver.executeScript(
@@ -2216,7 +2238,7 @@ async function fillRelianceMultiForm( // [MC] 6
           `, discountInput);
 
           console.log(`✅ Discount rate set to: ${discountValue}`);
-          await driver.sleep(1000);
+          await relianceSettle.idleOrPause(driver, 1000); // the change handler's requests answered; old: a flat 1 s (speed round 4)
         } catch (err) {
           console.log("⚠️ Could not set discount rate:", err.message);
         }
@@ -2233,7 +2255,7 @@ async function fillRelianceMultiForm( // [MC] 6
           "arguments[0].scrollIntoView({block: 'center'});",
           getCoverageButton
         );
-        await driver.sleep(1000);
+        await relianceSettle.idleOrPause(driver, 1000); // old: a flat 1 s - the page idle before Get Coverage (speed round 4)
 
         // Try multiple click methods to ensure the click is registered
         try {
@@ -2320,7 +2342,8 @@ async function fillRelianceMultiForm( // [MC] 6
             console.log("PA wanted but not checked. Clicking checkbox...");
             await driver.executeScript("arguments[0].click();", paOwnerDriverCheckbox);
             modalOpened = true;
-            await driver.sleep(2000);
+            // Until the PA question (valid Driving License? Yes / No) is on screen; old: a flat 2 s (speed round 4)
+            await relianceSettle.untilShown(driver, ["#OnYesofDL", "#OnNoofDL"], { capMs: 2000, everyMs: 150, quietMs: 200 });
           } else {
             console.log("PA already checked. Not clicking checkbox as per user manual.");
           }
@@ -2329,7 +2352,8 @@ async function fillRelianceMultiForm( // [MC] 6
           console.log("PA not wanted. Clicking checkbox to handle opt-out...");
           await driver.executeScript("arguments[0].click();", paOwnerDriverCheckbox);
           modalOpened = true;
-          await driver.sleep(2000);
+          // Until the PA question (valid Driving License? Yes / No) is on screen; old: a flat 2 s (speed round 4)
+          await relianceSettle.untilShown(driver, ["#OnYesofDL", "#OnNoofDL"], { capMs: 2000, everyMs: 150, quietMs: 200 });
         }
 
         // Wait for modal to open and click "Yes" or "No" checkbox ONLY if we triggered it
@@ -2355,7 +2379,7 @@ async function fillRelianceMultiForm( // [MC] 6
               await driver.executeScript("arguments[0].click();", noCheckbox);
               console.log("Clicked 'No' checkbox in PA to Owner Driver modal");
             }
-            await driver.sleep(1000);
+            await relianceSettle.idleOrPause(driver, 1000); // the answer's requests done; old: a flat 1 s (speed round 4)
           } catch (err) {
             console.log("No modal appeared or error handling modal:", err.message);
           }
@@ -2382,7 +2406,7 @@ async function fillRelianceMultiForm( // [MC] 6
           helmetCoverCheckbox
         );
         console.log("Unchecked Helmet Cover checkbox");
-        await driver.sleep(1000);
+        await relianceSettle.idleOrPause(driver, 1000); // old: a flat 1 s (speed round 4)
 
         // Set TPPD Limit if restriction enabled (select 6000)
         try {
@@ -3052,7 +3076,7 @@ async function fillRelianceMultiForm( // [MC] 6
         );
         await driver.executeScript("arguments[0].click();", regAddressSameCheckbox);
         console.log("Checked 'Is Registration Address Same' checkbox");
-        await driver.sleep(2000);
+        await relianceSettle.idleOrPause(driver, 2000); // old: a flat 2 s (speed round 4)
         } // [MC] 14
 
         // Click "Calculate Premium" button
@@ -3203,7 +3227,7 @@ async function fillRelianceMultiForm( // [MC] 6
           "arguments[0].scrollIntoView({block: 'center'});",
           calculatePremiumButton
         );
-        await driver.sleep(500);
+        await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
 
         try {
           await calculatePremiumButton.click();
@@ -3217,10 +3241,11 @@ async function fillRelianceMultiForm( // [MC] 6
         // [MC] 15: Reliance OD only — an alert() raised by the click is the answer (the next command would swallow it).
         if (mcKind === "od") await afterCalculatePremiumClick(driver); // [MC] 15
 
-        // Wait for premium calculation to complete
-        await driver.sleep(2000);
+        // Wait for premium calculation to complete: its requests answered (the loader wait below as before), then the page
+        // idle again - each at most the old 2 s (speed round 4)
+        await relianceSettle.idleOrPause(driver, 2000, { stableMs: 500 });
         await waitForLoaderToDisappear(driver);
-        await driver.sleep(2000);
+        await relianceSettle.idleOrPause(driver, 2000, { stableMs: 500 });
         console.log("Premium calculation completed!");
         // [MC] 15: Reliance OD only — a refusal Reliance put on the page (popup / field message) is the answer, in its own words.
         if (mcKind === "od") await afterCalculatePremium(driver, { log: (line) => console.log(line) }); // [MC] 15
@@ -3245,7 +3270,7 @@ async function fillRelianceMultiForm( // [MC] 6
             "arguments[0].scrollIntoView({block: 'center'});",
             saveButton
           );
-          await driver.sleep(500);
+          await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
 
           try {
             await saveButton.click();
@@ -3255,7 +3280,8 @@ async function fillRelianceMultiForm( // [MC] 6
           console.log("Clicked Save button!");
           // [MC] 15: Reliance OD only — an alert() raised by Save is the answer.
           if (mcKind === "od") await afterSaveClick(driver); // [MC] 15
-          await driver.sleep(3000);
+          // Save's request answered (the "Proposal Saved Successfully" wait follows as before); old: a flat 3 s (speed round 4)
+          await relianceSettle.idleOrPause(driver, 3000, { stableMs: 500 });
 
           // === NEW FLOW: Extract Proposal Number ===
           console.log("Extracting proposal number from success message...");
@@ -3316,7 +3342,7 @@ async function fillRelianceMultiForm( // [MC] 6
               .move({ origin: utilityMenu })
               .perform();
             console.log("✅ Hovered on Utility menu");
-            await driver.sleep(2000);
+            await driver.sleep(300); // old 2000 - the link's own visible-wait follows (speed round 4)
 
             // Click on "View Policy" link
             const viewPolicyLink = await driver.wait(
@@ -3332,7 +3358,8 @@ async function fillRelianceMultiForm( // [MC] 6
               await driver.executeScript("arguments[0].click();", viewPolicyLink);
             }
             console.log("✅ Clicked 'View Policy' link");
-            await driver.sleep(3000);
+            // Until the View Policy page (/Policy/ViewPolicySearch) has loaded; old: a flat 3 s, never longer now (speed round 4)
+            await relianceSettle.untilAt(driver, "/Policy/ViewPolicySearch", 3000);
             console.log("⚠️  View Policy opens on same page (no new tab)");
 
           } catch (err) {
@@ -3343,8 +3370,8 @@ async function fillRelianceMultiForm( // [MC] 6
           // === NEW FLOW: Search for Proposal ===
           console.log("Searching for proposal...");
           try {
-            // Wait a bit for page to fully load
-            await driver.sleep(2000);
+            // Wait a bit for page to fully load: its requests done (old: a flat 2 s, never longer now - speed round 4)
+            await relianceSettle.idleOrPause(driver, 2000);
 
             // Search input: id="txtSearchText" (inside div id="idproposalno")
             console.log("Looking for search input with id='txtSearchText'...");
@@ -3399,14 +3426,14 @@ async function fillRelianceMultiForm( // [MC] 6
               "arguments[0].scrollIntoView({block: 'center'});",
               policySearchInput
             );
-            await driver.sleep(500);
+            await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
 
             // Clear and enter proposal number
             await policySearchInput.clear();
-            await driver.sleep(300);
+            await driver.sleep(100); // old 300 (speed round 4)
             await policySearchInput.sendKeys(proposalNumber);
             console.log(`✅ Entered proposal number: ${proposalNumber}`);
-            await driver.sleep(1000);
+            await relianceSettle.idleOrPause(driver, 1000, { stableMs: 300 }); // old: a flat 1 s (speed round 4)
 
             // Find and click Search button
             console.log("Looking for search button...");
@@ -3456,12 +3483,7 @@ async function fillRelianceMultiForm( // [MC] 6
               throw new Error("Search button not found");
             }
 
-            // Debug: Get button info
-            const buttonText = await searchButton.getText();
-            const buttonId = await searchButton.getAttribute("id");
-            const buttonClass = await searchButton.getAttribute("class");
-            const buttonType = await searchButton.getAttribute("type");
-            console.log(`📊 Button details: text="${buttonText}", id="${buttonId}", class="${buttonClass}", type="${buttonType}"`);
+            // (four debug reads of the button's text / id / class / type stood here, only for a log line - speed round 4)
 
             await driver.wait(until.elementIsVisible(searchButton), 5000);
             await driver.wait(until.elementIsEnabled(searchButton), 5000);
@@ -3469,21 +3491,9 @@ async function fillRelianceMultiForm( // [MC] 6
               "arguments[0].scrollIntoView({block: 'center'});",
               searchButton
             );
-            await driver.sleep(500);
-
-            // Take screenshot BEFORE clicking
-            try {
-              const screenshotsDir = './screenshots';
-              if (!fs.existsSync(screenshotsDir)) {
-                fs.mkdirSync(screenshotsDir, { recursive: true });
-              }
-              const screenshot = await driver.takeScreenshot();
-              const screenshotPath = `./screenshots/before_search_click_${Date.now()}.png`;
-              fs.writeFileSync(screenshotPath, screenshot, 'base64');
-              console.log(`📷 Screenshot saved BEFORE click: ${screenshotPath}`);
-            } catch (screenshotErr) {
-              console.log("⚠️  Screenshot error:", screenshotErr.message);
-            }
+            await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
+            // (a debug screenshot to the server's own ./screenshots folder stood here - never uploaded, only filled the
+            // disk; speed round 4)
 
             // Try multiple click methods
             let clickSuccess = false;
@@ -3555,7 +3565,7 @@ async function fillRelianceMultiForm( // [MC] 6
               console.log("❌ WARNING: Could not click search button with any method");
             }
 
-            await driver.sleep(2000);
+            // (a flat 2 s pause stood here: the wait for the DO KYC link below starts at once - speed round 4)
 
             // Wait for search results to load - look for DO KYC link or policy details
             try {
@@ -3578,49 +3588,8 @@ async function fillRelianceMultiForm( // [MC] 6
             throw err;
           }
 
-          // === NEW FLOW: Debug Page Content Before DO KYC ===
-          console.log("\n📸 === DEBUGGING PAGE BEFORE DO KYC ===");
-          try {
-            // Create screenshots directory if it doesn't exist
-            const screenshotsDir = './screenshots';
-            if (!fs.existsSync(screenshotsDir)) {
-              fs.mkdirSync(screenshotsDir, { recursive: true });
-            }
-
-            // Take screenshot
-            const screenshot = await driver.takeScreenshot();
-            const timestamp = Date.now();
-            const screenshotPath = `./screenshots/debug_before_kyc_${timestamp}.png`;
-            fs.writeFileSync(screenshotPath, screenshot, 'base64');
-            console.log(`📷 Screenshot saved: ${screenshotPath}`);
-
-            // Get page source
-            const pageSource = await driver.getPageSource();
-            console.log(`📄 Page length: ${pageSource.length} characters`);
-
-            // Look for all links on page
-            const allLinks = await driver.findElements(By.tagName("a"));
-            console.log(`🔗 Total links on page: ${allLinks.length}`);
-            for (let i = 0; i < Math.min(allLinks.length, 10); i++) {
-              const linkText = await allLinks[i].getText();
-              const linkHref = await allLinks[i].getAttribute("href");
-              console.log(`   Link ${i}: "${linkText}" -> ${linkHref}`);
-            }
-
-            // Search page source for KYC keyword
-            if (pageSource.includes("KYC")) {
-              console.log("✅ Page contains 'KYC' keyword");
-              // Find all occurrences
-              const kycMatches = pageSource.match(/KYC|kyc|Kyc/g);
-              console.log(`   Found ${kycMatches.length} occurrences of KYC variations`);
-            } else {
-              console.log("❌ Page does NOT contain 'KYC' keyword!");
-            }
-
-            console.log("📸 === END DEBUG INFO ===\n");
-          } catch (debugErr) {
-            console.log("⚠️  Debug error:", debugErr.message);
-          }
+          // (a debug block stood here: a screenshot to the server's own ./screenshots folder, the whole page HTML and 20
+          // link reads, only for log lines; nothing decided on them - speed round 4)
 
           // === NEW FLOW: Click DO KYC Link (Opens New Tab) ===
           // From here on a KYC that does not work is handled by relianceKycFallback.js (the flags are declared at the top).
@@ -3742,7 +3711,7 @@ async function fillRelianceMultiForm( // [MC] 6
                 } catch (e) {
                   // best effort — later steps have their own waits
                 }
-                await driver.sleep(500);
+                await driver.sleep(200); // old 500 (speed round 4)
                 const newUrl = await driver.getCurrentUrl();
                 console.log(`✅ Switched to KYC window, URL: ${newUrl}`);
               }
@@ -3776,7 +3745,7 @@ async function fillRelianceMultiForm( // [MC] 6
                 "arguments[0].scrollIntoView({block: 'center'});",
                 ovdLabel
               );
-              await driver.sleep(300);
+              await driver.sleep(100); // old 300 - the scroll is instant (speed round 4)
               try {
                 await ovdLabel.click();
               } catch (labelClickErr) {
@@ -3788,7 +3757,13 @@ async function fillRelianceMultiForm( // [MC] 6
                 ovdRadio
               );
             }
-            await driver.sleep(800);
+            // Until the radio reads selected (old: a flat 800 ms first; not selected is still decided after 800 ms - speed
+            // round 4). The same check and force below.
+            await relianceSettle.untilReady(
+              driver,
+              () => driver.executeScript("var r = document.querySelector(\"#ind-ovd, input[name='selectedOption'][value='ovd']\"); return r ? r.checked : false;"),
+              { capMs: 800, everyMs: 100 }
+            );
 
             // Verify the radio actually got selected; force it if not
             const ovdSelected = await driver.executeScript(
@@ -3821,7 +3796,7 @@ async function fillRelianceMultiForm( // [MC] 6
               "arguments[0].scrollIntoView({block: 'center'});",
               kycContinueBtn
             );
-            await driver.sleep(300);
+            await driver.sleep(100); // old 300 - the scroll is instant (speed round 4)
             try {
               await kycContinueBtn.click();
             } catch (contClickErr) {
@@ -3829,8 +3804,9 @@ async function fillRelianceMultiForm( // [MC] 6
             }
             console.log("✅ Clicked Continue (with OVD UPLOAD)");
 
-            // Wait for the document-type page to load (readyState + small buffer)
-            await driver.sleep(1500);
+            // Wait for the document-type page to load: the tab has left the OVD page (the old page already says
+            // "complete", so readyState alone cannot tell) - old: a flat 1.5 s, never longer now (speed round 4)
+            await relianceSettle.untilLeft(driver, kycOvdUrl || "", 1500, { quietMs: 200 });
             try {
               await driver.wait(
                 async () =>
@@ -3925,7 +3901,7 @@ async function fillRelianceMultiForm( // [MC] 6
               } catch (e) {
                 console.log("⚠️ KYC page still loading after 15s, searching anyway...");
               }
-              await driver.sleep(1000);
+              // (a flat 1 s pause stood here: the search below looks until the option is there - speed round 4)
 
               // The page has FIVE options (PAN, AADHAAR, CKYC, UPLOAD DOCUMENT, AA), every one with ng-click="selectDoc(..)".
               // The exact one is searched for (relianceKycUpload.js); the old "first selectDoc" search found PAN.
@@ -3970,7 +3946,7 @@ async function fillRelianceMultiForm( // [MC] 6
                   }
                   await driver.switchTo().defaultContent();
                 }
-                if (!uploadDocDiv) await driver.sleep(1000);
+                if (!uploadDocDiv) await driver.sleep(250); // old 1000 between looks (speed round 4)
               }
 
               if (!uploadDocDiv) {
@@ -4045,7 +4021,9 @@ async function fillRelianceMultiForm( // [MC] 6
                   }
                 }
 
-                await driver.sleep(2000);
+                // Until both upload areas (Identity / Address Verification) are on the page; old: a flat 2 s, never longer
+                // now (speed round 4)
+                await relianceSettle.untilReady(driver, () => relianceSettle.dropzonesReady(driver), { capMs: 2000, everyMs: 150, quietMs: 200 });
 
                 // === STEP 2: Handle Angular file upload (ngf-drop/ngf-select) ===
                 console.log("Looking for upload input field...");
@@ -4538,7 +4516,8 @@ async function fillRelianceMultiForm( // [MC] 6
                   }
 
                   console.log("✅ Both document uploads attempted");
-                  await driver.sleep(2000);
+                  // (a flat 2 s pause stood here: each document was already waited for until the page took it, and the
+                  // SUBMIT button is waited for below - speed round 4)
 
                   // Keep temp file for debugging - don't delete
                   console.log(`📁 Temp file kept at: ${tempFilePath}`);
@@ -4549,8 +4528,9 @@ async function fillRelianceMultiForm( // [MC] 6
                   try {
                     let submitButton = null;
 
-                    // Wait a bit for files to be processed and button to appear
-                    await driver.sleep(2000);
+                    // Wait a bit for files to be processed and button to appear (old 2 s; the SUBMIT button's own waits
+                    // follow - speed round 4)
+                    await driver.sleep(300);
 
                     // Try multiple selector methods for the submit button
                     try {
@@ -4797,8 +4777,9 @@ async function fillRelianceMultiForm( // [MC] 6
                           "arguments[0].scrollIntoView({block: 'center'});",
                           proceedButton
                         );
-                        await driver.sleep(500);
+                        await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
 
+                        const beforeProceedUrl = await relianceSettle.urlNow(driver);
                         try {
                           await proceedButton.click();
                           console.log("✅ Clicked PROCEED button");
@@ -4807,9 +4788,11 @@ async function fillRelianceMultiForm( // [MC] 6
                           console.log("✅ Clicked PROCEED button (via JavaScript)");
                         }
 
-                        // Wait for navigation after PROCEED click
-                        console.log("⏳ Waiting for navigation after PROCEED click (5 seconds)...");
-                        await driver.sleep(5000);
+                        // Wait for navigation after PROCEED click: the KYC tab has gone on to its next page, loaded, and
+                        // stayed there 1 s (the hand-back to Reliance is done before the tab is closed). At most the old
+                        // 5 s (speed round 4).
+                        console.log("⏳ Waiting for navigation after PROCEED click (up to 5 seconds)...");
+                        await relianceSettle.untilLeft(driver, beforeProceedUrl, 5000, { quietMs: 1000 });
 
                         // === STEP 5: Handle tabs ===
                         console.log("Checking for new tabs...");
@@ -4825,8 +4808,8 @@ async function fillRelianceMultiForm( // [MC] 6
                           await driver.switchTo().window(allHandles[0]);
                           console.log("✅ Switched back to original tab");
                         }
-
-                        await driver.sleep(2000);
+                        // (a flat 2 s pause stood here: nothing is pending on the original tab, and the payment step opens
+                        // its page by address - speed round 4)
 
                         // === Stage 3 (Pending Quotes, Pay, link / wallet) runs after the KYC block, below ===
                         kycProceeded = true;
@@ -4845,7 +4828,6 @@ async function fillRelianceMultiForm( // [MC] 6
                       });
                       */
                       console.log("✅ KYC step finished - the payment (stage 3) follows");
-                      await driver.sleep(2000);
                     } else {
                       console.log("❌ SUBMIT button could not be located");
                       kycProblem = "the SUBMIT button could not be located on the KYC page";
@@ -4931,11 +4913,19 @@ async function fillRelianceMultiForm( // [MC] 6
                           console.log(`Navigating to: ${pendingQuotesUrl}`);
                           await driver.get(pendingQuotesUrl);
                           console.log("✅ Navigated to Pending Quotes via URL");
-                          await driver.sleep(3000);
+                          // The page has loaded (driver.get waits for that); its own requests end -> on (old: a flat 3 s,
+                          // never longer now - speed round 4).
+                          await relianceSettle.idleOrPause(driver, 3000, { stableMs: 500 });
 
                           // Fallback: If URL navigation didn't work, try menu approach
-                          const pageSource = await driver.getPageSource();
-                          if (!pageSource.includes('Pending') && !pageSource.includes('pending')) {
+                          // (the same "does the page say Pending" check, asked in the page instead of fetching its whole HTML)
+                          const pageSaysPending = await driver
+                            .executeScript("var h = document.documentElement ? document.documentElement.outerHTML : ''; return h.indexOf('Pending') >= 0 || h.indexOf('pending') >= 0;")
+                            .catch(async () => {
+                              const pageSource = await driver.getPageSource();
+                              return pageSource.includes('Pending') || pageSource.includes('pending');
+                            });
+                          if (!pageSaysPending) {
                             console.log("URL navigation may not have worked, trying menu approach...");
 
                             const paymentMenu = await driver.wait(
@@ -5026,7 +5016,9 @@ async function fillRelianceMultiForm( // [MC] 6
                             pendingQuotesPageUrl = proposalPage.url;
                           }
 
-                          await driver.sleep(5000);
+                          // The grid's own wait follows (findProposalAcrossPages: rows on screen, not loading); here only the
+                          // page's requests end (old: a flat 5 s, never longer now - speed round 4).
+                          await relianceSettle.idleOrPause(driver, 5000, { stableMs: 500 });
 
                           // === STEP 8: Find and click the proposal checkbox ===
                           console.log("Looking for proposal checkbox...");
@@ -5101,12 +5093,14 @@ async function fillRelianceMultiForm( // [MC] 6
                                 "arguments[0].scrollIntoView({block: 'center'});",
                                 proposalCheckbox
                               );
-                              await driver.sleep(500);
+                              await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
 
                               await proposalCheckbox.click();
                               console.log("✅ Clicked proposal checkbox");
 
-                              await driver.sleep(2000);
+                              // The tick's own request (the amount) answered: the portal idle (old: a flat 2 s, never longer
+                              // now - speed round 4). The wallet's "only ours ticked" check below reads it as before.
+                              await relianceSettle.idleOrPause(driver, 2000);
 
                               if (walletStrict) {
                                 // exactly one proposal ticked, and it is this one — before Pay, before any amount
@@ -5132,12 +5126,12 @@ async function fillRelianceMultiForm( // [MC] 6
                                   "arguments[0].scrollIntoView({block: 'center'});",
                                   tpDeclaration
                                 );
-                                await driver.sleep(500);
+                                await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
 
                                 await tpDeclaration.click();
                                 console.log("✅ Checked TP Declaration");
 
-                                await driver.sleep(1500);
+                                await relianceSettle.idleOrPause(driver, 1500); // old: a flat 1.5 s (speed round 4)
 
                                 await stopIfHeld(data, "before Pay (nothing is paid)");
                                 // [MC] 5: last look before Pay — the proposal is saved and KYC done (no-op unless the Breaker is on)
@@ -5155,12 +5149,14 @@ async function fillRelianceMultiForm( // [MC] 6
                                     "arguments[0].scrollIntoView({block: 'center'});",
                                     payButton
                                   );
-                                  await driver.sleep(500);
+                                  await driver.sleep(100); // old 500 - the scroll is instant (speed round 4)
 
+                                  const beforePayUrl = await relianceSettle.urlNow(driver);
                                   await payButton.click();
                                   console.log("✅ Clicked Pay button");
 
-                                  await driver.sleep(3000);
+                                  // Until the page Pay opens has loaded (old: a flat 3 s, never longer now - speed round 4).
+                                  await relianceSettle.untilLeft(driver, beforePayUrl, 3000, { quietMs: 300 });
 
                                   // The page Pay opened — the "Make Payment Page" card of the View page. Saved before the payment
                                   // link / wallet steps below (a wallet policy stops right after this, on that page).
@@ -5389,7 +5385,6 @@ async function fillRelianceMultiForm( // [MC] 6
                                   }
                                   */
                                   console.log("⏭️  Skipping amount field (disabled)");
-                                  await driver.sleep(2000);
 
 
                                 } catch (payBtnErr) {
@@ -5755,8 +5750,6 @@ async function fillRelianceMultiForm( // [MC] 6
       throw err;
     }
     } // end of: if (!issuedRecovery) — the form
-
-    await driver.sleep(2000);
 
     // If any post-submission/calculation failure occurred, return it
     if (postCalculationFailed || postSubmissionFailed) {

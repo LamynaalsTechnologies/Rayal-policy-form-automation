@@ -538,8 +538,7 @@ async function saveKycStatus(status, data, jobId = "", { MongoClient } = {}) {
   }
   let client = null;
   try {
-    const Client = MongoClient || require("mongodb").MongoClient;
-    client = new Client(process.env.MONGODB_URI);
+    client = require("../../lib/sharedDb").clientFor(MongoClient, process.env.MONGODB_URI); // the server's open connection when there is one (speed round 4)
     await client.connect();
     const update = status
       ? { $set: { kycStatus: String(status), updatedAt: new Date() } }

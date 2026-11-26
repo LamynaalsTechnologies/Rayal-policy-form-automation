@@ -449,8 +449,7 @@ async function saveProcessLinks({ proposalLink, paymentLink } = {}, data = {}, j
   }
   let client = null;
   try {
-    const Client = MongoClient || require("mongodb").MongoClient;
-    client = new Client(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
+    client = require("../../lib/sharedDb").clientFor(MongoClient, process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 }); // the server's open connection when there is one (speed round 4)
     await client.connect();
     const collection = client.db().collection("onlinePolicy");
     const existing = (await collection.findOne({ _id: policyId }, { projection: { proposalLink: 1, paymentLink: 1 } })) || {};
@@ -537,8 +536,7 @@ async function clearStaleProcessLinks({ portalUrl } = {}, data = {}, jobId = "",
   if (!host || !policyId) return { cleared: [] };
   let client = null;
   try {
-    const Client = MongoClient || require("mongodb").MongoClient;
-    client = new Client(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
+    client = require("../../lib/sharedDb").clientFor(MongoClient, process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 }); // the server's open connection when there is one (speed round 4)
     await client.connect();
     const collection = client.db().collection("onlinePolicy");
     const existing = (await collection.findOne({ _id: policyId }, { projection: { proposalLink: 1, paymentLink: 1 } })) || {};

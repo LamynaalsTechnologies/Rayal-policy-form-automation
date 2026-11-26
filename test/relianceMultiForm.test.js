@@ -97,7 +97,7 @@ test("the exact check can fail: a fix right next to an [MC] change, a hand edit 
   assert.equal(spec.firstDifference(built, built), null);
 
   // a fix in relianceForm.js INSIDE the text an [MC] change is anchored on: build() refuses, saying which change
-  const anchor = "await driver.sleep(1000); // Wait for dropdown animation";
+  const anchor = "await driver.sleep(300); // Wait for dropdown animation (old 1000; the option's own visible-wait follows - speed round 4)";
   assert.equal(original.split(anchor).length - 1, 1, "anchor present once in the original");
   const fixedAtAnchor = original.replace(anchor, "await driver.sleep(1500); // Wait for dropdown animation");
   assert.throws(() => spec.build(fixedAtAnchor), /\[MC\] 3: the full-company relianceForm\.js has this text 0 time\(s\)/);
@@ -111,7 +111,7 @@ test("the exact check can fail: a fix right next to an [MC] change, a hand edit 
   // a hand edit of the copy on the line right before an [MC] block
   const copy = fs.readFileSync(COPY, "utf8");
   const handEdited = copy.replace(
-    "await driver.sleep(2000); // Give time for the API call to be made.\n    // [MC] 5",
+    "await relianceSettle.idleOrPause(driver, 2000); // Give time for the API call to be made (until answered, at most the old 2 s - speed round 4).\n    // [MC] 5",
     "await driver.sleep(3000); // Give time for the API call to be made.\n    // [MC] 5"
   );
   assert.notEqual(handEdited, copy, "anchor present in the copy");
@@ -410,7 +410,7 @@ test("[MC] 15: the exact words after Calculate Premium and after Save — the al
   const refusal = code.indexOf("await afterCalculatePremium(driver,", done);
   const save = code.indexOf('console.log("Clicked Save button!");', refusal);
   const saveAlert = code.indexOf("await afterSaveClick(driver);", save);
-  const sleep3 = code.indexOf("await driver.sleep(3000);", saveAlert);
+  const sleep3 = code.indexOf("await relianceSettle.idleOrPause(driver, 3000, { stableMs: 500 });", saveAlert); // the flow's 3 s (speed round 4: ends when the portal is idle)
   const failure = code.indexOf('await explainSaveFailure(driver) : new Error("Proposal number extraction failed")', sleep3);
   const order = [click, alertWatch, loader, done, refusal, save, saveAlert, sleep3, failure];
   assert.ok(order.every((n) => n > 0), `every landmark found ${JSON.stringify(order)}`);

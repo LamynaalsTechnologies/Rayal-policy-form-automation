@@ -22,6 +22,7 @@ const {
   cleanupKshemaJobBrowser,
 } = require("./kshema/kshemaSessionManager");
 const { log, debug, warn, err, VERBOSE } = require("./kshema/kshemaLog");
+const kshemaSettle = require("./kshema/kshemaSettle"); // speed round 4: "ready, or the old pause"
 const { uploadScreenshotToS3, generateScreenshotKey } = require("../s3Uploader");
 const { startRecording } = require("../lib/jobRecorder");
 const {
@@ -689,8 +690,13 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
       warn(`No visible input appeared within ${CONFIG.LOGIN_TIMEOUT}ms`);
     }
 
-    // Angular often paints the shell first and the form a beat later.
-    await driver.sleep(2000);
+    // Angular often paints the shell first and the form a beat later: wait until BOTH login boxes are on screen and stay
+    // there (old: a flat 2 s; never longer now - speed round 4).
+    await kshemaSettle.untilReady(
+      driver,
+      async () => (await kshemaSettle.isShown(driver, USERNAME_SELECTORS)) && (await kshemaSettle.isShown(driver, PASSWORD_SELECTORS)),
+      { capMs: 2000, everyMs: 150, quietMs: 300 }
+    );
 
     const pageUrl = await driver.getCurrentUrl();
     const pageTitle = await driver.getTitle();
@@ -1031,8 +1037,9 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     }
 
     // Let the quote screen render before handing back — its markup is what the
-    // next phase gets written from.
-    await driver.sleep(4000);
+    // next phase gets written from. Until its first dropdown (Customer Category) is on screen and stays there; old: a
+    // flat 4 s, never longer now (speed round 4).
+    await kshemaSettle.untilQuoteScreen(driver, 4000);
     quoteUrl = await driver.getCurrentUrl();
     quoteTitle = await driver.getTitle();
     log("✅ Two-Wheeler opened.");
@@ -1304,7 +1311,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
     try {
       const { MongoClient, ObjectId } = require('mongodb');
       const mongoUrl = process.env.MONGODB_URI || 'mongodb://localhost:27017/rayal';
-      client = new MongoClient(mongoUrl);
+      client = require("../lib/sharedDb").clientFor(MongoClient, mongoUrl); // the server's open connection when there is one (speed round 4)
       await client.connect();
       const db = client.db();
       const collection = db.collection('onlinePolicy');
@@ -1420,7 +1427,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
       try {
         const { MongoClient, ObjectId } = require('mongodb');
         const mongoUrl = process.env.MONGODB_URI || 'mongodb://localhost:27017/rayal';
-        client = new MongoClient(mongoUrl);
+        client = require("../lib/sharedDb").clientFor(MongoClient, mongoUrl); // the server's open connection when there is one (speed round 4)
         await client.connect();
         const db = client.db();
         const collection = db.collection('onlinePolicy');
@@ -1623,7 +1630,7 @@ async function runKshemaFlow(data, jobId, loginUrl, registerBrowser) {
       try {
         const { MongoClient, ObjectId } = require('mongodb');
         const mongoUrl = process.env.MONGODB_URI || 'mongodb://localhost:27017/rayal';
-        client = new MongoClient(mongoUrl);
+        client = require("../lib/sharedDb").clientFor(MongoClient, mongoUrl); // the server's open connection when there is one (speed round 4)
         await client.connect();
         const db = client.db();
         const collection = db.collection('onlinePolicy');

@@ -263,7 +263,7 @@ async function findVisible(driver, selectors, root = null, timeoutMs = FIELD_WAI
   const deadline = Date.now() + timeoutMs;
   let found = await findVisibleOnce(driver, selectors, root);
   while (!found.element && Date.now() < deadline) {
-    await driver.sleep(300);
+    await driver.sleep(150); // old: 300 ms between looks - a field drawn late is used sooner (speed round 4)
     found = await findVisibleOnce(driver, selectors, root);
   }
   return found;
@@ -576,7 +576,7 @@ async function collectOptions(driver, timeoutMs) {
           options = res.options;
           break;
         }
-        await driver.sleep(200);
+        await driver.sleep(100); // old: 200 ms between looks (speed round 4)
         continue;
       }
     }
@@ -1237,8 +1237,9 @@ async function selectMatRadio(driver, selectors, wantedValue, label) {
   }
 
   // Read it back — a click that lands on the ripple layer instead of the
-  // control looks like it worked and leaves the answer unchanged.
-  await driver.sleep(300);
+  // control looks like it worked and leaves the answer unchanged. Read as soon as it shows chosen (old: a flat 300 ms
+  // first); not chosen is still decided after the same 300 ms (speed round 4).
+  await require("../../lib/settle").untilReady(driver, () => target.isSelected(), { capMs: 300, everyMs: 100 });
   try {
     if (!(await target.isSelected())) {
       return {
@@ -1312,7 +1313,8 @@ async function setMatCheckbox(driver, selectors, wantedValue, label) {
     }
   }
 
-  await driver.sleep(300);
+  // Read as soon as it shows the wanted state (old: a flat 300 ms first); a miss is still decided after 300 ms (speed round 4).
+  await require("../../lib/settle").untilReady(driver, async () => (await target.isSelected()) === wantedValue, { capMs: 300, everyMs: 100 });
   try {
     const after = await target.isSelected();
     if (after === wantedValue) {
@@ -1375,8 +1377,16 @@ async function setSlider(driver, selectors, wantedValue, label) {
     return { ok: false, value: null, reason: `the "${label}" slider could not be clicked: ${e.message}` };
   }
 
-  await driver.sleep(300);
-  
+  // Read as soon as it shows the wanted state (old: a flat 300 ms first); a miss is still decided after 300 ms (speed round 4).
+  await require("../../lib/settle").untilReady(
+    driver,
+    async () => {
+      const cls = String((await target.getAttribute("class")) || "");
+      return (cls.includes("slider-on") || cls.includes("mat-checked")) === wantedValue;
+    },
+    { capMs: 300, everyMs: 100 }
+  );
+
   try {
     const newClass = await target.getAttribute("class");
     if ((newClass.includes("slider-on") || newClass.includes("mat-checked")) !== wantedValue) {

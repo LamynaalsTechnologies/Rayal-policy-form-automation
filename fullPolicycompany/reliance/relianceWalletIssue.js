@@ -77,9 +77,10 @@ const TIMING = {
   refusalGraceMs: 5000,
   afterClickMs: 1500,
   linkWaitMs: 20000,
+  schedulePageGraceMs: 2000, // the schedule page loaded and no download started this long = the link gave no PDF (speed round 4)
   pdfWaitMs: 60000,
   pdfPollMs: 500,
-  pdfStableMs: 1500,
+  pdfStableMs: 500, // old 1500 - Chrome renames the .crdownload only when the file is complete (checked too); speed round 4
   menuWaitMs: 10000,
   searchPageWaitMs: 20000,
   searchResultWaitMs: 30000,
@@ -438,8 +439,7 @@ function selectKendoOptionInPage(listId, label) {
 
 /** Open the database for one piece of work and close it again (the way every other save of the forms does). */
 async function withDb(MongoClient, work, { uri = process.env.MONGODB_URI } = {}) {
-  const Client = MongoClient || require("mongodb").MongoClient;
-  const client = new Client(uri, { serverSelectionTimeoutMS: 10000 });
+  const client = require("../../lib/sharedDb").clientFor(MongoClient, uri, { serverSelectionTimeoutMS: 10000 }); // the server's open connection when there is one (speed round 4)
   try {
     await client.connect();
     const db = client.db();
@@ -976,6 +976,42 @@ async function closeExtraWindows(driver, home, log) {
 /* The PDF, way 1 — the schedule link of the Payment Success page             */
 /* -------------------------------------------------------------------------- */
 
+/** Reliance's schedule page (/Motor/GenerateMotorSchedule?policyNo=...) is the tab's page and has loaded. */
+async function schedulePageLoaded(driver) {
+  try {
+    const url = String((await driver.getCurrentUrl()) || "");
+    if (!/GenerateMotorSchedule/i.test(url)) return false;
+    return (await driver.executeScript("return document.readyState")) === "complete";
+  } catch (e) {
+    if (cdt.isStop(e)) throw e;
+    return false;
+  }
+}
+
+/**
+ * After the schedule link's click (speed round 4): until a download STARTS (any new file, a partial one too) -> the
+ * normal wait takes it; or the schedule page has loaded and nothing started for `schedulePageGraceMs` -> pageOnly; or
+ * the old budget is used up.
+ */
+async function scheduleLinkLook(ctx, { before, started, budgetMs }) {
+  const { driver, downloadDir, fsImpl, sleep, now, timing } = ctx;
+  const graceMs = timing.schedulePageGraceMs;
+  const was = new Map(before.map((f) => [f.name, f]));
+  const downloadStarted = () =>
+    listFiles(downloadDir, fsImpl).some((f) => {
+      const old = was.get(f.name);
+      return !old || old.size !== f.size || old.mtimeMs !== f.mtimeMs;
+    });
+  let pageSince = null;
+  for (;;) {
+    if (downloadStarted()) return { pageOnly: false, download: true };
+    if (pageSince === null && (await schedulePageLoaded(driver))) pageSince = now();
+    if (pageSince !== null && now() - pageSince >= graceMs) return { pageOnly: true, graceMs };
+    if (now() - started >= budgetMs) return { pageOnly: false };
+    await sleep(Math.min(timing.pdfPollMs, Math.max(1, budgetMs - (now() - started))));
+  }
+}
+
 async function pdfFromScheduleLink(ctx) {
   const { driver, number, downloadDir, fsImpl, log, sleep, now, timing } = ctx;
   let home = null;
@@ -1003,12 +1039,25 @@ async function pdfFromScheduleLink(ctx) {
   const click = await clickOnce(driver, target);
   if (!click.clicked) return { ok: false, reason: "click", message: `the link could not be clicked (${plain(click.error)})` };
   log(`policy number link clicked${click.via === "script" ? " (by script)" : ""}${click.alert ? ` — Reliance showed "${plain(click.alert)}"` : ""}`);
-  await sleep(timing.afterClickMs);
+  // Speed round 4: on the live portal this link takes the tab to Reliance's schedule PAGE and downloads nothing (seen live
+  // 2026-10-14). Once that page has loaded and no download has started for `schedulePageGraceMs`, the look ends; a
+  // download that does start is waited for exactly as before. Never longer than before (afterClickMs + linkWaitMs).
+  const linkStarted = now();
+  const linkBudget = timing.afterClickMs + timing.linkWaitMs;
+  const look = await scheduleLinkLook(ctx, { before, started: linkStarted, budgetMs: linkBudget });
+  if (look.pageOnly) {
+    if (home) await closeExtraWindows(driver, home, log);
+    return {
+      ok: false,
+      reason: "timeout",
+      message: `clicking the policy number did not download a PDF (none started in ${Math.round(look.graceMs / 1000)} s after Reliance's schedule page loaded) and Reliance's schedule page opened instead`,
+    };
+  }
   const got = await waitForDownloadedPdf({
     dir: downloadDir,
     before,
     // a short wait: on the live portal this link opens the schedule page (no download); View Policy is the way that downloads
-    timeoutMs: timing.linkWaitMs,
+    timeoutMs: Math.max(0, linkBudget - (now() - linkStarted)),
     pollMs: timing.pdfPollMs,
     stableMs: timing.pdfStableMs,
     now,
@@ -1845,6 +1894,7 @@ module.exports = {
   waitForDownloadedPdf,
   clickOnce,
   pdfFromScheduleLink,
+  scheduleLinkLook, // tests (speed round 4)
   pdfFromViewPolicy,
   payWithCdtAndIssue,
 };
