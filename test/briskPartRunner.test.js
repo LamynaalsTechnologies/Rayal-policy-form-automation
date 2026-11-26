@@ -219,3 +219,14 @@ test("the number could not be saved (DB error) -> the run still finishes and rep
   assert.equal(r.success, true);
   assert.equal(r.certificateNo, "CERT-1");
 });
+
+test("the server cannot say yet (made on the Brisk page right now): fails with the SERVER's words, nothing downloaded or written (2026-11-26)", async () => {
+  const words = "A Brisk certificate for this policy is being made right now. Please try again in a few minutes";
+  const brisk = fakeBrisk({ created: { success: false, unknown: true, message: words } });
+  const policies = fakePolicies({});
+  const r = await runBriskPart(data(), { policies, policyId: "p1", brisk, ...quiet });
+  assert.equal(r.success, false);
+  assert.equal(r.error, words);
+  assert.equal(brisk.calls.download, 0);
+  assert.equal(policies.state.updates.length, 0, "no number written");
+});
