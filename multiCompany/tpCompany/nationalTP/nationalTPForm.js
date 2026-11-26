@@ -3327,6 +3327,8 @@ async function fillNationalForm(
 
     await driver.sleep(1000);
 
+    // What the portal answered Create Customer with (the Locality look below uses it - speed round 4).
+    let createCustomerAnswer = null;
     // === CLICK CREATE CUSTOMER BUTTON AFTER FORM FILL ===
     console.log("Clicking Create Customer button after filling form...");
     try {
@@ -3392,6 +3394,7 @@ async function fillNationalForm(
         ],
         20000
       );
+      createCustomerAnswer = createCustomerResponse;
       if (createCustomerResponse) {
         console.log(
           `Create Customer responded with: ${createCustomerResponse.locator.toString()}`
@@ -3412,7 +3415,9 @@ async function fillNationalForm(
 
       // The race above already waited for the portal's response, so this only
       // needs to confirm which one we got.
-      const localityInput = await driver.wait(until.elementLocated(localityNameField), 5000);
+      // Speed round 4: when the portal answered with its alert popup, the field is looked for once (not another 5 s).
+      const answeredWithAlert = !!(createCustomerAnswer && /alert_btn_data_01/.test(String(createCustomerAnswer.locator)));
+      const localityInput = await driver.wait(until.elementLocated(localityNameField), answeredWithAlert ? 1 : 5000);
 
       // If we found it, try to interact
       if (await localityInput.isDisplayed()) {
@@ -4837,7 +4842,7 @@ async function fillNationalForm(
       console.log(`[${jobId}] Checkbox result:`, checkboxResult);
 
       if (checkboxResult && checkboxResult.found) {
-        await driver.sleep(500);
+        await driver.sleep(150); // old 500 - the box was set by the script above, in the page (speed round 4)
 
         // Double-check and force if still not checked
         if (!checkboxResult.nowChecked) {
@@ -4863,7 +4868,7 @@ async function fillNationalForm(
             }
           `);
 
-          await driver.sleep(500);
+          await driver.sleep(150); // old 500 (speed round 4)
         }
 
         // Final verification with Selenium
@@ -4906,16 +4911,14 @@ async function fillNationalForm(
         console.log(`[${jobId}] ⚠️ Checkbox not found`);
       }
 
-      await driver.sleep(500);
+      await driver.sleep(150); // old 500 (speed round 4)
 
     } catch (e) {
       if (isAutomationStop(e)) throw e;
       console.log(`[${jobId}] Declaration checkbox handling error:`, e.message);
     }
 
-    await driver.sleep(500);
-
-    await driver.sleep(500);
+    await driver.sleep(150); // old 500 + 500 (speed round 4)
 
 
     // [TP] 4: no "Handle Discount/Percentage" here either — see the quick-quote step above.

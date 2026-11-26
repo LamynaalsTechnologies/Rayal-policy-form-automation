@@ -178,6 +178,53 @@ list 761 -> 514 ms, a typed field ~310 -> ~165 ms. Value / option reads old-vs-n
 nested spans, display:none stale value, hidden panel). `test/kshemaFieldPace.test.js` (9, fake clock); 10 of 10
 deliberate breaks caught; full suite 1890 of 1907 (16 skipped, 1 = the old captcha PNGs).
 
+### Speed fixes, round 4 (2026-11-26): fixed pauses end when the page is ready - every insurer, nothing else changed
+Measured first (server run history, 45 days): only KSHEMA (~245 runs) and Reliance full motor (~40) really run. After
+round 3 a KSHEMA policy was proposal 116 s + KYC 42 s + payment 39 s; Reliance 120 + 46 + 82 s. About half of every run
+was OUR fixed pauses (`driver.sleep(2000)` after a click, "wait a bit for the page"), most of them pure margin.
+**The rule for every change:** a pause becomes "until the page shows the NEXT state, or the old pause runs out" - never
+longer than before; when the sign never shows, the run waits the old pause and carries on exactly as before.
+- `lib/settle.js` `untilReady` (polls with `driver.sleep`, so Hold / stuck-step watch / `[timing]` see it). **It never reads
+  past an open `alert()`**: Chrome closes an alert on any page read ("dismiss and notify"), so each poll first asks "is an
+  alert open?" without touching it and stops waiting - the flow's next step meets the alert exactly as before.
+- `lib/sharedDb.js`: the forms' saves (stages, KYC notes, links, wallet notes, files - 19 places) borrow the server's
+  already-open mongoose connection instead of a new `mongodb+srv` connect each time (DNS + TLS + login, 0.2-0.6 s each;
+  ~17 per Reliance wallet policy). Only the line that made the client changed; a test's fake class, another address or a
+  closed server connection = the old new-client way.
+- **KSHEMA** (`kshema/kshemaSettle.js`, both flows): the KYC watch after Confirm & Verify ends early on KSHEMA's own
+  "KYC Verified" page (`assurehub.kshema.co/kyc/ack?status=success`, seen in the run videos), at least 5 s after it AND
+  once no tab is left on assurehub (its 10 s count-down sends the browser back to KSHEMA, which moves the proposal to
+  Payment) - the owner's choice; no such page = the old 30 s, and a refusal is still caught at any moment. Login boxes,
+  quote screen (Customer Category), Other Details step, nominee row, Save and Finalize loader, KYC tab loaded, Confirm &
+  Verify button, payment page loaded: each pause ends on its sign. The 300 ms after a lookup field ends when Angular's
+  testability says twice that nothing is pending (trusted only after the page has said "busy" once in the run; no signal =
+  the old 300 ms). Looks every 150 ms (fields) / 100 ms (options) instead of 300 / 200; radio / checkbox / slider read as
+  soon as they show the state (a miss still decided at 300 ms); wallet issue loops 1 s -> 0.5 s; PDF steady 1.5 -> 0.5 s.
+  Kept: the 2 s before the KYC watch (the KYC page's own "Complete your KYC" heading is a refusal marker), the CD card's 1 s.
+- **Reliance** (`reliance/relianceSettle.js`; the OD/TP copy regenerated, [MC] 3 / 5 / 14 anchors + the generator test
+  updated; `multiCompany/common/reliance/fullCompanyLogin.js` popup block mirrored): "portal idle" = jQuery.active 0 and
+  no visible Kendo loading mask for a short quiet moment (relianceCoverSettle's own read). The schedule-link PDF look
+  ends 2 s after the schedule page loaded with no download started (it never downloads on live; was 21.5 s every wallet
+  policy); login popup look ends when the Motors menu is up and the page idle 1.5 s (was 2 + 5 s); Validate Customer's
+  dialog look ends when the dialog shows or the page answered (was 3 s + 3 s); Pending Quotes, tick, TP declaration, Pay,
+  PROCEED (KYC tab left its page and stayed 1 s), View Policy (address), OVD, upload areas, Calculate Premium, Save,
+  product, Form 60, State, manufacturing date (the page script now marks when its month step ran), PA question, Helmet,
+  discount: each ends on its sign. Removed: debug-only reads and screenshots written to the server's own `./screenshots`
+  folder (never uploaded). `lib/realSelect.js` pauses shorter (the real hover / click / option click / read-back / blur
+  kept). Unchanged: Get Coverage firing, the CDT pick / amount / Add (+ its 2 s), Pay and Submit pressed once.
+- **National** (both copies): Locality looked for once when Create Customer was answered with the alert (was 5 s); the
+  0.5 s pauses after the declaration box was set by script -> 0.15 s. The Calculate Premium -> Send Link pauses are NOT
+  changed (the code's own note: they are known-good; a waiting version once left a payment popup open). **United India**:
+  only the shared connection (the 2 s quiet window, the video pause and the 3 s looks are the owner's rules).
+- Chrome: `--disable-renderer-backgrounding` (+ the two anti-throttling flags) on the per-job builders.
+Checked: `test/speedRound4.test.js`, `test/kshemaSpeedRound4.test.js` (fake clocks); real headless Chrome replicas behind
+a local proxy 15/15 (alert left open, idle / stuck / mask, popup / no popup / busy, dialog yes / no, KSHEMA KYC with real
+tabs: verified + back after 3 s -> 5.3 s, after 8 s -> 8.5 s, "No record found" caught at once; schedule link 2.1 s);
+shared connection against a real local mongod; 19 of 20 deliberate breaks caught (the 20th is an equivalent change);
+full suite 1919 of 1936 (16 skipped, 1 = the old captcha PNGs). Deployed `07c0f26` 2026-11-26 14:3x IST (KSHEMA, Reliance).
+Next (owner agreed, only after the live runs look clean): KSHEMA faster typing (all but the last character inserted at
+once, the last one typed, the existing read-back decides, the old typing on any difference).
+
 ---
 
 ## 2. The switches (`.env`)
