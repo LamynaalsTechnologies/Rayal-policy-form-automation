@@ -186,18 +186,19 @@ test("the TP part of a two-insurer job is not refused as a routing conflict, and
 
 const brisk = (nominee = {}) => ({ paCover: true, paCoverCompany: "Brisk", settings: { isMultipleCompany: true }, nomineeName: "RAMA", nomineeGender: "male", nomineeRelation: "son", ...nominee });
 
-test("Brisk takes the nominee's name, gender and relation exactly (two insurers / TP only): each missing or unknown one is one plain sentence", () => {
+test("the nominee Brisk gets is worked out by the one rule (lib/briskNominee.js); only what cannot be worked out is one plain sentence", () => {
   assert.equal(briskNomineeProblem(brisk()), "");
-  assert.equal(briskNomineeProblem(brisk({ nomineeRelation: "Husband", nomineeGender: "FEMALE" })), "", "case does not matter");
-  // as the policy stores them (its model uppercases the nominee fields) and the job carries them
+  assert.equal(briskNomineeProblem(brisk({ nomineeRelation: "Husband", nomineeGender: "FEMALE" })), "", "the relation decides; case does not matter");
   assert.equal(briskNomineeProblem(brisk({ nomineeName: "PRIYA", nomineeGender: "FEMALE", nomineeRelation: "WIFE" })), "");
+  assert.equal(briskNomineeProblem(brisk({ nomineeGender: "", nomineeRelation: "son" })), "", "Son means Male");
+  assert.equal(briskNomineeProblem(brisk({ nomineeRelation: "spouse", nomineeGender: "male" })), "", "a Spouse by the nominee's gender");
+  assert.equal(briskNomineeProblem(brisk({ nomineeRelation: "spouse", nomineeGender: "", gender: "female" })), "", "or by the customer's");
   for (const [nominee, words] of [
-    [{ nomineeName: " " }, /nominee's name is missing/],
-    [{ nomineeGender: "" }, /nominee's gender is missing/],
-    [{ nomineeGender: "other" }, /gender "other" is not one Brisk takes \(Male or Female\)/],
-    [{ nomineeRelation: "" }, /nominee's relation is missing/],
-    [{ nomineeRelation: "spouse" }, /relation "spouse" is not one Brisk takes \(Father, Mother, Wife, Husband, Sister, Son, Daughter, Brother\)/],
-    [{ nomineeRelation: "self" }, /relation "self" is not one Brisk takes/],
+    [{ nomineeName: " " }, /the policy has no nominee name/],
+    [{ nomineeRelation: "" }, /the policy has no nominee relation/],
+    [{ nomineeRelation: "self" }, /Brisk has no relation like "self"/],
+    [{ nomineeRelation: "Common Law" }, /Brisk has no relation like "Common Law"/],
+    [{ nomineeRelation: "spouse", nomineeGender: "", gender: "" }, /the nominee's or the customer's gender is needed to tell Husband from Wife/],
   ]) {
     const said = briskNomineeProblem(brisk(nominee));
     assert.match(said, words);
@@ -207,10 +208,12 @@ test("Brisk takes the nominee's name, gender and relation exactly (two insurers 
   }
 });
 
-test("TP-only counts like two insurers; a single-company policy keeps the older mapping (synonyms, 'Son' when unknown)", () => {
-  assert.match(briskNomineeProblem({ coverage: "tp", paCover: true, nomineeName: "A", nomineeGender: "", nomineeRelation: "son" }), /gender is missing/);
-  assert.equal(briskNomineeProblem({ coverage: "both", settings: { isMultipleCompany: false }, nomineeName: "", nomineeGender: "", nomineeRelation: "spouse" }), "");
-  assert.equal(briskNomineeProblem({}), "");
+test("the same rule for every policy (owner, 2026-11-28): two insurers, TP only and a single company alike", () => {
+  assert.match(briskNomineeProblem({ coverage: "tp", paCover: true, nomineeName: "A", nomineeRelation: "Common Law" }), /no relation like/);
+  assert.match(briskNomineeProblem({ coverage: "both", settings: { isMultipleCompany: false }, nomineeName: "A", nomineeRelation: "Common Law" }), /no relation like/);
+  assert.equal(briskNomineeProblem({ coverage: "both", settings: { isMultipleCompany: false }, nomineeName: "A", nomineeRelation: "spouse", gender: "male" }), "");
+  // the form's Brisk Nominee (a National policy) wins over the National nominee above it
+  assert.equal(briskNomineeProblem({ nomineeName: "A", nomineeRelation: "Common Law", briskNomineeName: "B", briskNomineeGender: "female", briskNomineeRelation: "mother" }), "");
 });
 
 /** The fakes of briskPartRunner.test.js: what was bought. */
@@ -228,13 +231,13 @@ const fakeBrisk = () => {
 const quiet = { log() {}, warn() {} };
 
 test("the Brisk part does NOT buy with a nominee Brisk cannot take (nothing bought, a plain failure); with a good nominee it buys once", async () => {
-  const job = twoInsurerJob({ tp: "KSHEMA", pa: "Brisk", nominee: { nomineeGender: "", nomineeRelation: "wife" } });
+  const job = twoInsurerJob({ tp: "KSHEMA", pa: "Brisk", nominee: { nomineeGender: "", nomineeRelation: "self" } });
   const bad = fakeBrisk();
   const r = await runBriskPart({ ...dataOf(job, "pa"), _jobIdentifier: "j1" }, { policies: fakePolicies(), policyId: "policy1", brisk: bad, ...quiet });
   assert.equal(r.success, false);
   assert.equal(r.briskFailed, true);
   assert.equal(r.certificateNo, undefined, "nothing exists at Brisk");
-  assert.match(r.error, /^Brisk PA: the nominee's gender is missing, so no Brisk certificate was bought\./);
+  assert.match(r.error, /^Brisk PA: Brisk has no relation like "self", so no Brisk certificate was bought\./);
   assert.equal(bad.calls.create, 0, "no money moved");
 
   const good = fakeBrisk();
@@ -247,7 +250,9 @@ test("the nominee's own gender reaches the Brisk step: the form data copies it a
   const server = fs.readFileSync(require.resolve("../server.js"), "utf8");
   assert.match(server, /nomineeGender: data\?\.nomineeGender/, "server.js buildFormDataFromPolicy copies nomineeGender");
   const certificate = fs.readFileSync(require.resolve("../briskCertificate.js"), "utf8");
-  assert.match(certificate, /NomineeGender: toBriskGender\(data\.nomineeGender \|\| data\.gender\)/);
+  // 2026-11-28: worked out by lib/briskNominee.js from the nominee's own gender (a Spouse may fall back to the customer's)
+  assert.match(certificate, /NomineeGender: toBriskGender\(nominee\.gender\)/);
+  assert.match(certificate, /const nominee = briskNomineeOf\(data\)/);
 });
 
 /* ------------------------------------------------- the run-time routing guard ------------------------------------------------- */

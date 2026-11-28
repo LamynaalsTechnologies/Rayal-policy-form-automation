@@ -54,7 +54,8 @@ function fakeBrisk(over = {}) {
   };
 }
 
-const data = (extra = {}) => ({ paCover: true, paCoverCompany: "Brisk", _jobIdentifier: "j1", ...extra });
+// a Brisk-PA policy always has a nominee (the form requires one); 2026-11-28 the Brisk step checks it for every policy
+const data = (extra = {}) => ({ paCover: true, paCoverCompany: "Brisk", nomineeName: "RAMA", nomineeRelation: "son", _jobIdentifier: "j1", ...extra });
 const quiet = { log() {}, warn() {} };
 
 test("a certificate already on the policy -> completes WITHOUT buying or asking for the PDF", async () => {

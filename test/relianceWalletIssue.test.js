@@ -462,6 +462,55 @@ test("store.savePdf: policyFile when empty, mergedPolicyPdf only when empty, an 
   assert.match(r3.warnings.join(" "), /policy record was not found/);
 });
 
+// 2026-11-27 (owner, OP911217797660): a Brisk certificate bought before the insurer's PDF sat in the Policy List file and
+// the policy PDF was "kept-other". The insurer's PDF now replaces a Brisk certificate there; any other file is kept.
+const BRISK_FILE = { fileName: "OP911217797660_brisk_certificate.pdf", key: "BriskCertificates/OP911217797660_brisk_certificate.pdf", location: "https://b/BriskCertificates/x.pdf" };
+const POLICY_PDF = { fileName: "IP1.pdf", key: "Policy/26112026-BGB7TCLED/IP1.pdf", location: "https://b/Policy/IP1.pdf" };
+const withPolicyFile = (policyFile, onlinePolicy = {}) =>
+  seedPolicy({ onlinePolicy, policy: [{ _id: "pol1", isOnlinePolicy: true, clientId: "client1", policyNumber: NUMBER, policyFile }] });
+
+test("store.savePdf: a Brisk certificate in the Policy List file is replaced by the policy PDF, only while it is still that certificate", async () => {
+  const db = makeMongo(withPolicyFile(BRISK_FILE));
+  const r = await issue.createIssueStore({ MongoClient: db.Client, policyId: DOC_ID }).savePdf(POLICY_PDF, "pol1");
+  assert.equal(r.policy, "replaced-brisk");
+  assert.equal(r.replacedKey, BRISK_FILE.key);
+  assert.deepEqual(r.warnings, [], "not a warning - the run is not 'completed with errors' for it");
+  assert.deepEqual(db.data.policy[0].policyFile, POLICY_PDF);
+  assert.deepEqual(db.data.onlinePolicy[0].mergedPolicyPdf, POLICY_PDF, "the online policy as before");
+  const write = db.writes.find((w) => w.name === "policy");
+  assert.equal(write.filter["policyFile.key"], BRISK_FILE.key, "the write is filtered on the certificate it replaces");
+
+  // another writer changed the file between the read and the write: nothing overwritten, said so
+  const holder = {};
+  const raced = makeMongo(withPolicyFile(BRISK_FILE), {
+    updateError: (name) => {
+      if (name === "policy") holder.db.data.policy[0].policyFile = { key: "Policy/by-hand.pdf" };
+    },
+  });
+  holder.db = raced;
+  const r2 = await issue.createIssueStore({ MongoClient: raced.Client, policyId: DOC_ID }).savePdf(POLICY_PDF, "pol1");
+  assert.equal(r2.policy, "not-saved");
+  assert.deepEqual(raced.data.policy[0].policyFile, { key: "Policy/by-hand.pdf" });
+  assert.match(r2.warnings.join(" "), /file changed while the PDF was being set/);
+
+  // the same PDF again: "already", untouched
+  const same = makeMongo(withPolicyFile(POLICY_PDF));
+  assert.equal((await issue.createIssueStore({ MongoClient: same.Client, policyId: DOC_ID }).savePdf(POLICY_PDF, "pol1")).policy, "already");
+  assert.equal(same.writes.filter((w) => w.name === "policy").length, 0);
+});
+
+test("store.policyFileKey: a Brisk certificate is not the policy's PDF (the recovery fetches it); any other file counts", async () => {
+  const key = async (policyFile) =>
+    issue.createIssueStore({ MongoClient: makeMongo(withPolicyFile(policyFile)).Client, policyId: DOC_ID }).policyFileKey("pol1");
+  assert.equal(await key(BRISK_FILE), "");
+  assert.equal(await key(POLICY_PDF), POLICY_PDF.key);
+  assert.equal(await key({ key: "MergedPolicies/OP1/IP1.pdf" }), "MergedPolicies/OP1/IP1.pdf");
+  assert.equal(await key({}), "");
+  assert.equal(issue.isBriskCertificateKey("BriskCertificates/TW26112600225735_brisk_certificate.pdf"), true);
+  assert.equal(issue.isBriskCertificateKey("Policy/BriskCertificates/x.pdf"), false, "only the folder at the start");
+  assert.equal(issue.isBriskCertificateKey(undefined), false);
+});
+
 /* -------------------------------------------------------------------------- */
 /* waitForDownloadedPdf                                                       */
 /* -------------------------------------------------------------------------- */

@@ -221,7 +221,8 @@ for (const [name, form] of Object.entries(FORMS)) {
 test("selectMatOption hands the list on after reading it and before matching, inside a try / catch", () => {
   const src = codeOf(read("fullPolicycompany", "kshema", "kshemaFields.js"));
   const fn = src.slice(src.indexOf("async function selectMatOption"));
-  const read1 = fn.indexOf("let seen = await readOptionTexts(options);");
+  // 2026-11-27: the list is read once it is drawn (readDrawnOptions) - still before the hook and the matching
+  const read1 = fn.indexOf("const drawn = await readDrawnOptions(driver, options, label, drawWaitMs);");
   const hook = fn.indexOf("await onOptionsRead(seen.filter(Boolean));");
   const match = fn.indexOf("if (fuzzy) {");
   assert.ok(read1 > 0 && hook > read1 && match > hook, `order read ${read1} < hook ${hook} < match ${match}`);

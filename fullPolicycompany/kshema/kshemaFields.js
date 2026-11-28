@@ -608,6 +608,57 @@ async function collectOptions(driver, timeoutMs) {
 }
 
 /**
+ * How long an open list whose choices ALL read blank is given to finish drawing them, and how often it is looked at.
+ *
+ * Why (2026-11-27, policy OP911217797660): KSHEMA's list panel fades in from opacity 0, and an option that is still
+ * see-through reads "" (selenium's own visibility rule - getText reads it blank too, checked in real Chrome). Since the
+ * speed rounds (2026-11-23) the list is read ~40 ms after the click, so on the slow server it was read mid-fade and the
+ * run stopped with "the portal offered: nothing" while the screenshot a moment later showed the list full. 207 KSHEMA
+ * runs before the speed rounds had none of these; 66 runs after had 18 (Pin code Locality, Product Type -> IDV,
+ * Customer Category, PA reason).
+ */
+const LIST_DRAW_WAIT_MS = 5000;
+const LIST_DRAW_LOOK_MS = 150;
+
+/**
+ * The texts of an open list's options, read only once the list is drawn.
+ *
+ * Any text readable on the first read = returned at once (the normal path: no extra call, no pause). Only when EVERY
+ * option reads blank: look again every LIST_DRAW_LOOK_MS - the options re-found (the list may be re-rendered) and read -
+ * until one has a text or `waitMs` has passed. Still blank then = returned blank (`blank: true`), and the caller fails
+ * as before, with a sentence that says the list could not be read.
+ *
+ * @returns {Promise<{options: Array, texts: string[], waitedMs: number, blank?: boolean}>}
+ */
+async function readDrawnOptions(driver, options, label, waitMs = LIST_DRAW_WAIT_MS) {
+  let texts = await readTextsAtOnce(driver, options);
+  if (!options || !options.length || texts.some(Boolean)) return { options, texts, waitedMs: 0 };
+
+  const started = Date.now();
+  log(`   … "${label}" list is open but its ${options.length} choice(s) are not drawn yet - waiting up to ${Math.round(waitMs / 1000)}s`);
+  while (Date.now() - started < waitMs) {
+    await driver.sleep(LIST_DRAW_LOOK_MS);
+    const again = await collectOptions(driver, 1000);
+    if (again.options.length) options = again.options;
+    texts = await readTextsAtOnce(driver, options);
+    if (texts.some(Boolean)) {
+      const waitedMs = Date.now() - started;
+      log(`   ✓ "${label}" list drawn after ${(waitedMs / 1000).toFixed(1)}s`);
+      return { options, texts, waitedMs };
+    }
+  }
+  return { options, texts, waitedMs: Date.now() - started, blank: true };
+}
+
+/** The operator sentence for a list that stayed blank (no colon - beautifyError keeps only what follows the last one). */
+function unreadableListReason(label, count, waitMs) {
+  return (
+    `the "${label}" list opened with ${count} choice${count === 1 ? "" : "s"} but their names could not be read ` +
+    `in ${Math.round(waitMs / 1000)} seconds (the list was still being drawn) - run the policy again`
+  );
+}
+
+/**
  * Set an Angular Material dropdown to a given option.
  *
  * @param {string[]} selectSelectors - how to find the <mat-select>, most
@@ -660,6 +711,7 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
     beforeClose = null,
     recover = null,
     onOptionsRead = null,
+    drawWaitMs = LIST_DRAW_WAIT_MS,
   } = opts;
 
   // Give the caller its one chance to photograph the open panel, then dismiss
@@ -779,10 +831,11 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
     };
   }
 
-  /** Read the text of whatever options are currently rendered (one browser call for the whole list). */
-  const readOptionTexts = (els) => readTextsAtOnce(driver, els);
-
-  let seen = await readOptionTexts(options);
+  // The texts of the options on show, read once the list is drawn (one browser call for the whole list; an all-blank
+  // list - still fading in - is looked at again for up to drawWaitMs, see readDrawnOptions).
+  const drawn = await readDrawnOptions(driver, options, label, drawWaitMs);
+  options = drawn.options;
+  let seen = drawn.texts;
 
   // The list the open panel shows is handed on once, BEFORE any matching, so it is known on a match and on a miss
   // (the Pin code Locality names go to the master). Whatever it does, the pick below goes on exactly as before.
@@ -818,8 +871,9 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
         if (searched) {
           const refreshed = await collectOptions(driver, FIELD_WAIT_MS);
           if (refreshed.options.length) {
-            options = refreshed.options;
-            seen = await readOptionTexts(options);
+            const again = await readDrawnOptions(driver, refreshed.options, label, drawWaitMs);
+            options = again.options;
+            seen = again.texts;
           } else {
             debug(`   · ${label}: the portal found nothing for "${candidate}"`);
             continue;
@@ -844,8 +898,9 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
       if (searched) {
         const refreshed = await collectOptions(driver, FIELD_WAIT_MS);
         if (refreshed.options.length) {
-          options = refreshed.options;
-          seen = await readOptionTexts(options);
+          const again = await readDrawnOptions(driver, refreshed.options, label, drawWaitMs);
+          options = again.options;
+          seen = again.texts;
         }
       }
     }
@@ -866,6 +921,10 @@ async function selectMatOption(driver, selectSelectors, optionText, label, opts 
 
   if (!target) {
     await closePanel("no-match");
+    // Choices on show but not one of them readable: the list never finished drawing - not a "no match".
+    if (seen.length && !seen.some(Boolean)) {
+      return { ok: false, value: current || null, reason: unreadableListReason(label, seen.length, drawWaitMs), listNotDrawn: true };
+    }
     return {
       ok: false,
       value: current || null,
@@ -954,7 +1013,7 @@ async function readBackChoice(driver, selectSelectors, fallbackElement, expected
  * @returns {Promise<{ok, value, reason, chose?}>}
  */
 async function selectOtherMatOption(driver, selectSelectors, opts = {}) {
-  const { avoid = "", label = "dropdown" } = opts;
+  const { avoid = "", label = "dropdown", drawWaitMs = LIST_DRAW_WAIT_MS } = opts;
 
   const found = await findVisible(driver, selectSelectors);
   if (!found.element) {
@@ -968,7 +1027,9 @@ async function selectOtherMatOption(driver, selectSelectors, opts = {}) {
     return { ok: false, value: current || null, reason: `the "${label}" dropdown could not be opened` };
   }
 
-  const { options, panelOpened } = await collectOptions(driver, FIELD_WAIT_MS);
+  const collected = await collectOptions(driver, FIELD_WAIT_MS);
+  const { panelOpened } = collected;
+  let options = collected.options;
   if (!options.length) {
     await closeOverlay(driver);
     return {
@@ -980,7 +1041,14 @@ async function selectOtherMatOption(driver, selectSelectors, opts = {}) {
     };
   }
 
-  const texts = await readTextsAtOnce(driver, options);
+  // Read once the list is drawn (an all-blank list - still fading in - is looked at again, see readDrawnOptions).
+  const drawn = await readDrawnOptions(driver, options, label, drawWaitMs);
+  options = drawn.options;
+  const texts = drawn.texts;
+  if (drawn.blank) {
+    await closeOverlay(driver);
+    return { ok: false, value: current || null, reason: unreadableListReason(label, texts.length, drawWaitMs), listNotDrawn: true };
+  }
 
   const index = pickOtherOption(texts, avoid);
   if (index < 0) {
@@ -1666,6 +1734,9 @@ module.exports = {
   collectOptions,
   searchInPanel,
   readTextsAtOnce,
+  readDrawnOptions,
+  unreadableListReason,
+  LIST_DRAW_WAIT_MS,
   // tests (test/kshemaFieldPace.test.js)
   _readBackChoice: readBackChoice,
   _waitForFilteredList: waitForFilteredList,

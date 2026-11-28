@@ -225,6 +225,55 @@ full suite 1919 of 1936 (16 skipped, 1 = the old captcha PNGs). Deployed `07c0f2
 Next (owner agreed, only after the live runs look clean): KSHEMA faster typing (all but the last character inserted at
 once, the last one typed, the existing read-back decides, the old typing on any difference).
 
+### Fix after the speed rounds (2026-11-27): a KSHEMA dropdown was read before its list was drawn
+**What the owner saw** (policy OP911217797660, the first Brisk + KSHEMA bundled policy, 2026-11-26): the same policy
+stopped at different places with nothing wrong in it - "Reason for unselecting PA Cover ... (the portal offered:
+nothing)", "Product Type ... offered: nothing" then "the Insured Declared Value box was not on the page". The failure
+screenshots (taken a moment later, the list still open) show the lists full: "No Valid and Effective DL" and
+"Two Wheeler-Bundled" were there.
+
+**Why:** KSHEMA's dropdown panel fades in from opacity 0, and a see-through option reads as "" (selenium's own
+visibility rule; `getText` reads it blank too - checked in real Chrome). Before the speed rounds the code was slow
+enough that the fade had always finished; rounds 1-3 read the list in one call ~40 ms after the click, so on the
+slower server the texts were read mid-fade. Live numbers (read only): 207 KSHEMA runs before the speed rounds had 0 of
+these stops; the 66 runs since had 18, all this one cause (Pin code Locality 5, Product Type -> IDV 9, Customer Category
+2, PA reason 2). Not a Brisk problem: a Brisk policy only has one more dropdown (the PA reason), so it hit it more often.
+
+**The fix** (`fullPolicycompany/kshema/kshemaFields.js`, used by the full flow and the TP copy alike):
+`readDrawnOptions` reads the open list once; any readable text = carry on at once (the normal path is unchanged - no
+extra call, no pause). Only when EVERY option reads blank: one log line (`… "<label>" list is open but its N choice(s)
+are not drawn yet - waiting up to 5s`), then every 150 ms the options are found again and read, up to 5 s; drawn = `✓
+"<label>" list drawn after 0.3s` and the pick goes on exactly as before. Used for `selectMatOption` (first read and
+both search-box reads) and `selectOtherMatOption` (the Product Type switch-away of the IDV recovery). Still blank after
+5 s: `the "<label>" list opened with N choices but their names could not be read in 5 seconds (the list was still being
+drawn) - run the policy again` instead of "the portal offered: nothing". A real no-match keeps its old message.
+Real Chrome replica (old vs new `selectMatOption`): a 150 ms fade-in - old fails "offered: nothing", new picks after
+0.2 s; a fade that starts after 800 ms - old fails, new picks after 1.0 s; no fade - both pick in ~300 ms.
+Tests `test/kshemaListDrawn.test.js` (11); `test/pincodeLocalitySave.test.js` order check moved to the new read line;
+11 of 11 deliberate breaks caught (in a copy). Not changed: the financier list (it already waits for a settled list),
+the hand-run collectors, every money step, every other wait.
+
+**Also (same day): the insurer's policy PDF wins over a Brisk certificate in the Policy List.** On a wallet policy with
+Brisk PA the certificate is bought before the insurer issues the policy, and `briskCertificate.js` put it into the empty
+Policy List file; the insurer's PDF then found the file taken ("kept-other", run = completed with errors, the Policy List
+showed the certificate). Now `relianceWalletIssue.js` (store shared by `kshemaWalletIssue.js`) replaces a
+`BriskCertificates/...` file with the policy PDF (filtered on that same file, so nothing a person set meanwhile is
+overwritten; result `replaced-brisk`, no warning); any other file stays as before. `policyFileKey` no longer counts a Brisk
+certificate as the policy's PDF, so the recovery (KSHEMA and Reliance) fetches the real one. Old rows are not changed.
+Tests: `relianceWalletIssue.test.js` +2, `kshemaWalletIssue.test.js` +1; 7 of 7 deliberate breaks caught.
+Full suite: 1933 pass, 16 skipped, 1 fail = the old `reliance_captcha_*.png` files (as before). Not run live yet.
+
+### The nominee Brisk gets (2026-11-28)
+The automation's own Brisk call (`briskCertificate.js`, used when `BRISK_V2_AUTOMATION_ENABLED` is not `true`; with it on, the
+server decides - backend README §50) sent an empty relation as "Son", every Spouse as "Wife", the customer's gender as the
+nominee's and an empty name as "FERNANDO". Now it uses `lib/briskNominee.js` (the same rule as the server and the Online Policy
+form): the policy's saved Brisk Nominee (`briskNominee*` in the job data - the form asks it with a National leg), else the
+policy's nominee worked out (a Spouse = Husband / Wife by the nominee's own gender, else by the customer's; the gender the
+relation means). The Brisk part's guard (`lib/briskPartRunner.js briskNomineeProblem`) uses the same rule for every policy (it
+used to demand an exact Brisk gender + relation on two insurers / TP only, and skipped a single company). Not worked out = stopped before any wallet check or Brisk
+call: "The Brisk nominee could not be worked out (...). Edit the policy and choose the Brisk Nominee". Tests
+`test/briskNominee.test.js` (4). Not run live.
+
 ---
 
 ## 2. The switches (`.env`)

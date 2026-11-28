@@ -521,6 +521,18 @@ async function checkSubmitGate(data = {}, jobId = "", { MongoClient } = {}) {
  * The saves of the issue step, over the raw driver (like saveKycUrls / saveProcessLinks). Each call opens and closes its
  * own connection; each returns what happened instead of throwing, except where noted.
  */
+/**
+ * A Brisk PA certificate's file - the automation (briskCertificate.js) and the backend (briskV2Service.js) both keep them
+ * under this folder. It is not the policy's own PDF.
+ *
+ * 2026-11-27 (owner, policy OP911217797660): on a wallet policy with Brisk PA the certificate is bought before the insurer
+ * issues the policy, and briskCertificate.js puts it into the EMPTY Policy List file. The insurer's PDF then found the file
+ * taken ("kept-other", run = completed with errors) and the Policy List showed the certificate instead of the policy.
+ * Now the insurer's policy PDF replaces a Brisk certificate there; any other file stays as it is.
+ */
+const BRISK_CERTIFICATE_FOLDER = "BriskCertificates/";
+const isBriskCertificateKey = (key) => String(key || "").startsWith(BRISK_CERTIFICATE_FOLDER);
+
 function createIssueStore({ MongoClient, field = "walletPayment", policyId } = {}) {
   return {
     field,
@@ -570,7 +582,9 @@ function createIssueStore({ MongoClient, field = "walletPayment", policyId } = {
       try {
         return await withDb(MongoClient, async ({ policy }) => {
           const doc = await policy.findOne({ _id: policyDocId }, { projection: { policyFile: 1 } });
-          return doc && doc.policyFile && doc.policyFile.key ? String(doc.policyFile.key) : "";
+          const key = doc && doc.policyFile && doc.policyFile.key ? String(doc.policyFile.key) : "";
+          // a Brisk certificate there is not the policy's own PDF: the recovery fetches and stores the PDF (2026-11-27)
+          return isBriskCertificateKey(key) ? "" : key;
         });
       } catch (e) {
         return "";
@@ -666,7 +680,8 @@ function createIssueStore({ MongoClient, field = "walletPayment", policyId } = {
     },
 
     /**
-     * The stored PDF onto the policy record (`policyFile`, when empty) and the online policy (`mergedPolicyPdf`, when
+     * The stored PDF onto the policy record (`policyFile`, when empty or when it holds only a Brisk certificate -
+     * "replaced-brisk") and the online policy (`mergedPolicyPdf`, when
      * empty — the merge step replaces it when it runs). Returns {policy, onlinePolicy, warnings[]}; never throws.
      */
     async savePdf({ fileName, key, location }, policyDocId) {
@@ -677,7 +692,16 @@ function createIssueStore({ MongoClient, field = "walletPayment", policyId } = {
         await withDb(MongoClient, async ({ onlinePolicy, policy }) => {
           if (policyDocId) {
             const doc = await policy.findOne({ _id: policyDocId }, { projection: { policyFile: 1 } });
-            if (doc && doc.policyFile && doc.policyFile.key) {
+            if (doc && doc.policyFile && doc.policyFile.key && doc.policyFile.key !== key && isBriskCertificateKey(doc.policyFile.key)) {
+              // the Brisk certificate gives way to the policy's own PDF - only if it is still that same certificate
+              const r = await policy.updateOne(
+                { _id: policyDocId, "policyFile.key": doc.policyFile.key },
+                { $set: { policyFile: file, updatedAt: new Date() } }
+              );
+              out.policy = r.matchedCount === 1 ? "replaced-brisk" : "not-saved";
+              if (out.policy === "replaced-brisk") out.replacedKey = doc.policyFile.key;
+              else warnings.push("the policy record's file changed while the PDF was being set, so the downloaded PDF was not set as its policyFile");
+            } else if (doc && doc.policyFile && doc.policyFile.key) {
               out.policy = doc.policyFile.key === key ? "already" : "kept-other";
               if (out.policy === "kept-other") warnings.push("the policy record already has a policy file, so the downloaded PDF was not set as its policyFile");
             } else {
@@ -1859,6 +1883,7 @@ const recoveryWarning = (number, warnings) =>
 
 module.exports = {
   VIEW_POLICY_PATH,
+  isBriskCertificateKey,
   createPolicyPdfUploader,
   decideAfterGate,
   issuedNumberOf,

@@ -575,6 +575,65 @@ test("recovery: a page that shows another number than the note saves nothing; on
   assert.equal(noPage.code, "RECOVER_NO_PAGE");
 });
 
+// 2026-11-27 (owner, OP911217797660): on the live policy the Policy List file was the Brisk certificate (bought before the
+// KSHEMA payment). The recovery must not take that for the policy PDF: it fetches the PDF and the PDF replaces it.
+test("recovery: a Policy List file that is only a Brisk certificate is not the policy PDF - it is fetched and replaces it", async () => {
+  const realStore = require("../fullPolicycompany/reliance/relianceWalletIssue").createIssueStore;
+  const brisk = { fileName: "OP1_brisk_certificate.pdf", key: "BriskCertificates/OP1_brisk_certificate.pdf", location: "https://b/brisk.pdf" };
+  const data = { policy: [{ _id: "pd1", policyFile: { ...brisk } }], onlinePolicy: [{ _id: "op1" }] };
+  const at = (o, path) => path.split(".").reduce((v, k) => (v == null ? v : v[k]), o);
+  const matches = (d, f) => Object.entries(f).every(([k, v]) => String(at(d, k)) === String(v));
+  const collection = (name) => ({
+    async findOne(f) {
+      const hit = data[name].find((d) => matches(d, f));
+      return hit ? JSON.parse(JSON.stringify(hit)) : null;
+    },
+    async updateOne(f, u) {
+      const hit = data[name].find((d) => matches(d, f));
+      if (!hit) return { matchedCount: 0, modifiedCount: 0 };
+      Object.assign(hit, JSON.parse(JSON.stringify(u.$set || {})));
+      return { matchedCount: 1, modifiedCount: 1 };
+    },
+  });
+  class Client {
+    async connect() {}
+    db() {
+      return { collection };
+    }
+    async close() {}
+  }
+  const real = realStore({ MongoClient: Client, policyId: "op1" });
+  const w = world({ url: "https://motorinsurance.kshema.co/app/dashboard" });
+  const store = fakeStore(w.events, {});
+  store.policyFileKey = (id) => real.policyFileKey(id);
+  store.savePdf = (file, id) => real.savePdf(file, id);
+  const uploads = [];
+  const r = await quiet(() =>
+    wi.recoverKshemaIssue({
+      driver: w.driver,
+      data: DATA,
+      jobId: "job1",
+      marker: { state: "issued", policyPageUrl: POLICY_PAGE, policyNumber: NUMBER },
+      downloadDir: DIR,
+      deps: {
+        store,
+        fsImpl: w.fsImpl,
+        now: () => w.clock.t,
+        sleep: async (ms) => w.driver.sleep(ms),
+        policyFileNames: () => ({ fileName: `${NUMBER}.pdf`, key: `Policy/2611-XYZ/${NUMBER}.pdf` }),
+        uploadPolicyPdf: async (filePath, { key }) => {
+          uploads.push(key);
+          return { key, location: `https://bucket.example/${key}` };
+        },
+      },
+    })
+  );
+  assert.equal(r.ok, true, r.error);
+  assert.equal(uploads.length, 1, "the PDF was fetched - the certificate did not count as it");
+  assert.equal(data.policy[0].policyFile.key, `Policy/2611-XYZ/${NUMBER}.pdf`, "the Policy List file is now the policy PDF");
+  assert.equal(data.onlinePolicy[0].mergedPolicyPdf.key, `Policy/2611-XYZ/${NUMBER}.pdf`);
+});
+
 test("the stage refusals name the insurer that took the money - KSHEMA's note says KSHEMA, Reliance's (no insurer) Reliance", () => {
   const core = require("../lib/relianceStagesCore");
   const stages = { tp: { proposal: { status: "completed", link: "https://x.example/p" }, kyc: { status: "completed" }, payment: { status: "completed", mode: "wallet" } } };

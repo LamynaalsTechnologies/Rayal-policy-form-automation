@@ -324,6 +324,12 @@ async function createBriskCertificate(data) {
   const briskV2 = require("./lib/briskV2Automation");
   if (briskV2.isEnabled()) return briskV2.createViaBackend(data);
 
+  // The nominee Brisk gets (owner, 2026-11-28): worked out the server's way, or stopped here with what to do - before any
+  // wallet check or Brisk call, so nothing is bought with a guessed nominee.
+  const { briskNomineeOf, nomineeProblem } = require("./lib/briskNominee");
+  const nominee = briskNomineeOf(data);
+  if (!nominee.matched) throw new Error(nomineeProblem(nominee));
+
   // Translate the policy's vehicle make/model into the exact strings Brisk's
   // own catalogue uses, before building the payload.
   const briskVehicle = await resolveBriskVehicle(
@@ -391,9 +397,10 @@ async function createBriskCertificate(data) {
       // hardcoded to "Male"/passed through raw, so an UPPERCASED relation from
       // the policy form ("SON") reached Brisk unchanged.
       CustomerGender: toBriskGender(data.gender || data.customerGender),
-      NomineeName: data.nomineeName || "FERNANDO",
-      NomineeGender: toBriskGender(data.nomineeGender || data.gender),
-      Relation: toBriskRelation(data.nomineeRelation || data.relation),
+      // the Brisk nominee (lib/briskNominee.js): never the customer's gender, never a made-up name
+      NomineeName: nominee.name,
+      NomineeGender: toBriskGender(nominee.gender),
+      Relation: toBriskRelation(nominee.relation),
       // Resolved against Brisk's catalogue above — sending Reliance's own
       // spelling (e.g. "HERO MOTOCORP LTD") made Brisk fail with a bare 500.
       Make: briskVehicle.Make || data.vehicleMake || data.make || "DACUS",
